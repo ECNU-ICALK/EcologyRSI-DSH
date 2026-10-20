@@ -79,25 +79,40 @@ function agentOptionsFor(modelRoute) {
 }
 
 // Model metadata is a small, local-ish catalog read, not a generation call: a
-// route that cannot answer within this bound falls back to the declared default
-// effort rather than stalling role-host creation.
+// route that cannot answer within this bound preserves the already resolved
+// request options. Never infer support for a lower effort from absent metadata.
 const MODEL_INFO_TIMEOUT_MS = 10_000;
 
 async function roleRequestOptions(ctx, binding) {
   const options = agentOptionsFor(binding.model);
   if (!options.provider || typeof ctx.llm?.resolveModelInfo !== "function") return options;
-  const info = await ctx.llm.resolveModelInfo(
-    options.provider, options.model, AbortSignal.timeout(MODEL_INFO_TIMEOUT_MS),
-  );
+  const controller = new AbortController();
+  let timer, info;
+  try {
+    info = await Promise.race([
+      Promise.resolve().then(() => ctx.llm.resolveModelInfo(
+        options.provider, options.model, controller.signal,
+      )),
+      new Promise(resolve => {
+        timer = setTimeout(() => { controller.abort(); resolve(null); }, MODEL_INFO_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    // Catalog lookup is optional. Generation/tool/schema failures still follow
+    // their normal validation path; none are swallowed by this narrow fallback.
+    return options;
+  } finally { clearTimeout(timer); }
   const reasoning = info?.reasoning;
-  const efforts = new Set(reasoning?.efforts?.map((effort) => effort.id) || []);
+  const efforts = new Set((Array.isArray(reasoning?.efforts) ? reasoning.efforts : [])
+    .map(effort => effort?.id).filter(id => typeof id === "string" && id.length > 0));
   // Numerical sample work still uses the real Agent and its tools. Disable
   // optional deep thinking only when the route explicitly advertises it;
   // research/proposal work retains the declared default (or high reasoning).
   const sampleRole = ["sample-planner", "sample-critic"].includes(binding.role);
   const effort = sampleRole && efforts.has("off") ? "off"
     : binding.role === "generation-judge" && efforts.has("low") ? "low"
-      : reasoning?.defaultEffort || (efforts.has("high") ? "high" : undefined);
+      : efforts.has(reasoning?.defaultEffort) ? reasoning.defaultEffort
+        : efforts.has("high") ? "high" : undefined;
   return effort === undefined ? options : { ...options, reasoningEffort: effort };
 }
 

@@ -1241,6 +1241,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         canonical_state.formal_selection_for = state.formal_selection_for
         canonical_state.candidate_screening_events = ()
         canonical_state.formal_batch_evaluations = ()
+        canonical_state.holdout_rechecks = ()
         with patch.object(self.director, "state", return_value=canonical_state):
             with self.assertRaisesRegex(ValueError, "deterministic Host comparison"):
                 self.director.record_generation_comparison(self.run_id, invalid)
@@ -1248,6 +1249,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         exploration_state = Mock(wraps=state)
         exploration_state.candidate_screening_events = ()
         exploration_state.formal_batch_evaluations = ()
+        exploration_state.holdout_rechecks = ()
         exploration_state.formal_selection_for = lambda _generation: SimpleNamespace(
             payload={
                 "schema_version": "ecologyrsi-dsh.formal-selection-cohort/3",

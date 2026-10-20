@@ -95,7 +95,7 @@ def _complete_scoring_blocks(evaluation: Any) -> dict[str, tuple[int, int]] | No
 
 def paired_scoring_evidence_complete(champion: Any, challenger: Any) -> bool:
     """Require both frozen cohorts to have every scientific cell successfully scored."""
-    if champion.metrics.get("dataset_task") != challenger.metrics.get("dataset_task"):
+    if thaw_json(champion.metrics.get("dataset_task")) != thaw_json(challenger.metrics.get("dataset_task")):
         return False
     champion_days = _complete_scoring_blocks(champion)
     challenger_days = _complete_scoring_blocks(challenger)

@@ -149,7 +149,7 @@ def _arm_structured_envelope(
             "idempotency_key": identity["idempotency_key"],
         }
     )
-    service.allocate_child_reservation(
+    reserved = service.allocate_child_reservation(
         {
             "request_id": f"arm-{request_id_digest}",
             "run_id": identity["run_id"],
@@ -164,6 +164,10 @@ def _arm_structured_envelope(
             "idempotency_key": identity["idempotency_key"],
         }
     )
+    if identity["stage"] == "sample.plan":
+        identity["child_reservation_id"] = reserved["launch"]["reservation_id"]
+        frozen = dict(identity)
+        service._activation_attestor = lambda supplied, **_kwargs: supplied == frozen
     envelope.pop("deadline_unix_ms", None)
     envelope["admission_id"] = fence.admission_id
     return fence
@@ -322,6 +326,7 @@ class DshToolServiceTests(unittest.TestCase):
             return {"s1": {"predicted": 21.5, "metadata": {"model": "ridge"}}}
 
         with self.service.bind_prediction_tool(
+            identity_digests={"genome_digest": "a" * 64, "compiled_behavior_digest": "b" * 64, "phenotype_instance_digest": "c" * 64},
             run_id="run:tool-test",
             stage_attempt=2,
             idempotency_key="tool-idem-1",
@@ -908,6 +913,7 @@ class DshToolServiceTests(unittest.TestCase):
             ],
         }
         with self.service.bind_prediction_tool(
+            identity_digests={"genome_digest": "a" * 64, "compiled_behavior_digest": "b" * 64, "phenotype_instance_digest": "c" * 64},
             run_id="run:tool-test",
             stage_attempt=2,
             idempotency_key="tool-idem-1",
@@ -948,6 +954,7 @@ class DshToolServiceTests(unittest.TestCase):
         restarted = DshToolService(self.ledger)
         runtime = NeverCalledRuntime()
         with restarted.bind_prediction_tool(
+            identity_digests={"genome_digest": "a" * 64, "compiled_behavior_digest": "b" * 64, "phenotype_instance_digest": "c" * 64},
             run_id="run:tool-test",
             stage_attempt=2,
             idempotency_key="tool-idem-1",
@@ -2206,6 +2213,7 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         status, _ = self._request("wrong")
         self.assertEqual(status, 401)
         with self.server.dsh_tools.bind_prediction_tool(
+            identity_digests={"genome_digest": "a" * 64, "compiled_behavior_digest": "b" * 64, "phenotype_instance_digest": "c" * 64},
             run_id="run:tool-test",
             stage_attempt=2,
             idempotency_key="tool-idem-1",

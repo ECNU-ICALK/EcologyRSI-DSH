@@ -610,6 +610,65 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             ["policy-model", "judge-model"],
         )
 
+    def test_single_model_executes_both_policy_and_judge_roles(self) -> None:
+        # Recreate only this temporary Host with one real loopback route. Do
+        # not fake catalogue permissions or bypass the gateway's role checks.
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.close()
+        shared_id = "dsh-shared"
+        catalog = [{
+            "id": shared_id,
+            "roles": ["propose", "judge"],
+            "gateway_url": f"http://127.0.0.1:{self.model_server.server_address[1]}/v1",
+            "model": "deepseek-v4.1-flash-1017",
+            "api_key_env": "RUNTIME_POLICY_TOKEN",
+        }]
+        with patch.dict(os.environ, {"ECOLOGYRSI_DSH_MODELS_JSON": json.dumps(catalog)}):
+            self.server = EvolutionHTTPServer(("127.0.0.1", 0), self.db_path)
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+            self.base = f"http://127.0.0.1:{self.server.server_address[1]}/api"
+            self.model_server.responses.extend(  # type: ignore[attr-defined]
+                [
+                    {"parameters": {"alpha": 0.44, "window": 5, "water_threshold": 0.41},
+                     "rationale": "依据训练摘要提出有界候选。"},
+                    {"accepted": True, "guidance": "依据独立评审职责核对科学门禁。"},
+                ]
+            )
+            status, directory = self.request("/catalog")
+            self.assertEqual(status, 200, directory)
+            for key in ("dsh_models", "dsh_strategy_models", "dsh_review_models"):
+                self.assertEqual([item["id"] for item in directory[key]], [shared_id])
+            status, created = self.request("/runs", "POST", {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_id": "dsh_authenticated@1",
+                "evaluator_id": "toy_time_forward@1",
+                "policy_model_id": shared_id,
+                "judge_model_id": shared_id,
+                "slot": "bounded_residual_predictor",
+                "budget": {"max_generations": 1, "max_candidates": 1},
+                "auto_advance": 1,
+                "idempotency_key": "shared-model-two-roles",
+            })
+        self.assertEqual(status, 201, created)
+        projection = created["projection"]
+        self.assertEqual(projection["configuration"]["policy_model_id"], shared_id)
+        self.assertEqual(projection["configuration"]["judge_model_id"], shared_id)
+        self.assertEqual(projection["candidates"][0]["changes"]["alpha"], 0.44)
+        self.assertEqual(projection["rounds"][0]["stages"]["judge"], "completed")
+        requests = self.model_server.requests  # type: ignore[attr-defined]
+        self.assertEqual(len(requests), 2)
+        self.assertEqual([item["path"] for item in requests], ["/v1/chat/completions"] * 2)
+        self.assertEqual([item["authorization"] for item in requests], ["Bearer policy-secret"] * 2)
+        self.assertEqual([item["body"]["model"] for item in requests], ["deepseek-v4.1-flash-1017"] * 2)
+        role_payloads = [json.loads(item["body"]["messages"][1]["content"]) for item in requests]
+        self.assertEqual([item["operation"] for item in role_payloads], ["propose", "judge"])
+        self.assertIn("parameters", role_payloads[0]["response_contract"])
+        self.assertIn("accepted", role_payloads[1]["response_contract"])
+        self.assertEqual(self.model_server.responses, [])  # type: ignore[attr-defined]
+
     def test_run_creation_rejects_non_executable_directory_routes(self) -> None:
         current = {
             item["model_id"]: item for item in self.server.model_gateway.catalog()
@@ -707,9 +766,9 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 }
                 for preset_id in (
                     "ecology-coordinator-v6",
-                    "ecology-researcher-v15",
-                    "ecology-candidate-proposer-v6",
-                    "ecology-sample-planner-v12",
+                    "ecology-researcher-v17",
+                    "ecology-candidate-proposer-v9",
+                    "ecology-sample-planner-v14",
                     "ecology-sample-critic-v6",
                     "ecology-generation-judge-v10",
                 )
@@ -786,14 +845,11 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         "max_candidates": 4,
                     },
                     "optimization_schedule": {
-                        "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
-                        "screening_origin_count": 64,
-                        "finalist_count": 2,
-                        "formal_origin_count_per_finalist": 500,
-                        "local_batch_origin_count": 50,
-                        "max_local_edits_per_batch": 2,
-                        "selection_holdout_origin_count": 169,
-                        "local_evaluation_mode": "prequential",
+                        "schema_version": "ecologyrsi-dsh.joint-plugin-epoch-schedule/2",
+                        "screening_origin_count": 10, "finalist_count": 1,
+                        "formal_origin_count_per_finalist": 35, "local_batch_origin_count": 25,
+                        "max_local_edits_per_batch": 2, "selection_holdout_origin_count": 50,
+                        "local_evaluation_mode": "paired_champion_challenger",
                     },
                     "candidate_concurrency": 3,
                     "sample_concurrency": 128,
@@ -890,7 +946,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         self.assertEqual(strict_status, 201, strict_created)
         self.assertEqual(explicit_status, 201, explicit_created)
         self.assertEqual(
-            explicit_formal_status, 201, explicit_formal_created
+            explicit_formal_status, 400, explicit_formal_created
         )
         self.assertTrue(
             all(status == 400 for status, _payload in rejected_sampling_controls),
@@ -923,17 +979,20 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 "sample_operation_max_tokens"
             ],
             {
-                "sample.planner": 16384,
-                "sample.repair": 16384,
+                "sample.planner": 32768,
+                "sample.repair": 32768,
                 "sample.critic": 8192,
             },
         )
         explicit_configuration = explicit_created["projection"]["configuration"]
+        self.assertEqual(strict_created["projection"]["configuration"]["candidate_executability_policy"],
+                         "strategy_tool_input_contract@1")
+        self.assertIsNone(created["projection"]["configuration"]["candidate_executability_policy"])
         self.assertIsNone(explicit_configuration["samples_per_update"])
         self.assertEqual(explicit_configuration["sample_budget_class"], "selection_eligible")
         self.assertEqual(
             explicit_configuration["minimum_selection_samples_per_update"],
-            1_521,
+            360,
         )
         self.assertEqual(explicit_configuration["sample_concurrency"], 128)
         self.assertEqual(explicit_configuration["candidate_concurrency"], 3)

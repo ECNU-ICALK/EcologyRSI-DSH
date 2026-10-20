@@ -24,6 +24,7 @@ from urllib.error import HTTPError, URLError
 
 from ..core.errors import (
     DshNativeRuntimeUnavailableError,
+    DshSamplePlannerOutputBudgetError,
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
     dsh_native_runtime_evaluation_fatal,
@@ -2390,6 +2391,11 @@ class CollaborativeSampleExecutor:
             except SampleExecutionControlError:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate third-party planning tools
+                if getattr(self.adapter, "host_authored_batch_plan", False):
+                    # Native plans contain no remote model result. Preserve a
+                    # Host assembly fault for the run's pause/repair path;
+                    # do not manufacture a cohort of failed scientific rows.
+                    raise
                 final_failure = classify_sample_failure(exc)
                 if not final_failure[1] or attempt >= policy.plan_max_attempts:
                     return None, attempt, final_failure
@@ -2506,14 +2512,34 @@ class CollaborativeSampleExecutor:
             else nullcontext()
         )
         with admission as admission_outcome:
-            first_attempt_outcomes = self._prepare_first_attempt_batch(
-                bundle.rows,
-                context=context,
-                target_bounds=target_bounds,
-                algorithm_id=algorithm_id,
-                algorithm_version=algorithm_version,
-                plan=plan,
-            )
+            try:
+                first_attempt_outcomes = self._prepare_first_attempt_batch(
+                    bundle.rows,
+                    context=context,
+                    target_bounds=target_bounds,
+                    algorithm_id=algorithm_id,
+                    algorithm_version=algorithm_version,
+                    plan=plan,
+                )
+            except DshSamplePlannerOutputBudgetError:
+                if policy.max_attempts < 2:
+                    raise
+                # Spend one existing origin attempt on new corrective feedback,
+                # not a generation restart or a larger output/token allowance.
+                # A second exhaustion propagates from the retry path below;
+                # no missing Agent vector may become a synthetic scoring row.
+                first_attempt_outcomes = {
+                    request.sample_id: SamplePredictionOutcome(
+                        sample_id=request.sample_id,
+                        error=SampleExecutionAttemptError(
+                            "Planner output budget exhausted before submission.",
+                            failure_class="output_budget_exhausted",
+                            retryable=True,
+                            error_type="DshSamplePlannerOutputBudgetError",
+                        ),
+                    )
+                    for request in bundle.requests
+                }
             origin_outcomes = self._prepare_retry_attempt_waves(
                 bundle.rows,
                 context=context,
@@ -4299,7 +4325,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             # Why a capability failed, so a scored record says more than "failed".
             "error_detail",
             "behavior_signature",
-            "trigger_status", "effective_parameters_digest", "formula_status",
+            "trigger_status", "effective_parameters_digest", "formula_status", "program_digest", "calculation_digest", "candidate_model_consumed",
         }
     )
     required = (
@@ -4320,7 +4346,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                     f"sample response {kind} step {field_name} must be non-empty text"
                 )
             projected[field_name] = raw.strip()[:160]
-        for field_name in allowed - set(required) - {"confidence", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms"}:
+        for field_name in allowed - set(required) - {"confidence", "parameters", "used_as_evidence", "candidate_model_consumed", "tool_predicted", "elapsed_ms"}:
             if field_name not in item:
                 continue
             raw = item[field_name]
@@ -4342,6 +4368,10 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                 if type(item["used_as_evidence"]) is not bool:
                     raise SampleExecutionContractError("tool evidence flag must be boolean")
                 projected["used_as_evidence"] = item["used_as_evidence"]
+            if "candidate_model_consumed" in item:
+                if type(item["candidate_model_consumed"]) is not bool:
+                    raise SampleExecutionContractError("candidate model consumption flag must be boolean")
+                projected["candidate_model_consumed"] = item["candidate_model_consumed"]
             if "elapsed_ms" in item:
                 projected["elapsed_ms"] = _finite_float(item["elapsed_ms"], "tool elapsed milliseconds")
                 if projected["elapsed_ms"] < 0:

@@ -35,8 +35,8 @@ const commandsSource = read("assets/js/commands.js");
 // The parameter page is the public source of truth for the adaptive finalist
 // schedule. These defaults are complete forecast 个预测时点, never scoring cells.
 for (const [id, value] of [
-  ["formal-origin-count", "100"],
-  ["local-batch-origin-count", "10"],
+  ["formal-origin-count", "35"],
+  ["local-batch-origin-count", "25"],
   ["max-local-edits-per-batch", "2"],
   ["selection-holdout-origin-count", "50"],
 ]) {
@@ -1550,9 +1550,10 @@ const staleEvaluationProgressEvent = {
   },
 };
 modelSandbox.state.events = [staleEvaluationProgressEvent];
-assert.equal(modelSandbox.executionElapsedText(null, true), " · 本轮计时中");
+assert.equal(modelSandbox.executionElapsedText(null, true), " · 本次阶段计时中");
 assert.equal(modelSandbox.executionElapsedText(null, false), "");
-assert.equal(modelSandbox.executionElapsedText(2500, true), " · 本轮耗时 2.5 秒");
+assert.equal(modelSandbox.executionElapsedText(2500, true), " · 本次阶段耗时 2.5 秒");
+assert.equal(modelSandbox.executionElapsedText(2500, false), " · 本轮耗时 2.5 秒");
 const activeResearchStartedAt = new Date(Date.now() - 125000).toISOString();
 modelSandbox.state.events = [{type: "stage.recorded", occurred_at: activeResearchStartedAt, payload: {generation: 0, stage: "research", status: "started"}}];
 const activeResearchElapsed = modelSandbox.executionActiveStageElapsedMs({id: "run:active-research", generation: 0}, "research");
@@ -2152,6 +2153,34 @@ const legacyPausedQueueRun = {
 modelSandbox.renderExecutionMonitor(legacyPausedQueueRun);
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前阶段待提交 17"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("暂停快照排队 17"), false);
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("已暂停，未完成时点已保留"));
+assert.equal(monitorNodes["#execution-heartbeat"].textContent.includes("正在排空"), false);
+
+const pausedUnsubmittedCheckpoint = {
+  ...legacyPausedQueueRun,
+  execution_progress: { ...legacyPausedQueueRun.execution_progress, stage_progress: {
+    ...legacyPausedQueueRun.execution_progress.stage_progress,
+    in_flight_batches: undefined, in_flight_requests: undefined, queued_batches: undefined,
+    admission_active: 0, admission_waiting: 0, awaiting_settlement_batches: 0,
+    awaiting_submission_batches: 16,
+  } },
+};
+modelSandbox.renderExecutionMonitor(pausedUnsubmittedCheckpoint);
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("未完成时点已保留"));
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("未完成时点已保留"));
+assert.equal(monitorNodes["#execution-heartbeat"].textContent.includes("请求已排空"), false);
+assert.equal(monitorNodes["#execution-heartbeat"].textContent.includes("正在排空"), false);
+for (const evidence of [{ in_flight_requests: 1 }, { admission_active: 1 },
+  { awaiting_settlement_batches: 1 }, { active_repair_waves: 1 },
+  { queue_semantics: "provider_gate_snapshot", provider_queued_requests: 1 }]) {
+  const scoped = { ...pausedUnsubmittedCheckpoint, execution_progress: {
+    ...pausedUnsubmittedCheckpoint.execution_progress, stage_progress: {
+      ...pausedUnsubmittedCheckpoint.execution_progress.stage_progress, ...evidence,
+    },
+  } };
+  modelSandbox.renderExecutionMonitor(scoped);
+  assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("正在排空暂停前请求"));
+}
 
 const pausedDrainingRun = {
   ...legacyPausedQueueRun,
@@ -2584,6 +2613,9 @@ const queuedServerRun = modelSandbox.normalizeRun({
 assert.equal(modelSandbox.createStatusForRun(queuedServerRun, []).state, "queued");
 assert.match(modelSandbox.createStatusForRun(queuedServerRun, []).message, /后台将自动执行全部轮次/);
 assert.equal(modelSandbox.createStatusForRun(activelyExecutingRun, []).state, "background");
+assert.equal(modelSandbox.createStatusForRun(tokenPausedRun, []).state, "paused");
+assert.match(modelSandbox.createStatusForRun(tokenPausedRun, []).message, /已暂停/);
+assert.doesNotMatch(modelSandbox.createStatusForRun(tokenPausedRun, []).message, /正在自动执行/);
 modelSandbox.state.activeRun = waitingRun;
 modelSandbox.state.runs = [cancelledEmpty, cancelledWithEvidence, cancelledWithStageEvidence, waitingRun];
 assert.equal(modelSandbox.isCancelledEmptyRun(cancelledEmpty), true);
@@ -2648,13 +2680,13 @@ const insufficientSamplesRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
   rounds: 2, candidates_per_generation: 4, max_candidates: 8,
-  formal_origin_count: 500, local_batch_origin_count: 64,
+  experiment_mode: "comparison", formal_origin_count: 500, local_batch_origin_count: 64,
   max_local_edits_per_batch: 2, selection_holdout_origin_count: 169,
   fixed_seed: true, auto_advance: 0,
 });
 assert.equal(insufficientSamplesRun, null);
 assert.equal(rejectedSampleBoundaryRequestCount, 0);
-assert.equal(reuseToasts.at(-1), "局部 batch 必须整除每个入围候选的更新时点数");
+assert.match(reuseToasts.at(-1), /统一使用联合策略/);
 modelSandbox.request = requestBeforeSampleBoundaryTest;
 
 // A continuous create returns immediately at generation 0.  The UI must say
@@ -2694,15 +2726,15 @@ modelSandbox.request = async (path, options) => {
   queuedCreateBody = options.body;
   assert.equal(Object.hasOwn(options.body.budget, "token_limit"), false);
   assert.equal(Object.hasOwn(options.body, "samples_per_update"), false);
-  assert.equal(options.body.optimization_protocol, "quick_adaptive_epoch@1");
-  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1");
-  assert.equal(options.body.optimization_schedule.screening_origin_count, 0);
+  assert.equal(options.body.optimization_protocol, "joint_plugin_epoch@2");
+  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.joint-plugin-epoch-schedule/2");
+  assert.equal(options.body.optimization_schedule.screening_origin_count, 10);
   assert.equal(options.body.optimization_schedule.finalist_count, 1);
-  assert.equal(options.body.optimization_schedule.formal_origin_count_per_finalist, 500);
-  assert.equal(options.body.optimization_schedule.local_batch_origin_count, 50);
+  assert.equal(options.body.optimization_schedule.formal_origin_count_per_finalist, 35);
+  assert.equal(options.body.optimization_schedule.local_batch_origin_count, 25);
   assert.equal(options.body.optimization_schedule.max_local_edits_per_batch, 2);
-  assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 169);
-  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "prequential");
+  assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 50);
+  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "paired_champion_challenger");
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 9);
   assert.equal(options.body.sample_concurrency, 64);
@@ -2736,7 +2768,7 @@ assert.deepEqual(
   Array.from(modelSandbox.state.runs.map((run) => run.id)),
   ["run:new-queued", "run:existing-identical"],
 );
-assert.equal(newlyQueuedRun.optimization_schedule.formal_origin_count_per_finalist, 500);
+assert.equal(newlyQueuedRun.optimization_schedule.formal_origin_count_per_finalist, 35);
 assert.equal(newlyQueuedRun.candidate_concurrency, 4);
 assert.equal(newlyQueuedRun.sample_agent_batch_size, 9);
 assert.equal(newlyQueuedRun.sample_concurrency, 64);
@@ -2853,17 +2885,17 @@ const nonDefaultRun = await modelSandbox.createRun({
 });
 assert.equal(nonDefaultCreateBody.budget.max_generations, 3);
 assert.equal(nonDefaultCreateBody.budget.candidates_per_generation, 4);
-assert.equal(nonDefaultCreateBody.optimization_schedule.formal_origin_count_per_finalist, 600);
-assert.equal(nonDefaultCreateBody.optimization_schedule.local_batch_origin_count, 50);
-assert.equal(nonDefaultCreateBody.optimization_schedule.max_local_edits_per_batch, 3);
-assert.equal(nonDefaultCreateBody.optimization_schedule.selection_holdout_origin_count, 200);
+assert.equal(nonDefaultCreateBody.optimization_schedule.formal_origin_count_per_finalist, 35);
+assert.equal(nonDefaultCreateBody.optimization_schedule.local_batch_origin_count, 25);
+assert.equal(nonDefaultCreateBody.optimization_schedule.max_local_edits_per_batch, 2);
+assert.equal(nonDefaultCreateBody.optimization_schedule.selection_holdout_origin_count, 50);
 assert.equal(Object.hasOwn(nonDefaultCreateBody, "samples_per_update"), false);
 assert.equal(nonDefaultCreateBody.candidate_concurrency, 3);
 assert.equal(nonDefaultCreateBody.sample_agent_batch_size, 9);
 assert.equal(nonDefaultCreateBody.sample_concurrency, 3);
 assert.equal(nonDefaultRun.total_generations, 3);
 assert.equal(nonDefaultRun.candidates_per_generation, 4);
-assert.equal(nonDefaultRun.optimization_schedule.formal_origin_count_per_finalist, 600);
+assert.equal(nonDefaultRun.optimization_schedule.formal_origin_count_per_finalist, 35);
 assert.equal(nonDefaultRun.candidate_concurrency, 3);
 assert.equal(nonDefaultRun.sample_agent_batch_size, 9);
 assert.equal(nonDefaultRun.sample_concurrency, 3);
@@ -2899,6 +2931,7 @@ modelSandbox.state.runs = [pollingRun];
 modelSandbox.state.events = [];
 modelSandbox.state.createStatus = modelSandbox.createStatusForRun(pollingRun, []);
 modelSandbox.showToast = (message) => pollToasts.push(message);
+const actualRenderContext = modelSandbox.renderContext;
 modelSandbox.renderContext = () => {};
 modelSandbox.renderProcess = () => {};
 modelSandbox.renderCandidates = () => {};
@@ -2917,6 +2950,14 @@ assert.equal(modelSandbox.state.createStatus.state, "failed");
 assert.equal(pollToasts.length, 1);
 assert.equal(await modelSandbox.refreshProgressForRun(pollingRun.id), true);
 assert.equal(pollToasts.length, 1);
+
+// Polling an older failed run must not overwrite a new preflight failure.
+modelSandbox.state.createStatus = {runId: null, state: "failed", message: "new model preflight rejected"};
+modelSandbox.state.commandError = "new model preflight rejected";
+assert.equal(modelSandbox.observeRunStatus(pollingRun, failedPollingRun, []), false);
+assert.equal(modelSandbox.state.commandError, "new model preflight rejected");
+assert.equal(pollToasts.length, 1);
+modelSandbox.state.createStatus = modelSandbox.createStatusForRun(failedPollingRun, []);
 
 // Event refresh has its own read token and cannot discard a valid monitor.
 const raceRun = modelSandbox.normalizeRun({...waitingRun, id: "run:poll-race", run_id: "run:poll-race", projection_revision: 2});
@@ -3455,10 +3496,18 @@ assert.equal(modelSandbox.state.activeRun.id, "run:filter-live");
 const beforeOverviewState = {...modelSandbox.state};
 const beforeOverviewRequest = modelSandbox.request;
 const beforeOverviewReconcile = modelSandbox.reconcileVisibleRunSelection;
+const beforeOverviewRenderContext = modelSandbox.renderContext;
+const beforeOverviewQuerySelector = modelSandbox.document.querySelector;
+const overviewPickerNode = {innerHTML: "", disabled: false};
+const overviewOlderNode = {disabled: false};
+modelSandbox.document.querySelector = selector => selector === "#run-select" ? overviewPickerNode
+  : selector === "#load-older-runs" ? overviewOlderNode : beforeOverviewQuerySelector(selector);
+modelSandbox.renderContext = actualRenderContext;
 modelSandbox.reconcileVisibleRunSelection = actualReconcileRunSelection;
 modelSandbox.state.usingDemo = false;
 modelSandbox.state.refreshing = false;
 modelSandbox.state.busy = false;
+modelSandbox.state.createStatus = null;
 modelSandbox.state.loadingOlderRuns = false;
 modelSandbox.state.runMonitorRunId = liveFilterRun.id;
 modelSandbox.state.activeRun = liveFilterRun;
@@ -3470,6 +3519,11 @@ assert.equal(await modelSandbox.refreshRunOverview(), true);
 assert.deepEqual(Array.from(modelSandbox.state.runs.map(run => run.id)), [liveFilterRun.id]);
 assert.equal(modelSandbox.state.runListCursor, 7);
 assert.equal(modelSandbox.state.activeRun.reviewDetailSentinel, "hydrated");
+assert.equal(overviewPickerNode.disabled, false, "background list refresh must leave the run picker usable");
+assert.equal(overviewOlderNode.disabled, false);
+modelSandbox.request = async () => { throw new Error("list temporarily unavailable"); };
+assert.equal(await modelSandbox.refreshRunOverview(), false);
+assert.equal(overviewPickerNode.disabled, false, "a failed refresh must release the run picker too");
 modelSandbox.request = async () => ({runs: [], next_cursor: null, archived_count: 0});
 assert.equal(await modelSandbox.refreshRunOverview(), true);
 assert.equal(modelSandbox.state.activeRun, null);
@@ -3478,6 +3532,8 @@ assert.equal(modelSandbox.state.loadState, "empty");
 Object.assign(modelSandbox.state, beforeOverviewState);
 modelSandbox.request = beforeOverviewRequest;
 modelSandbox.reconcileVisibleRunSelection = beforeOverviewReconcile;
+modelSandbox.renderContext = beforeOverviewRenderContext;
+modelSandbox.document.querySelector = beforeOverviewQuerySelector;
 const diagnosisHtml = modelSandbox.renderResearchDiagnosis({diagnostic_report: {
   weak_cells: ["humidity@24h"], failure_patterns: ["execution_failed"],
   possible_causes: ["可能需要复核 <script>，尚未确认"], unresolved_questions: ["核查时间边界"]
@@ -3692,6 +3748,105 @@ assert.equal(modelSandbox.roundResearchAggregateStatus(compactEvaluationCounts),
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 2, completed: 1, screenedOut: 1}), "completed");
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 1, completed: 0, screenedOut: 1}), "screened_out");
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 2, completed: 0, skipped: 1}), "pending");
+// Settled progress is candidate-scoped, but legacy admission counts and the
+// run cursor cannot identify which candidate owns currently active requests.
+// Report evidence without asserting that every evaluating summary is active.
+const parallelRound = { generation: 1, candidates: ["live-a", "live-b", "batch-done", "not-started"].map(id => ({
+  candidate_id: id, stages: {training: "pending", evaluation: "pending", judge: "pending"},
+})) };
+const parallelCandidates = parallelRound.candidates.map((row, index) => ({id: row.candidate_id, status: "evaluating",
+  execution: {stage_progress: index === 3 ? null : {schema_version: "ecologyrsi-dsh.evaluation-progress/3",
+    completed_samples: index === 2 ? 10 : 6, total_samples: 10, in_flight_batches: index === 2 ? 0 : 2, queued_batches: 0}},
+}));
+const parallelRun = {status: "running", candidate_summaries: parallelCandidates,
+  execution_progress: {current_candidate_id: "not-started", stage_progress: {
+    schema_version: "ecologyrsi-dsh.adaptive-progress/2", evaluation_phase: "screening", in_flight_batches: 8,
+  }}};
+for (const candidateField of ["candidate_summaries", "candidates"]) {
+  const run = {...parallelRun, candidate_summaries: undefined, [candidateField]: parallelCandidates};
+  assert.deepEqual(parallelRound.candidates.map(row => modelSandbox.roundStageStatus(row, "evaluation", run)),
+    ["evaluation_started", "evaluation_started", "batch_complete_waiting", "candidate_progress_unknown"]);
+  assert.deepEqual(parallelRound.candidates.map(row => modelSandbox.roundStageStatus(row, "training", run)),
+    ["completed", "completed", "completed", "candidate_progress_unknown"]);
+  const counts = modelSandbox.roundResearchStageCounts(parallelRound, parallelCandidates, "evaluation", run);
+  assert.equal(counts.running, 0); assert.equal(counts.completed, 0); assert.equal(counts.batchWaiting, 1);
+  assert.equal(counts.recordedProgress, 2); assert.equal(counts.progressUnknown, 1);
+  assert.equal(modelSandbox.roundResearchAggregateStatus(counts), "evaluation_started");
+  assert.equal(modelSandbox.roundStageStatus(parallelRound.candidates[0], "evaluation", {...run, status: "paused"}), "paused");
+  for (const status of ["completed", "failed", "cancelled"]) {
+    assert.equal(modelSandbox.roundStageStatus(parallelRound.candidates[0], "evaluation", {...run, status}), "pending");
+  }
+}
+const queuedParallelRun = JSON.parse(JSON.stringify(parallelRun));
+queuedParallelRun.candidate_summaries[0].execution.stage_progress.in_flight_batches = 0;
+queuedParallelRun.candidate_summaries[0].execution.stage_progress.queued_batches = 2;
+assert.equal(modelSandbox.roundStageStatus(parallelRound.candidates[0], "evaluation", queuedParallelRun), "evaluation_started");
+assert.equal(modelSandbox.roundStageStatus({...parallelRound.candidates[0], stages: {evaluation: "completed"}}, "evaluation", parallelRun), "completed");
+const unknownParallelRun = JSON.parse(JSON.stringify(parallelRun));
+unknownParallelRun.candidate_summaries[3].execution.stage_progress = {...parallelRun.execution_progress.stage_progress};
+assert.equal(modelSandbox.roundStageStatus(parallelRound.candidates[3], "evaluation", unknownParallelRun), "candidate_progress_unknown");
+assert.equal(modelSandbox.roundStageText("evaluation", "batch_complete_waiting", parallelRun), "本批已完成，等待后续评测/选择");
+assert.equal(modelSandbox.roundStageClass("evaluation", "batch_complete_waiting", parallelRun), "is-pending");
+assert.equal(modelSandbox.roundStageText("evaluation", "batch_complete_waiting", {...parallelRun, status: "paused"}), "已暂停");
+assert.equal(modelSandbox.roundStageText("evaluation", "batch_complete_waiting", {...parallelRun, status: "cancelled"}), "已中止");
+assert.equal(modelSandbox.roundStageText("evaluation", "batch_complete_waiting", {...parallelRun, status: "completed"}), "未封存");
+assert.equal(modelSandbox.roundStageStatus({candidate_id: "live-a"}, "evaluation", parallelRun), "evaluation_started");
+for (const status of ["failed", "rejected", "promoted", "evaluated", "duplicate"]) {
+  const terminalCandidateRun = JSON.parse(JSON.stringify(parallelRun));
+  terminalCandidateRun.candidate_summaries[0].status = status;
+  terminalCandidateRun.execution_progress.current_candidate_id = "live-a";
+  assert.equal(modelSandbox.roundStageStatus(parallelRound.candidates[0], "evaluation", terminalCandidateRun), "pending");
+}
+// Q's real seq237 process shape: C1 had five live children but no completed
+// origin yet, so its API heartbeat was null. C4 had 7/10 settled origins and
+// an admission-derived in-flight count. The browser cannot recover physical
+// ownership from these fields and must not claim that C1 is queued/inactive.
+const qProgressRound = {generation: 1, candidates: [
+  {candidate_id: "candidate:3832a82d-22ec-4e7d-b635-ef6a5e0b1b13", slot_index: 0, stages: {training: "pending", evaluation: "pending"}},
+  {candidate_id: "candidate:0b72c298-af11-4810-9462-3f261dc725fd", slot_index: 3, stages: {training: "pending", evaluation: "pending"}},
+]};
+const qProgressRun = {status: "running", rounds: [qProgressRound],
+  candidate_summaries: qProgressRound.candidates.map((row, index) => ({id: row.candidate_id, status: "evaluating",
+    execution: {stages: row.stages, stage_progress: index === 0 ? null : {
+      schema_version: "ecologyrsi-dsh.evaluation-progress/3", progress_kind: "completed_batch",
+      completed_samples: 7, total_samples: 10, in_flight_batches: 3, queued_batches: 0,
+    }},
+  })),
+  execution_progress: {current_candidate_id: qProgressRound.candidates[0].candidate_id, current_stage: "evaluation",
+    stage_progress: {schema_version: "ecologyrsi-dsh.adaptive-progress/2", evaluation_phase: "screening", in_flight_batches: 8},
+    dsh_activity: {dsh_stage: "sample.plan", state: "model_running", unresolved_child_count: 8},
+  },
+};
+for (const candidateField of ["candidate_summaries", "candidates"]) {
+  const run = {...qProgressRun, candidate_summaries: undefined, [candidateField]: qProgressRun.candidate_summaries};
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[0], "evaluation", run), "candidate_progress_unknown");
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[1], "evaluation", run), "evaluation_started");
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[0], "training", run), "candidate_progress_unknown");
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[1], "training", run), "completed");
+}
+for (const [status, text] of [["candidate_progress_unknown", "尚无该候选的进度记录"], ["evaluation_started", "评测已开始，尚未完成"]]) {
+  assert.equal(modelSandbox.roundStageText("evaluation", status, qProgressRun), text);
+  assert.equal(modelSandbox.roundResearchStatus(status).text, text);
+  assert.equal(modelSandbox.roundStageClass("evaluation", status, qProgressRun), "is-pending");
+  assert.equal(modelSandbox.roundStageText("evaluation", status, {...qProgressRun, status: "paused"}), "已暂停");
+  assert.equal(modelSandbox.roundStageText("evaluation", status, {...qProgressRun, status: "failed"}), "已中止");
+  assert.equal(modelSandbox.roundStageText("evaluation", status, {...qProgressRun, status: "completed"}), "未封存");
+}
+assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[0], "evaluation", {...qProgressRun, status: "paused"}), "paused");
+const legacyQRun = JSON.parse(JSON.stringify(qProgressRun));
+delete legacyQRun.candidate_summaries[0].execution.stage_progress;
+assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[0], "evaluation", legacyQRun), "candidate_progress_unknown");
+for (const inFlight of [0, 8]) {
+  const run = JSON.parse(JSON.stringify(qProgressRun));
+  run.candidate_summaries[1].execution.stage_progress.in_flight_batches = inFlight;
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[1], "evaluation", run), "evaluation_started");
+  run.candidate_summaries[1].execution.stage_progress.completed_samples = 0;
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[1], "evaluation", run), "candidate_progress_unknown");
+  run.candidate_summaries[1].execution.stage_progress.completed_samples = 10;
+  assert.equal(modelSandbox.roundStageStatus(qProgressRound.candidates[1], "evaluation", run), "batch_complete_waiting");
+}
+assert.equal(modelSandbox.roundResearchAggregateStatus({total: 2, completed: 0, running: 0, progressUnknown: 2}), "candidate_progress_unknown");
+assert.equal(modelSandbox.roundResearchAggregateStatus({total: 2, completed: 0, running: 0, batchWaiting: 2}), "batch_complete_waiting");
 // Completed feedback trajectories stay complete while holdout arms run in
 // sequence; an inactive finalist must not revert to pending training/evaluation.
 for (const currentCandidateId of ["candidate:formal", "candidate:incumbent-control"]) {
@@ -3803,6 +3958,95 @@ assert.match(app, /preferredCatalogModelId\(judgeCompatibleItems/);
 assert.match(app, /\[currentPolicyId, hostPolicyPreference\]/);
 assert.match(app, /\[selectedJudgeId, hostJudgePreference\]/);
 assert.doesNotMatch(String(modelSandbox.populateCatalogControls), /activeRun|activeConfiguration/);
+
+// Exercise real selection refresh and readiness with a single route serving
+// both roles. Role permissions and backend availability remain independent gates.
+const sharedRoleNodes = new Map();
+const sharedRoleNode = (selector) => {
+  if (!sharedRoleNodes.has(selector)) {
+    const node = {...modelNode(), options: [], markup: ""};
+    Object.defineProperty(node, "innerHTML", {
+      get() { return this.markup; },
+      set(value) {
+        this.markup = value;
+        this.options = [...value.matchAll(/<option value="([^"]*)"([^>]*)>/g)]
+          .map(match => ({value: match[1], disabled: /disabled/.test(match[2])}));
+        this.value = this.options.find(option => !option.disabled)?.value || "";
+      },
+    });
+    sharedRoleNodes.set(selector, node);
+  }
+  return sharedRoleNodes.get(selector);
+};
+const sharedRoleSandbox = {
+  console, URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
+  window: {location: {search: ""}, setTimeout, clearTimeout},
+  document: {querySelector: sharedRoleNode, querySelectorAll: () => []},
+  EcologyDSHHost: {getPublicContext: () => ({apiBase: "/api", models: []}), preferredModelId: (_role, ids, excluded) => {
+    assert.equal(excluded, "", "role defaults must not exclude the other role's model");
+    return ids.at(-1) || "";
+  }},
+};
+vm.createContext(sharedRoleSandbox);
+for (const name of ["core", "commands", "catalog"]) {
+  vm.runInContext(read(`assets/js/${name}.js`), sharedRoleSandbox);
+}
+sharedRoleSandbox.updateSelectionHelp = () => {}; // Rendering is unrelated to selection and readiness.
+const sharedRoleModel = {id: "provider/deepseek-v4.1-flash-1017", roles: ["propose", "judge"],
+  configured: true, directory_available: true, execution_available: true, credential_configured: true};
+const setSharedRoleCatalog = (models) => {
+  sharedRoleSandbox.state.catalog = sharedRoleSandbox.normalizeCatalog({
+    domain_packs: [{id: "domain"}],
+    datasets: [{id: "dataset", training_selectable: true, domain_pack_id: "domain",
+      episodes: [{id: "episode"}], task_adapter: {evaluator_id: "evaluator"},
+      evaluation: {id: "evaluator", prediction_model_ids: ["predictor"], prediction_cells_per_origin: 9}}],
+    strategies: [{id: "strategy"}], prediction_models: [{id: "predictor"}],
+    evaluators: [{id: "evaluator", prediction_model_ids: ["predictor"], prediction_cells_per_origin: 9}],
+    dsh_models: models, dsh: {capabilities: ["evolution.run.create", "evolution.projection.read"]},
+  });
+};
+setSharedRoleCatalog([sharedRoleModel]);
+sharedRoleSandbox.state.connection = "online";
+for (const [selector, value] of Object.entries({"#policy-model-id": sharedRoleModel.id,
+  "#judge-model-id": sharedRoleModel.id, "#max-generations": "1", "#candidates-per-generation": "4",
+  "#max-candidates": "4", "#formal-origin-count": "35", "#local-batch-origin-count": "25",
+  "#max-local-edits-per-batch": "2", "#selection-holdout-origin-count": "50",
+  "#sample-agent-batch-size": "9", "#candidate-concurrency": "2", "#sample-concurrency": "4"})) {
+  sharedRoleNode(selector).value = value;
+}
+sharedRoleSandbox.populateCatalogControls();
+sharedRoleSandbox.state.cohortCapacityReport = {sufficient: true, required_unique_origins: 85, max_feasible_generations: 3};
+sharedRoleSandbox.state.cohortCapacitySignature = sharedRoleSandbox.evolutionCapacityRequest().signature;
+assert.equal(sharedRoleNode("#policy-model-id").value, sharedRoleModel.id);
+assert.equal(sharedRoleNode("#judge-model-id").value, sharedRoleModel.id);
+assert.ok(sharedRoleSandbox.readiness().every(row => row.ready), JSON.stringify(sharedRoleSandbox.readiness()));
+const alternativeRoleModel = {...sharedRoleModel, id: "provider/alternative"};
+setSharedRoleCatalog([sharedRoleModel, alternativeRoleModel]);
+sharedRoleSandbox.populateCatalogControls();
+assert.equal(sharedRoleNode("#judge-model-id").value, sharedRoleModel.id, "refresh preserves an explicit same-model selection");
+sharedRoleNode("#judge-model-id").value = alternativeRoleModel.id;
+sharedRoleSandbox.populateCatalogControls();
+assert.equal(sharedRoleNode("#judge-model-id").value, alternativeRoleModel.id, "different-model selection also remains supported");
+sharedRoleNode("#judge-model-id").value = sharedRoleModel.id;
+for (const patch of [{roles: ["propose"]}, {credential_configured: false}, {configured: false},
+  {directory_available: false}, {execution_available: false}]) {
+  setSharedRoleCatalog([{...sharedRoleModel, ...patch}]);
+  sharedRoleSandbox.populateCatalogControls();
+  assert.equal(sharedRoleSandbox.readiness().find(row => row.label === "独立评审模型 API 已安全配置").ready, false,
+    `sharing a route must not bypass role or connection checks: ${JSON.stringify(patch)}`);
+  if (patch.execution_available !== false) {
+    assert.equal(sharedRoleNode("#judge-model-id").options[0].disabled, true);
+  }
+}
+setSharedRoleCatalog([sharedRoleModel]);
+sharedRoleSandbox.populateCatalogControls();
+sharedRoleSandbox.state.connection = "offline";
+assert.equal(sharedRoleSandbox.readiness().find(row => row.label === "运行服务与脱敏状态读取能力可用").ready, false);
+sharedRoleSandbox.state.connection = "online";
+sharedRoleSandbox.state.catalog.dsh.capabilities = ["evolution.projection.read"];
+assert.equal(sharedRoleSandbox.readiness().find(row => row.label === "具备创建进化运行的授权能力").ready, false);
+assert.match(html, /可与策略使用同一模型，职责和会话分别执行/);
+assert.doesNotMatch(html, /必须选择不同的模型目录 ID/);
 assert.doesNotMatch(catalogSource, /\bsyncFormToRun\(\);/);
 assert.doesNotMatch(commandsSource, /\bsyncFormToRun\(\);/);
 assert.doesNotMatch(catalogSource, /function syncFormToRun\s*\(/);
@@ -3889,21 +4133,16 @@ assert.equal(budgetNodes["#max-candidates"].value, "30");
 assert.match(budgetNodes["#max-candidates"].validationMessage, /每轮候选数不得大于 4/);
 assert.equal(budgetSandbox.candidateBudgetStatus().budget_sufficient, false);
 const defaultSchedule = budgetSandbox.optimizationScheduleFromControls();
-assert.equal(defaultSchedule.schema_version, "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1");
-assert.equal(defaultSchedule.formal_origin_count_per_finalist, 500);
-assert.equal(defaultSchedule.local_batch_origin_count, 50);
+assert.equal(defaultSchedule.schema_version, "ecologyrsi-dsh.joint-plugin-epoch-schedule/2");
+assert.equal(defaultSchedule.formal_origin_count_per_finalist, 35);
+assert.equal(defaultSchedule.local_batch_origin_count, 25);
 assert.equal(defaultSchedule.max_local_edits_per_batch, 2);
-assert.equal(defaultSchedule.selection_holdout_origin_count, 169);
-assert.equal(defaultSchedule.local_evaluation_mode, "prequential");
-for (const [patch, pattern] of [
-  [{formal_origin_count: 500, local_batch_origin_count: 64}, /必须整除/],
-  [{max_local_edits_per_batch: 6}, /不得大于 5/],
-  [{selection_holdout_origin_count: 39}, /不得小于 40/],
-  [{formal_origin_count: ""}, /必须是整数/],
-  [{formal_origin_count: true}, /必须是整数/],
-]) {
-  assert.throws(() => budgetSandbox.normalizedOptimizationSchedule(patch), pattern);
+assert.equal(defaultSchedule.selection_holdout_origin_count, 50);
+assert.equal(defaultSchedule.local_evaluation_mode, "paired_champion_challenger");
+for (const legacy of ["quick", "comparison", "evidence_guided"]) {
+  assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({experiment_mode: legacy}), /统一使用联合策略/);
 }
+assert.equal(budgetSandbox.normalizedOptimizationSchedule({formal_origin_count: 999}).formal_origin_count_per_finalist, 35);
 
 // A completed adaptive generation uses its shared advisory reflection, even
 // when legacy per-candidate judge receipts were never part of the protocol.
@@ -3930,7 +4169,8 @@ const runningAdaptiveStages = modelSandbox.executionStageValues(
   {adaptive_completion: {comparison_recorded: false}, candidates: [{candidate_id: "c:1", stages: {evaluation: "pending"}}]},
   {status: "running", execution_progress: {current_candidate_id: "c:1", stage_progress: {evaluation_phase: "formal_batch"}}},
 );
-assert.equal(runningAdaptiveStages.find(item => item.key === "evaluation").value, "running");
+// A legacy run cursor alone does not prove the selected candidate is active.
+assert.equal(runningAdaptiveStages.find(item => item.key === "evaluation").value, "candidate_progress_unknown");
 const settledAdaptive = modelSandbox.executionSampleProgressSnapshot({
   status: "completed", sample_agent_protocol: "dsh-strict-origin-bundle@4", prediction_cells_per_origin: 9,
   execution_diagnostics: {live_evaluation_completed_examples: 0, live_evaluation_total_examples: 0},
@@ -3972,28 +4212,22 @@ vm.runInContext(read("assets/js/commands.js"), parameterSandbox);
 vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
 parameterSandbox.state.cohortCapacityReport = {sufficient: true, execution_plan: {
   schedule: parameterSandbox.optimizationScheduleFromControls(), generations: 5,
-  holdout_inference_replicas: 2, required_unique_origins: 733, fresh_epoch_holdout: false,
-  generation_budget: {screening_candidate_origins: 256, formal_candidate_origins: 1900, holdout_candidate_origins: 1014, total_candidate_origins: 3170, total_scoring_cells: 28530},
-  run_budget: {total_candidate_origins: 15850, total_scoring_cells: 142650}
+  holdout_inference_replicas: 1, required_unique_origins: 425, fresh_epoch_holdout: true,
+  generation_budget: {screening_candidate_origins: 50, formal_candidate_origins: 50, holdout_candidate_origins: 100, base_candidate_origins: 200, recheck_candidate_origins: 100, total_candidate_origins: 300, total_scoring_cells: 2700},
+  run_budget: {total_candidate_origins: 1500, total_scoring_cells: 13500}
 }};
 parameterSandbox.cohortCapacityLabel = () => "已核验";
 parameterSandbox.renderParameters();
-assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入围候选 10 × 50");
-assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 1,014 = 3,170 次时点预测 = 28,530 个评分项"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("15,850 次时点预测 / 142,650 个评分项；需要 733 个不同起点"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("独立观测数保持不变"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个预测时点"));
-assert.equal(parameterNodes["#parameter-summary"].innerHTML.includes("formal unique origins"), false);
+assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "基础 200 次＋复核预留 100 次 / 轮");
+assert.equal(parameterNodes["#agent-update-scope"].textContent, "初筛诊断 → 一次局部修订 → 父子配对");
+assert.match(parameterNodes["#parameter-summary"].innerHTML, /初筛 50＋局部配对 50＋轮末比较 100＝200/);
+assert.match(parameterNodes["#parameter-summary"].innerHTML, /1,500 次时点预测；需要 425 个不同起点/);
+assert.match(parameterNodes["#parameter-summary"].innerHTML, /复测不增加独立观测数/);
+assert.doesNotMatch(parameterNodes["#parameter-summary"].innerHTML, /500 个预测时点/);
 parameterNodes["#local-batch-origin-count"].value = "60";
 parameterSandbox.renderParameters();
-assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "参数无效");
-assert.equal(parameterNodes["#agent-update-scope"].textContent, "请修正后重新计算");
-assert.equal(parameterNodes["#parameter-budget-state"].className, "is-insufficient");
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("局部 batch 必须整除"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("batch 60"));
-assert.equal(parameterNodes["#parameter-summary"].innerHTML.includes("10 × 50"), false);
-parameterNodes["#local-batch-origin-count"].value = "50";
+assert.equal(parameterNodes["#local-batch-origin-count"].value, "25");
+assert.equal(parameterNodes["#local-batch-origin-count"].readOnly, true);
 parameterNodes["#sample-concurrency"].value = "129";
 const invalidConcurrencySnapshot = parameterSandbox.optimizationControlSnapshot();
 assert.equal(invalidConcurrencySnapshot.valid, false);
@@ -4176,7 +4410,7 @@ assert.doesNotMatch(html, /id="workspace-settings"[\s\S]*id="workspace-parameter
 assert.ok(html.includes("DSH 上下文：等待 Session 计量"));
 assert.doesNotMatch(html, /name="token_limit"/);
 assert.ok(html.includes("完整训练拟合分区"));
-assert.ok(html.includes("每个入围候选 10 × 10"));
+assert.ok(html.includes("基础 200 次＋复核预留 100 次 / 轮"));
 assert.match(html, /<label><span>训练数据集<\/span><select id="dataset-id" name="dataset_id" required>/);
 assert.match(html, /<label hidden><span>研究领域（自动推导）/);
 assert.match(html, /预测方案由模型自主选择/);
@@ -4235,17 +4469,17 @@ for (const contractField of ["descriptor", "readiness", "profile", "features", "
 }
 assert.match(app, /request\("\/runs"/);
 assert.match(html, /id="candidates-per-generation"[^>]*value="4"/);
-assert.match(html, /id="formal-origin-count"[^>]*name="formal_origin_count"[^>]*value="100"/);
-assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_count"[^>]*value="10"/);
+assert.match(html, /id="formal-origin-count"[^>]*name="formal_origin_count"[^>]*value="35"/);
+assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_count"[^>]*value="25"/);
 assert.match(html, /id="max-local-edits-per-batch"[^>]*name="max_local_edits_per_batch"[^>]*value="2"/);
 assert.match(html, /id="selection-holdout-origin-count"[^>]*name="selection_holdout_origin_count"[^>]*value="50"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="9"[^>]*readonly/);
 assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
-assert.ok(html.includes("每个入围候选 10 × 10"));
+assert.ok(html.includes("基础 200 次＋复核预留 100 次 / 轮"));
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
-assert.ok(html.includes("单个预测时点始终由一条向量链原子处理"));
+assert.ok(html.includes("单个预测时点始终由一条完整向量链处理"));
 assert.doesNotMatch(app, /wavesPerCandidate|每候选约/);
 const presetDirectories = fs.readdirSync(
   path.resolve(root, "../../integrations/dsh_ecology_plugin/presets"),
@@ -4268,7 +4502,7 @@ assert.ok(app.includes("方案数量、预测内容和并发设置有效"));
 for (const adaptiveEventLabel of [
   "candidate.screening_recorded", "formal.selection_cohort_frozen",
   "candidate.screened_out", "formal.batch_started", "formal.batch_evaluated",
-  "holdout.arm_started", "generation.comparison_recorded",
+  "holdout.arm_started", "holdout.recheck_started", "generation.comparison_recorded",
 ]) {
   assert.ok(app.includes(`\"${adaptiveEventLabel}\"`), `${adaptiveEventLabel} should have a UI event label`);
 }
@@ -4282,7 +4516,7 @@ assert.match(app, /sample_agent_batch_size: sampleAgentBatchSize/);
 assert.match(app, /sample_concurrency: sampleConcurrency/);
 assert.ok(app.includes("候选总预算不足"));
 assert.doesNotMatch(catalogSource, /入围候选 500-origin schedule/);
-assert.match(catalogSource, /schedule\.formal_origin_count_per_finalist/);
+assert.match(catalogSource, /联合策略的 10／25／50 时点流程和复核预算已固定/);
 assert.match(app, /auto_advance: payload\.auto_advance === 0 \? 0 : continuousAutoAdvance \? true : 1/);
 assert.ok(app.includes("已排队，后台将自动执行全部轮次"));
 assert.ok(app.includes("创建新运行"));
@@ -4581,6 +4815,11 @@ const quickCapacity = {cohort_reuse_policy: "training_replay_fresh_epoch_holdout
 assert.match(formSubmissionSandbox.cohortCapacityLabel(quickCapacity), /计划 5 轮.*最多支持 4 轮/);
 assert.equal(formSubmissionSandbox.cohortCapacityLabel({...quickCapacity,
   rejection_reason: "选择留出窗口不足"}), "选择留出窗口不足");
+const jointCapacity = {...quickCapacity, cohort_reuse_policy: "fresh_training_race_and_confirmation@1",
+  required_unique_origins: 425, max_feasible_generations: 3};
+assert.match(formSubmissionSandbox.cohortCapacityLabel(jointCapacity), /计划 5 轮.*目标成熟.*最多支持 3 轮/);
+assert.match(formSubmissionSandbox.cohortCapacityLabel({...jointCapacity, sufficient: true,
+  planned_generations: 3, required_unique_origins: 255}), /255 个不同起点.*各阶段与各轮使用新时点/);
 formSubmissionSandbox.readiness = () => [{ready: true}];
 formSubmissionSandbox.hasCapability = () => true;
 formSubmissionSandbox.showToast = () => {};
@@ -4619,25 +4858,38 @@ assert.deepEqual(submittedRequests.map((request) => request.route), ["/model-pre
 assert.deepEqual(submittedRequests.map((request) => request.creationState), ["preflight", "submitting"]);
 for (const request of submittedRequests) {
   assert.equal(request.body.prediction_model_id, undefined);
+  assert.equal(request.body.targeted_search_policy, undefined, "standard creation must not silently opt into cellwise search");
   assert.equal(request.body.prediction_selection_policy, "model_during_run@1");
   assert.equal(request.body.evaluator_id, undefined);
   assert.equal(request.body.search_guard_policy, "practical_delta_cell_noninferiority_paired_blocks@1");
   assert.equal(request.body.require_model_contract_preflight, true);
 }
 submittedRequests.length = 0;
+const submittedSharedModelRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {
+  fields: {...submittedFields, strategy_model_id: sharedRoleModel.id, review_model_id: sharedRoleModel.id},
+}});
+assert.equal(submittedSharedModelRun.id, "run:form-created");
+assert.deepEqual(submittedRequests.map(request => request.route), ["/model-preflight", "/runs"]);
+for (const request of submittedRequests) {
+  assert.equal(request.body.strategy_model_id, sharedRoleModel.id);
+  assert.equal(request.body.review_model_id, sharedRoleModel.id);
+  assert.equal(request.body.require_model_contract_preflight, true);
+}
+submittedRequests.length = 0;
 const submittedGuidedRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {
-  fields: {...submittedFields, experiment_mode: "evidence_guided", formal_origin_count: "999", local_batch_origin_count: "999"}
+  fields: {...submittedFields, experiment_mode: "evidence_guided", formal_origin_count: "999", local_batch_origin_count: "999", targeted_search_policy: "cellwise_training_evidence@1"}
 }});
 assert.equal(submittedGuidedRun.id, "run:form-created");
 assert.deepEqual(submittedRequests.map((request) => request.route), ["/model-preflight", "/runs"]);
 for (const request of submittedRequests) {
-  assert.equal(request.body.optimization_protocol, "evidence_guided_epoch@1");
-  assert.equal(request.body.optimization_schedule.schema_version, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1");
+  assert.equal(request.body.targeted_search_policy, "cellwise_training_evidence@1");
+  assert.equal(request.body.optimization_protocol, "joint_plugin_epoch@2");
+  assert.equal(request.body.optimization_schedule.schema_version, "ecologyrsi-dsh.joint-plugin-epoch-schedule/2");
   assert.equal(request.body.optimization_schedule.screening_origin_count, 10);
   assert.equal(request.body.optimization_schedule.formal_origin_count_per_finalist, 35);
   assert.equal(request.body.optimization_schedule.local_batch_origin_count, 25);
   assert.equal(request.body.optimization_schedule.selection_holdout_origin_count, 50);
-  assert.equal(request.body.optimization_schedule.max_local_edits_per_batch, 1);
+  assert.equal(request.body.optimization_schedule.max_local_edits_per_batch, 2);
 }
 const savedScheduleFromControls = formSubmissionSandbox.optimizationScheduleFromControls;
 formSubmissionSandbox.optimizationScheduleFromControls = () => submittedRequests[0].body.optimization_schedule;
@@ -4726,7 +4978,7 @@ assert.equal(formSubmissionSandbox.capacityVerificationPending(), true);
 const capacityResolvers = [];
 formSubmissionSandbox.request = () => new Promise((resolve) => capacityResolvers.push(resolve));
 const oldCapacityRead = formSubmissionSandbox.refreshEvolutionCapacity();
-submitNode("#formal-origin-count").value = "216";
+submitNode("#max-generations").value = "2";
 const currentCapacityRead = formSubmissionSandbox.refreshEvolutionCapacity();
 capacityResolvers[0]({sufficient: false, marker: "old"});
 await oldCapacityRead;
@@ -4736,7 +4988,7 @@ capacityResolvers[1]({sufficient: true, marker: "current"});
 await currentCapacityRead;
 assert.equal(formSubmissionSandbox.state.cohortCapacityReport.marker, "current");
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), false);
-submitNode("#formal-origin-count").value = "288";
+submitNode("#max-generations").value = "3";
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), true);
 formSubmissionSandbox.state.cohortCapacityError = "查询失败";
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), false, "failed verification remains explainable rather than permanently disabling the form");
@@ -4774,6 +5026,26 @@ assert.equal(formSubmissionSandbox.state.defaultRoundsAdjustment, null);
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), true);
 assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...quickCapacity, max_feasible_generations: 0}), false);
 assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...quickCapacity, rejection_reason: "证据不足"}), false);
+// The unified joint plan uses a different cohort policy from legacy quick
+// runs. Its untouched defaults must also be adjusted and freshly verified.
+const jointCapacityRequests = [];
+formSubmissionSandbox.request = async (route, options) => {
+  assert.equal(route, "/evolution-capacity");
+  jointCapacityRequests.push(options.body);
+  return {...jointCapacity, planned_generations: options.body.planned_generations,
+    sufficient: options.body.planned_generations <= 3};
+};
+await formSubmissionSandbox.refreshEvolutionCapacity();
+assert.deepEqual(jointCapacityRequests.map(r => r.planned_generations), [5, 3]);
+assert.ok(jointCapacityRequests.every(r => r.optimization_schedule.schema_version === "ecologyrsi-dsh.joint-plugin-epoch-schedule/2"));
+assert.equal(submitNode("#max-generations").value, "3");
+assert.equal(submitNode("#max-candidates").value, "12");
+assert.equal(formSubmissionSandbox.state.cohortCapacityReport.sufficient, true);
+assert.equal(formSubmissionSandbox.capacityVerificationPending(), false);
+assert.match(formSubmissionSandbox.createRunHint(null, true, []), /默认轮数从 5 调整为 3/);
+assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...jointCapacity, max_feasible_generations: 9}), true);
+assert.equal(submitNode("#max-generations").value, "5");
+assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...jointCapacity, rejection_reason: "证据不足"}), false);
 // Even retyping the default while a request is in flight is an explicit choice.
 formSubmissionSandbox.renderReadiness = () => {};
 formSubmissionSandbox.renderParameters = () => {};
@@ -4783,7 +5055,7 @@ formSubmissionSandbox.request = () => new Promise(resolve => { resolveDefaultCap
 const editingCapacity = formSubmissionSandbox.refreshEvolutionCapacity();
 submitNode("#max-generations").listeners.input();
 assert.equal(formSubmissionSandbox.state.roundsManuallyEdited, true);
-resolveDefaultCapacity(quickCapacity);
+resolveDefaultCapacity(jointCapacity);
 await editingCapacity;
 assert.equal(submitNode("#max-generations").value, "5");
 assert.equal(formSubmissionSandbox.state.cohortCapacityReport.sufficient, false);
@@ -4824,17 +5096,17 @@ console.log("ecology_evolution plugin smoke test: ok");
 
 assert.match(html, /id="max-generations"[^>]*value="5"/);
 const smallSchedule = budgetSandbox.normalizedOptimizationSchedule({});
-assert.equal(smallSchedule.formal_origin_count_per_finalist, 100);
-assert.equal(smallSchedule.local_batch_origin_count, 10);
+assert.equal(smallSchedule.formal_origin_count_per_finalist, 35);
+assert.equal(smallSchedule.local_batch_origin_count, 25);
 assert.equal(smallSchedule.selection_holdout_origin_count, 50);
-assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({formal_origin_count: 20, local_batch_origin_count: 1}), /不得小于 2/);
+assert.equal(budgetSandbox.normalizedOptimizationSchedule({formal_origin_count: 20, local_batch_origin_count: 1}).local_batch_origin_count, 25);
 
 // Backend-published limits override the offline bootstrap for every validator.
 const savedParameterCatalog = budgetSandbox.state.catalog;
 const publishedParameters = JSON.parse(JSON.stringify(budgetSandbox.bootstrapRunParameters));
 publishedParameters.parameters.selection_holdout_origin_count = {default: 60, minimum: 60};
 budgetSandbox.state.catalog = {run_parameters: publishedParameters};
-assert.equal(budgetSandbox.normalizedOptimizationSchedule({}).selection_holdout_origin_count, 60);
+assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({}), /不得小于 60/);
 assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({selection_holdout_origin_count: 50}), /不得小于 60/);
 assert.equal(budgetSandbox.normalizedEvolutionBudget(5.5, 4, 24).budget_sufficient, false);
 assert.equal(budgetSandbox.normalizedEvolutionBudget(51, 4, 204).budget_sufficient, false);
@@ -4855,7 +5127,7 @@ formSubmissionSandbox.state.catalog = {datasets: [{id: "dataset:single", evaluat
 submitNode("#dataset-id").value = "dataset:single";
 submitNode("#evaluator-id").value = "eval:shared";
 assert.equal(formSubmissionSandbox.predictionCellsPerOrigin(), 1);
-assert.equal(formSubmissionSandbox.normalizedOptimizationSchedule({}).selection_holdout_origin_count, 60);
+assert.throws(() => formSubmissionSandbox.normalizedOptimizationSchedule({}), /不得小于 60/);
 formSubmissionSandbox.state.catalog = savedDatasetCatalog;
 
 // A pause must identify its source and keep that cause visible in the UI.
@@ -4904,13 +5176,15 @@ assert.equal(modelSandbox.roundResearchAggregateStatus({total: 4, completed: 1, 
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 3, completed: 0, notSelected: 3}), "not_selected_for_training");
 
 // Evidence quantities must retain their reference and unavailable denominators.
-const guidedTrial = modelSandbox.normalizedOptimizationSchedule({experiment_mode: "evidence_guided", formal_origin_count: 999});
-assert.equal(guidedTrial.screening_origin_count, 10);
-assert.equal(guidedTrial.formal_origin_count_per_finalist, 35);
-assert.equal(guidedTrial.local_batch_origin_count, 25);
-assert.equal(guidedTrial.max_local_edits_per_batch, 1);
-assert.equal(modelSandbox.optimizationProtocolForSchedule(guidedTrial), "evidence_guided_epoch@1");
-assert.match(html, /value="quick" selected/);
+const jointTrial = modelSandbox.normalizedOptimizationSchedule({experiment_mode: "joint", formal_origin_count: 999});
+assert.equal(jointTrial.schema_version, "ecologyrsi-dsh.joint-plugin-epoch-schedule/2");
+assert.equal(jointTrial.screening_origin_count, 10);
+assert.equal(jointTrial.max_local_edits_per_batch, 2);
+assert.equal(jointTrial.local_batch_origin_count, 25);
+assert.equal(modelSandbox.optimizationProtocolForSchedule(jointTrial), "joint_plugin_epoch@2");
+assert.throws(() => modelSandbox.normalizedOptimizationSchedule({experiment_mode: "evidence_guided"}), /统一使用联合策略/);
+assert.doesNotMatch(html, /id="experiment-mode"/);
+assert.match(html, /联合策略进化/);
 const referenceDelta = modelSandbox.candidateDelta({score: -.02, metrics: {improvement: .8}, score_evidence: {score_vs_baseline: -.02, delta_vs_parent: null, delta_vs_incumbent: .03}}, [], {});
 assert.equal(referenceDelta.value, .03);
 assert.equal(referenceDelta.label, "同组相对冠军增益");
@@ -4929,3 +5203,272 @@ assert.match(observedFunnel, /登记修改的结构解析覆盖/);
 assert.match(observedFunnel, /执行观测回执 4 条/);
 assert.match(observedFunnel, /未触发 1/);
 assert.match(observedFunnel, /不等于受控行为差异或性能提升/);
+assert.match(observedFunnel, /执行、采纳与科学结论/);
+assert.match(observedFunnel, /effect passed 只表示执行观测通过/);
+
+// A selected new mode or newly deployed diagnostics never alters a historical run's display.
+assert.match(html, /此选择只在创建新运行时冻结，不会改变已有运行/);
+assert.match(html, /id="frozen-run-contract"/);
+const historicalFeatures = modelSandbox.frozenRunFeatureRows({configuration: {},
+  evolution_funnel: {prediction_contribution: {latest_training_summary: {cells: []}}}});
+assert.match(historicalFeatures[0][1], /标准搜索/);
+assert.match(historicalFeatures[1][1], /^未启用/);
+assert.match(historicalFeatures[2][1], /^未启用/);
+const frozenPolicyConfiguration = {targeted_search_policy: "cellwise_training_evidence@1",
+  behavior_diagnostics_policy: "prediction_contribution@1", candidate_novelty_policy: "run_behavior_novelty@1",
+  candidate_executability_policy: "strategy_tool_input_contract@1"};
+const newFeatures = modelSandbox.frozenRunFeatureRows({configuration: frozenPolicyConfiguration});
+assert.equal(newFeatures[0][1], "逐目标、逐时距改进");
+assert.equal(newFeatures[1][1], "已启用，等待训练证据");
+assert.equal(newFeatures[2][1], "已启用");
+assert.match(newFeatures[3][1], /已启用（不代表预测效果通过）/);
+assert.match(historicalFeatures[3][1], /^未启用/);
+assert.equal(modelSandbox.frozenRunFeatureRows({configuration: frozenPolicyConfiguration,
+  evolution_funnel: {prediction_contribution: {latest_training_summary: {cells: []}}}})[1][1], "已启用，已有训练证据");
+assert.match(modelSandbox.frozenRunFeatureRows({configuration: {targeted_search_policy: "unknown-policy"}})[0][1], /^未识别/);
+const compactFeatureProjection = {run_id: "run:frozen-mode", status: "running",
+  frozen_feature_policies: frozenPolicyConfiguration};
+const firstCompactRun = modelSandbox.normalizeRun(compactFeatureProjection);
+assert.equal(modelSandbox.frozenRunFeatureRows(firstCompactRun)[0][1], "逐目标、逐时距改进");
+const hydratedFeatureRun = modelSandbox.normalizeRun({id: "run:frozen-mode",
+  configuration: {...frozenPolicyConfiguration, prediction_model_id: "frozen-model"}});
+const refreshedFeatureRun = modelSandbox.mergeRunProjection(hydratedFeatureRun, {projection: compactFeatureProjection});
+assert.equal(refreshedFeatureRun.configuration.prediction_model_id, "frozen-model");
+assert.equal(modelSandbox.frozenRunFeatureRows(refreshedFeatureRun)[1][1], "已启用，等待训练证据");
+const legacyMonitorMerge = modelSandbox.mergeRunProjection(hydratedFeatureRun, {projection: {run_id: "run:frozen-mode", status: "paused"}});
+assert.equal(modelSandbox.frozenRunFeatureRows(legacyMonitorMerge)[0][1], "逐目标、逐时距改进");
+const oldCompactRun = modelSandbox.normalizeRun({run_id: "run:old-frozen", frozen_feature_policies: {
+  targeted_search_policy: null, behavior_diagnostics_policy: null, candidate_novelty_policy: null}});
+assert.match(modelSandbox.frozenRunFeatureRows(oldCompactRun)[0][1], /标准搜索/);
+assert.match(modelSandbox.frozenRunFeatureRows(oldCompactRun)[1][1], /^未启用/);
+const duplicateWithPreview = {id: "candidate:historical-duplicate", status: "duplicate",
+  inference_trace: [{sample_id: "sample:observed", predicted: 1}]};
+assert.equal(modelSandbox.candidateSampleEvidence(duplicateWithPreview, {}).trace.status, "partial");
+assert.equal(modelSandbox.candidateOutcome(duplicateWithPreview, {}).text, "已标记等价版本");
+assert.doesNotMatch(modelSandbox.selectionReasonText("duplicate"), /未重复评测|已跳过/);
+
+assert.equal(modelSandbox.frozenRunFeatureRows({configuration: {
+  behavior_diagnostics_policy: "prediction_contribution@2"
+}})[1][1], "已启用，等待训练证据");
+assert.match(modelSandbox.frozenRunFeatureRows({configuration: {
+  behavior_diagnostics_policy: "prediction_contribution@999"
+}})[1][1], /^未识别/);
+
+// Integration regression: the real create command, selection command and
+// incremental sample renderers share one display identity. Deferred history
+// reads must not repaint a new attempt, including its error and finally paths.
+function sampleCreationRaceFixture() {
+  const nodes = new Map();
+  const node = (selector) => {
+    if (!nodes.has(selector)) {
+      nodes.set(selector, {...modelNode(), setAttribute() {}, classList: {add() {}, toggle() {}}});
+    }
+    return nodes.get(selector);
+  };
+  const sandbox = {
+    console, URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
+    window: {location: {search: ""}, setTimeout, clearTimeout},
+    document: {querySelector: node, querySelectorAll: () => [], getElementById: (id) => node("#" + id)},
+    EcologyDSHHost: {getPublicContext: () => ({apiBase: "/api", models: []})},
+  };
+  vm.createContext(sandbox);
+  for (const name of ["core", "catalog", "data", "commands", "render_shell", "render_process", "render_candidates"]) {
+    vm.runInContext(read(`assets/js/${name}.js`), sandbox);
+  }
+  const history = sandbox.normalizeRun({run_id: "run:history-race", status: "completed",
+    execution_progress: {last_evidence_candidate_id: "candidate:history-race"},
+    candidates: [{candidate_id: "candidate:history-race", status: "evaluated",
+      inference_trace: {rows: [{sample_id: "projection-history", target: "projection-history", predicted: 11}]}}]});
+  const payload = (marker) => ({schema_version: "ecologyrsi-dsh.browser-sample-results/1",
+    run_id: history.id, candidate_id: history.candidates[0].id,
+    offset: 0, limit: 25, total: 1, complete: true, rows: [
+      {sample_id: marker, target: marker, predicted: 22, observed: 23, sample_status: "succeeded"}
+    ]});
+  sandbox.state.activeRun = history;
+  sandbox.state.runs = [history];
+  sandbox.state.workspace = "process";
+  sandbox.state.catalog.evaluators = [{id: "fixture-evaluator", prediction_cells_per_origin: 9}];
+  node("#evaluator-id").value = "fixture-evaluator";
+  sandbox.state.selectedCandidateId = history.candidates[0].id;
+  sandbox.resetCandidateSamples(history.id, history.candidates[0].id);
+  const cachedPage = sandbox.normalizeCandidateSamplePage(payload("cached-history"), history.id, history.candidates[0].id, 0, 25);
+  sandbox.state.candidateSamplePage = cachedPage;
+  sandbox.hasCapability = () => true;
+  const toasts = [];
+  sandbox.showToast = (message) => { toasts.push(message); };
+  sandbox.ensureWorkspaceData = async () => true;
+  sandbox.startRunMonitor = () => false;
+  let renders = 0;
+  sandbox.renderAll = () => {
+    renders += 1;
+    sandbox.renderProcessSummary(sandbox.displayedRun());
+    sandbox.renderCandidateSampleViews();
+  };
+  sandbox.renderAll();
+  assert.match(node("#sample-inference-list").innerHTML, /cached-history/);
+  const createPayload = {dataset_id: "dataset:fixture", episode_id: "episode:fixture",
+    strategy_model_id: "fixture/strategy", review_model_id: "fixture/review", rounds: 1,
+    max_candidates: 4, candidates_per_generation: 4, candidate_concurrency: 1,
+    sample_agent_batch_size: 9, sample_concurrency: 4};
+  return {sandbox, node, history, payload, cachedPage, createPayload, toasts, renders: () => renders};
+}
+function deferredSampleRace() {
+  let resolve, reject;
+  const promise = new Promise((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
+  return {promise, resolve, reject};
+}
+for (const timing of ["preflight", "failed", "failed-403", "failed-503", "return-history"]) {
+  const fixture = sampleCreationRaceFixture();
+  const {sandbox, node, history, payload, cachedPage, createPayload} = fixture;
+  const oldSamples = deferredSampleRace();
+  const preflight = deferredSampleRace();
+  const paths = [];
+  sandbox.request = (route, options) => {
+    paths.push(route);
+    if (route.includes("/samples?")) { return oldSamples.promise; }
+    if (route === "/model-preflight") {
+      assert.equal(options.timeout, 500000, "client must outlast the 490 s native preflight proxy deadline");
+      return preflight.promise;
+    }
+    if (route.endsWith("?view=overview")) { return Promise.resolve({projection: history}); }
+    throw new Error("Unexpected request: " + route);
+  };
+  const pendingSamples = sandbox.loadCandidateSamples(0, {force: true});
+  assert.equal(sandbox.state.candidateSampleRefreshing, true);
+  const pendingCreate = sandbox.createRun(createPayload);
+  assert.equal(sandbox.createDisplayStatus().state, "preflight");
+  assert.equal(sandbox.state.candidateSampleRefreshing, false);
+  assert.equal(sandbox.state.candidateSamplePage, cachedPage, "new creation preserves history cache");
+  assert.equal(await sandbox.loadCandidateSamples(0, {force: true}), false);
+  assert.equal(await sandbox.refreshCandidateSamples({force: true}), false);
+  assert.equal(paths.filter((route) => route.includes("/samples?")).length, 1);
+  assert.doesNotMatch(node("#sample-inference-list").innerHTML, /cached-history|projection-history/);
+  sandbox.renderCandidates();
+  assert.doesNotMatch(node("#candidate-table").innerHTML, /candidate:history-race/);
+  assert.equal(sandbox.state.candidateSamplePage, cachedPage, "hidden candidate workspace preserves selection and cache");
+  if (timing !== "preflight") {
+    preflight.resolve({passed: false});
+    assert.equal(await pendingCreate, null);
+    assert.equal(sandbox.createDisplayStatus().state, "failed");
+    assert.match(node("#process-summary").innerHTML, /本次启动未成功/);
+  }
+  let freshSamples, pendingFreshSamples;
+  if (timing === "return-history") {
+    assert.equal(await sandbox.selectRun(history.id, false), true);
+    assert.equal(sandbox.createDisplayStatus(), null);
+    assert.match(node("#sample-inference-list").innerHTML, /cached-history/);
+    freshSamples = deferredSampleRace();
+    sandbox.request = () => freshSamples.promise;
+    pendingFreshSamples = sandbox.loadCandidateSamples(0, {force: true});
+    assert.equal(sandbox.state.candidateSampleRefreshing, true);
+  }
+  const rendersBeforeCompletion = fixture.renders();
+  const toastsBeforeCompletion = fixture.toasts.length;
+  if (timing === "failed-403" || timing === "failed-503") {
+    oldSamples.reject(Object.assign(new Error("obsolete sample response"), {status: timing === "failed-403" ? 403 : 503}));
+  } else { oldSamples.resolve(payload("late-history")); }
+  assert.equal(await pendingSamples, false);
+  assert.equal(fixture.renders(), rendersBeforeCompletion);
+  assert.equal(fixture.toasts.length, toastsBeforeCompletion);
+  assert.equal(sandbox.state.candidateSamplePage, cachedPage);
+  assert.equal(sandbox.state.candidateSamplePermissionDenied, false);
+  assert.equal(sandbox.state.candidateSampleError, null);
+  assert.doesNotMatch(node("#sample-inference-list").innerHTML, /late-history/);
+  if (timing === "preflight") {
+    preflight.resolve({passed: false});
+    assert.equal(await pendingCreate, null);
+  }
+  if (timing === "return-history") {
+    assert.equal(sandbox.state.candidateSampleRefreshing, true, "stale finally must not finish a fresh request");
+    freshSamples.resolve(payload("fresh-history"));
+    assert.equal(await pendingFreshSamples, true);
+    assert.match(node("#sample-inference-list").innerHTML, /fresh-history/);
+    assert.equal(sandbox.state.candidateSampleRefreshing, false);
+  } else {
+    sandbox.renderCandidateSampleViews();
+    assert.doesNotMatch(node("#sample-inference-list").innerHTML, /history/);
+    assert.doesNotMatch(node("#candidate-samples-table").innerHTML, /history/);
+    assert.equal(sandbox.state.activeRun, history);
+    assert.equal(await sandbox.selectRun(history.id, false), true);
+    assert.equal(sandbox.createDisplayStatus(), null);
+    assert.match(node("#sample-inference-list").innerHTML, /cached-history/);
+    sandbox.request = async () => payload("fresh-history");
+    assert.equal(await sandbox.loadCandidateSamples(0, {force: true}), true);
+    assert.match(node("#sample-inference-list").innerHTML, /fresh-history/);
+  }
+  assert.equal(paths.includes("/runs"), false, "failed preflight never creates a run");
+}
+// Independently exercise the host epoch and displayed identity guards, even
+// when a caller has not yet reset the sample selection/request counter.
+for (const changedIdentity of ["host-context", "run", "candidate"]) {
+  const {sandbox, node, payload, cachedPage} = sampleCreationRaceFixture();
+  const samples = deferredSampleRace();
+  sandbox.request = () => samples.promise;
+  const pendingSamples = sandbox.loadCandidateSamples(0, {force: true});
+  let incrementalRenders = 0;
+  sandbox.renderCandidateSampleViews = () => { incrementalRenders += 1; };
+  if (changedIdentity === "host-context") { sandbox.state.contextEpoch += 1; }
+  if (changedIdentity === "run") { sandbox.state.activeRun = {...sandbox.state.activeRun, id: "run:replacement"}; }
+  if (changedIdentity === "candidate") { sandbox.state.selectedCandidateId = "candidate:replacement"; }
+  samples.resolve(payload("obsolete-identity"));
+  assert.equal(await pendingSamples, false);
+  assert.equal(sandbox.state.candidateSamplePage, cachedPage);
+  assert.equal(incrementalRenders, 0, "stale finally must not redraw another display context");
+  assert.doesNotMatch(node("#sample-inference-list").innerHTML, /obsolete-identity/);
+}
+console.log("new creation / late historical samples / explicit history return: ok");
+
+// Render the actual funnel with the public paired-tool projection, retaining
+// measured zero separately from absent/unverified evidence and old contracts.
+const pairedToolFunnelFixture = {registered_candidates: 4, budget_unallocated_candidates: 0, applied_edits: 1,
+  stages: {}, failure_observations: {}, prediction_contribution: {
+    policy: "prediction_contribution@2", enabled: true, scope: "training_only",
+    latest_training_summary: {cells: []}, paired_tool_effects: [
+      {comparison_id: "comparison:measured", status: "measured", changed_cells: ["co2_concentration@6h"],
+        compared_cells: 9, scientific_gain_established: false, cohort_digest: "fixture-cohort"},
+      {comparison_id: "comparison:unchanged", status: "measured", changed_cells: [], compared_cells: 9,
+        scientific_gain_established: false, cohort_digest: "fixture-cohort"},
+      {comparison_id: "comparison:missing-inputs", status: "unverified", reason: "complete_matching_inputs_required"}
+    ]
+  }};
+const pairedToolMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: pairedToolFunnelFixture});
+assert.match(pairedToolMarkup, /原始预测工具的父子变化/);
+assert.match(pairedToolMarkup, /原始工具有变化 1 \/ 9 格/);
+assert.match(pairedToolMarkup, /变化格：.* · 6h/);
+assert.match(pairedToolMarkup, /原始工具有变化 0 \/ 9 格/);
+assert.match(pairedToolMarkup, /所比较格未发现原始工具输出变化/);
+assert.match(pairedToolMarkup, /同输入证据不足/);
+assert.match(pairedToolMarkup, /缺少完整且一致的输入或原始工具输出证据/);
+assert.match(pairedToolMarkup, /数值变化不代表性能提升/);
+assert.match(pairedToolMarkup, /最终保留仍按本运行原有的配对与轮末门槛决定/);
+for (const [reason, label] of [
+  ["same_cohort_required", "缺少同一训练样本组"],
+  ["same_diagnostic_version_required", "诊断版本不一致或缺失"],
+  ["cell_coverage_mismatch", "目标与时距覆盖不一致"]
+]) {
+  const legacyMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {...pairedToolFunnelFixture,
+    prediction_contribution: {policy: "prediction_contribution@1", enabled: true,
+      paired_tool_effects: [{status: "unverified", reason}]}}});
+  assert.ok(legacyMarkup.includes(label));
+  assert.doesNotMatch(legacyMarkup, /原始工具有变化/);
+}
+for (const pair of [{status: "measured"}, {status: "measured", changed_cells: []},
+  {status: "measured", compared_cells: 9}, {status: "measured", compared_cells: null, changed_cells: []}]) {
+  const missingMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {...pairedToolFunnelFixture,
+    prediction_contribution: {policy: "prediction_contribution@2", enabled: true, paired_tool_effects: [pair]}}});
+  assert.match(missingMarkup, /同输入证据不足/);
+  assert.doesNotMatch(missingMarkup, /原始工具有变化/);
+}
+const noPairMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {...pairedToolFunnelFixture,
+  prediction_contribution: {policy: "prediction_contribution@1", enabled: true}}});
+assert.match(noPairMarkup, /尚无可核验的父子比较记录/);
+assert.doesNotMatch(noPairMarkup, /原始工具有变化/);
+const noDiagnosticsMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {...pairedToolFunnelFixture,
+  prediction_contribution: undefined}});
+assert.doesNotMatch(noDiagnosticsMarkup, /原始预测工具的父子变化/);
+const unsafePairMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {...pairedToolFunnelFixture,
+  prediction_contribution: {paired_tool_effects: [{status: "measured", comparison_id: '<img src=x onerror="bad()">',
+    compared_cells: 9, changed_cells: ["<script>bad()</script>"]}]}}});
+assert.doesNotMatch(unsafePairMarkup, /<img|<script>/);
+assert.match(unsafePairMarkup, /&lt;script&gt;/);
+console.log("paired raw tool evidence renderer: ok");

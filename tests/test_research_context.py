@@ -7,10 +7,10 @@ import unittest
 from unittest.mock import patch
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
-from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError, DshResearchOutputBudgetError
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
-from ecologyrsi_dsh.core.models import Run, digest
+from ecologyrsi_dsh.core.models import Run, digest, canonical_json
 from ecologyrsi_dsh.evolution.genome import materialize_seed_genome, parameter_trust_region_neighborhood
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.research_context import compact_research_context, research_report_size_diagnostics
@@ -18,7 +18,9 @@ from ecologyrsi_dsh.evolution.strategies import (
     StrategyRouterDSHAdapter, _forecast_objective_context, _mutation_contract_catalog,
     _predictor_semantics, _validate_candidate_direction_realizability,
 )
-from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan, validate_research_synthesis
+from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan, GenerationReflection, validate_research_synthesis
+from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
+from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration, validate_research_plan
 from ecologyrsi_dsh.knowledge.models import KnowledgeCard, KnowledgeSnapshot
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 from tests.test_autonomous_search_reflection_cycle import _task
@@ -135,7 +137,7 @@ class ResearchContextTests(unittest.TestCase):
                     self.assertEqual(result["dsh_research_summary"], "x" * 1362)
                     self.assertEqual(result["report_size_advisories"], [{"field": "summary", "actual": 1362, "recommended_maximum": 1200}])
 
-    def _budget_policy_adapter(self, invoke):
+    def _budget_policy_adapter(self, invoke, **kwargs):
         """Run one policy-enabled synthesis against a scripted native runtime."""
 
         task = replace(self.task, metadata={**self.task.metadata,
@@ -145,7 +147,130 @@ class ResearchContextTests(unittest.TestCase):
         adapter = StrategyRouterDSHAdapter(gateway=object())
         with patch.object(adapter, "_native_runtime", return_value=SimpleNamespace(run=invoke)):
             return adapter.research_plan("offline", run=self.run, task=task, parent_genome=parent.to_dict(),
-                knowledge_snapshot=self.knowledge, generation_search_plan=self.search.to_dict(), candidate_count=4)
+                knowledge_snapshot=self.knowledge, generation_search_plan=self.search.to_dict(), candidate_count=4,
+                **kwargs)
+
+    def test_next_round_plan_references_full_reflection_without_changing_model_evidence(self):
+        output = minimal_aligned_synthesis()
+        reflection = GenerationReflection(
+            run_id=self.run.run_id, generation=0, analysis_digest="a" * 64,
+            summary="r" * 3900, lessons=tuple(f"lesson {i}: " + "x" * 780 for i in range(16)),
+            recommended_search_queries=("greenhouse causal forecast",),
+            candidate_directions=tuple(output["candidate_directions"]),
+            stop_recommendation="insufficient_evidence",
+        ).to_dict()
+        raw_before = deepcopy(reflection)
+        next_run = replace(self.run, generation=1)
+        next_search = replace(self.search, generation=1, search_plan_digest="")
+        # Existing bounded plan plus the second round's reflection used to
+        # exceed 24 KB even though each individual field was legal.
+        old_plan = {"prior_note": "p" * 3900}
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return deepcopy(output)
+        adapter = StrategyRouterDSHAdapter(gateway=object())
+        with patch.object(adapter, "_native_runtime", return_value=SimpleNamespace(run=invoke)):
+            result = adapter.research_iteration(
+                run=next_run, task=self.task, parent_genome=self.parent.to_dict(),
+                knowledge_snapshot=self.knowledge, generation_search_plan=next_search.to_dict(),
+                candidate_count=4, current_plan=old_plan, previous_generation_reflection=reflection,
+                previous_generation_analysis=None, previous_knowledge_assessment=None,
+            )
+        plan = result["plan"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["context"]["previous_generation_reflection"], raw_before)
+        self.assertEqual(reflection, raw_before)
+        self.assertEqual(plan["candidate_directions"],
+                         validate_research_synthesis(output, candidate_count=4, allowed_evidence_refs=set())["candidate_directions"])
+        self.assertEqual(plan["dsh_research_summary"], output["summary"])
+        reference = plan["previous_generation_reflection"]
+        self.assertEqual(reference["reflection_digest"], reflection["reflection_digest"])
+        self.assertEqual(reference["source_payload_digest"], digest(reflection))
+        self.assertNotIn("lessons", reference)
+        self.assertLess(len(canonical_json(plan)), 24000)
+        expanded = {**plan, "previous_generation_reflection": reflection}
+        with self.assertRaisesRegex(ValueError, "exceeds the bounded contract"):
+            validate_research_plan(expanded)
+        iteration = ResearchIteration(run_id=next_run.run_id, generation=1, status=result["status"],
+            plan=plan, prediction_model_adoption=resolve_predictor_adoption(self.task, plan).to_dict(),
+            knowledge_snapshot_digest="test-frozen-knowledge")
+        self.assertEqual(ResearchIteration.from_dict(iteration.to_dict()), iteration)
+
+    def test_durable_plan_rejection_reaches_existing_semantic_repair(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            output = minimal_aligned_synthesis()
+            if len(calls) == 1:
+                # Valid synthesis schema, invalid durable field (4,000 chars).
+                output["summary"] = "x" * 4001
+            return output
+        result = self._budget_policy_adapter(invoke)
+        self.assertEqual([call["stage_attempt"] for call in calls], [1, 2])
+        self.assertIn("4000", calls[1]["context"]["host_validation_feedback"]["validation_detail"])
+        self.assertEqual(result["dsh_research_summary"], minimal_aligned_synthesis()["summary"])
+
+    def test_training_archive_survives_research_storage_and_next_round_feedback(self):
+        from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
+        from ecologyrsi_dsh.evaluators.skill_program import seed_skill_program
+
+        components = {"scientific_program": self.parent.to_dict()["scientific_program"],
+                      "skill_program": seed_skill_program()}
+        archive = {"schema_version": "ecologyrsi-dsh.exploration-archive/2", "entries": [{
+            "candidate_id": "candidate:prior", "component_digest": digest(components),
+            "components": components, "qualification": "executable_training_example_not_certified",
+            "effect_evidence": {"status": "execution_only_effect_unverified"},
+        }]}
+        original = deepcopy(archive)
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return minimal_aligned_synthesis()
+        plan = self._budget_policy_adapter(invoke, cross_generation_experience={"exploration_archive": archive})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["context"]["cross_generation_experience"]["exploration_archive"], original)
+        self.assertEqual(plan["exploration_archive"], original)
+        iteration = ResearchIteration(run_id=self.run.run_id, generation=0, status="model_generated", plan=plan,
+            prediction_model_adoption=resolve_predictor_adoption(self.task, plan).to_dict(),
+            knowledge_snapshot_digest="test-frozen-knowledge")
+        self.assertEqual(ResearchIteration.from_dict(iteration.to_dict()), iteration)
+        feedback = safe_aggregate_feedback(iteration.to_dict(), name="next-round research")
+        self.assertEqual(feedback["plan"]["exploration_archive"], original)
+        self.assertEqual(archive, original)
+
+    def test_archive_envelope_keeps_depth_size_and_executable_field_guards(self):
+        from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
+
+        deep = {"safe": 1}
+        for _ in range(8):
+            deep = {"exploration_archive": {"entries": [deep]}}
+        for entry in (deep, {"text": "x" * 4001}, {"items": list(range(129))},
+                      {"number": float("nan")}, {"a": "x" * 3500, "b": "y" * 3500}):
+            for validate in (validate_research_plan, lambda p: safe_aggregate_feedback(p, name="experience")):
+                with self.subTest(field=next(iter(entry)), validate=validate), self.assertRaises(ValueError):
+                    validate({"exploration_archive": {"entries": [entry]}})
+        for entries in ([None], [{}] * 129, "invalid"):
+            with self.subTest(entries_type=type(entries).__name__), self.assertRaises((TypeError, ValueError)):
+                validate_research_plan({"exploration_archive": {"entries": entries}})
+        poisoned = {"exploration_archive": {"entries": [{"components": {
+            "GroundTruth": "private-label", "source_code": "private-code", "safe": 1}}]}}
+        with self.assertRaisesRegex(ValueError, "forbidden executable field"):
+            validate_research_plan(poisoned)
+        self.assertEqual(safe_aggregate_feedback(poisoned, name="experience"),
+                         {"exploration_archive": {"entries": [{"components": {"safe": 1}}]}})
+        with self.assertRaisesRegex(ValueError, "maximum 24000"):
+            validate_research_plan({**{f"text{i}": "x" * 3900 for i in range(7)},
+                                    "exploration_archive": {"entries": []}})
+
+    def test_durable_plan_repair_remains_bounded_without_truncating_output(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return {**minimal_aligned_synthesis(), "summary": "x" * 4001}
+        with self.assertRaises(ValueError):
+            self._budget_policy_adapter(invoke)
+        self.assertEqual(len(calls), 2)
 
     @staticmethod
     def _exhausted(code="structured_child_output_budget_exhausted"):
@@ -168,19 +293,68 @@ class ResearchContextTests(unittest.TestCase):
         self.assertEqual(feedback["rejection_code"], "output_budget_exhausted_before_structured_output")
         self.assertEqual(feedback["output_token_budget"], 16384)
         self.assertIn("16384", feedback["validation_detail"])
-        # The repair is bounded by the same fence as a semantic rejection: it
-        # may change the request once, never replay it.
+        # The changed request keeps the same single-response output cap.
         self.assertEqual(calls[1]["max_tokens"], 16384)
 
-    def test_a_second_budget_exhaustion_stays_terminal_without_a_third_request(self):
+    def test_a_second_budget_exhaustion_requests_a_research_pause_without_a_third_call(self):
         calls = []
         def invoke(**request):
             calls.append(request)
             raise self._exhausted()
-        with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+        with self.assertRaises(DshResearchOutputBudgetError) as raised:
             self._budget_policy_adapter(invoke)
         self.assertEqual(raised.exception.error_code, "structured_child_output_budget_exhausted")
         self.assertEqual(len(calls), 2)
+
+    def test_output_exhaustion_does_not_consume_semantic_correction(self):
+        calls = []
+        invalid = minimal_aligned_synthesis()
+        invalid['candidate_directions'][2].update(
+            mutation_axis='skill_program', mutation_target='causal_planner_skills@1',
+            mutation_direction='revise')
+        original = deepcopy(invalid)
+        def invoke(**request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise self._exhausted()
+            if len(calls) == 2:
+                return invalid
+            corrected = deepcopy(invalid)
+            corrected['candidate_directions'][2]['mutation_direction'] = 'author'
+            return corrected
+        result = self._budget_policy_adapter(invoke)
+        self.assertEqual([c['stage_attempt'] for c in calls], [1, 2, 3])
+        self.assertEqual({c['max_tokens'] for c in calls}, {16384})
+        self.assertEqual(invalid, original)  # Host never rewrites the model output.
+        context = calls[2]['context']
+        self.assertEqual(context['rejected_research_synthesis'], original)
+        self.assertIn('candidate_directions[2]', context['host_validation_feedback']['validation_detail'])
+        self.assertIn('requires author', context['host_validation_feedback']['validation_detail'])
+        self.assertEqual(result['candidate_directions'][2]['mutation_direction'], 'author')
+
+    def test_semantic_feedback_survives_intervening_output_exhaustion(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            if len(calls) == 1:
+                return {**minimal_aligned_synthesis(), 'summary': 'x' * 4001}
+            if len(calls) == 2:
+                raise self._exhausted()
+            return minimal_aligned_synthesis()
+        self._budget_policy_adapter(invoke)
+        context = calls[2]['context']
+        self.assertEqual(context['host_validation_feedback']['output_token_budget'], 16384)
+        self.assertIn('4000', context['semantic_validation_feedback']['validation_detail'])
+        self.assertEqual(context['rejected_research_synthesis']['summary'], 'x' * 4001)
+
+    def test_resume_attempt_ids_do_not_overlap_extended_first_activation(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return minimal_aligned_synthesis()
+        self._budget_policy_adapter(invoke, stage_attempt=2)
+        self.assertEqual(calls[0]['stage_attempt'], 5)
+        self.assertIn(':repair-v2:attempt:5', calls[0]['idempotency_key'])
 
     def test_other_native_failures_keep_failing_on_the_first_request(self):
         calls = []

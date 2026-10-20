@@ -37,6 +37,7 @@ MAX_RECIPE_TERM_EDITS_PER_MUTATION = 2
 MUTATION_OPERATION_BY_AXIS = {spec.axis: op for op, spec in MUTATION_SPECS.items()}
 MUTATION_DIRECTIONS_BY_AXIS = {spec.axis: spec.directions for spec in MUTATION_SPECS.values()}
 MUTATION_AXIS_EFFECTS: dict[str, str] = {
+    "strategy_program": "Authors a complete bounded numerical program with planner, research and proposal advice, inherited memory, registered calls and a finite conditional expression. Calls and calculation consume the frozen tool budget. Actual execution and citation must be measured; advice is not scientific evidence.",
     "component_reset": ("Removes one existing sample-planner authored_directive or skill_program "
                         "and its paired policy reference. Restores the registered template behavior; "
                         "never resets tools, permissions, scientific parameters, or data boundaries."),
@@ -177,6 +178,7 @@ def mutation_axis_contract(axes: Iterable[str]) -> dict[str, Any]:
 CANDIDATE_MUTATION_AXES = frozenset(
     {
         "skill_program",
+        "strategy_program",
         "scientific_parameter",
         "feature_recipe",
         "registered_predictor",
@@ -324,7 +326,7 @@ def _normalize_candidate_outcomes(value: Any) -> tuple[Mapping[str, Any], ...]:
     slot_indices: set[int] = set()
     ranked: list[int] = []
     for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping) or set(raw) != _CANDIDATE_OUTCOME_FIELDS:
+        if not isinstance(raw, Mapping) or set(raw) - {"mutation_operator_id"} != _CANDIDATE_OUTCOME_FIELDS:
             raise ValueError(
                 f"canonical_candidate_outcomes[{index}] fields do not match "
                 "the contract"
@@ -395,16 +397,19 @@ def _normalize_candidate_outcomes(value: Any) -> tuple[Mapping[str, Any], ...]:
             raise ValueError(
                 "canonical candidate direction and behavior digests are required"
             )
+        operator_id = raw.get("mutation_operator_id")
+        if "mutation_operator_id" in raw and operator_id != "joint-plugin-mutation@1":
+            raise ValueError("unsupported candidate outcome mutation operator")
+        operation_limit = 4 if operator_id else 1
         operations = raw.get("mutation_operations")
         if (
             isinstance(operations, (str, bytes))
             or not isinstance(operations, Sequence)
-            or len(operations) != 1
-            or not isinstance(operations[0], Mapping)
+            or not 1 <= len(operations) <= operation_limit
+            or not all(isinstance(op, Mapping) for op in operations)
         ):
             raise ValueError(
-                "canonical candidate mutation_operations must contain exactly "
-                "one object"
+                "canonical candidate mutation_operations exceeds its frozen operator limit"
             )
         # Round-trip through the canonical encoder to reject non-JSON and
         # non-finite values while severing references to mutable proposal data.
@@ -433,6 +438,7 @@ def _normalize_candidate_outcomes(value: Any) -> tuple[Mapping[str, Any], ...]:
                 maximum=240,
             ),
             "mutation_operations": canonical_operations,
+            **({"mutation_operator_id": operator_id} if operator_id else {}),
             "behavior_digest": behavior_digest,
         }
         if candidate_id in candidate_ids:

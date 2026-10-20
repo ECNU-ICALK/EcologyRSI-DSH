@@ -12,7 +12,9 @@ from ..data.splits import IndexRange
 from ..data.toy import ToyCropSoilWater
 from ..evaluators.greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
+    BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
     BaselineAlignedRidgeConfig,
+    BaselineAlignedCellwiseRidgeConfig,
     ExogenousRidgeConfig,
     HorizonTargetwiseExogenousRidgeConfig,
     TargetwiseExogenousRidgeConfig,
@@ -346,7 +348,9 @@ def _ridge_smoke(
     algorithm_ir: AlgorithmIR,
 ) -> dict[str, Any]:
     config = (
-        BaselineAlignedRidgeConfig.from_mapping(spec.parameters)
+        BaselineAlignedCellwiseRidgeConfig.from_mapping(spec.parameters)
+        if spec.adapter_id == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
+        else BaselineAlignedRidgeConfig.from_mapping(spec.parameters)
         if spec.adapter_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
         else HorizonTargetwiseExogenousRidgeConfig.from_mapping(spec.parameters)
         if spec.adapter_id == _HORIZON_TARGETWISE_RIDGE_PREDICTOR_ID
@@ -358,7 +362,7 @@ def _ridge_smoke(
         (1, 6, 24)
         if spec.evaluator_id
         in {_MULTIHORIZON_EVALUATOR_ID, _MULTIHORIZON_EVALUATOR_V2_ID,
-            "greenhouse_multihorizon_time_forward@3", "greenhouse_multihorizon_time_forward@4"}
+            "greenhouse_multihorizon_time_forward@3", "greenhouse_multihorizon_time_forward@4", "greenhouse_multihorizon_time_forward@5"}
         else (1,)
     )
     smoke_series = _smoke_split(
@@ -455,6 +459,7 @@ def smoke_test_algorithm_spec(
             evidence = _rolling_smoke(spec, series, algorithm_ir)
         elif spec.adapter_id in {
             BASELINE_ALIGNED_RIDGE_MODEL_ID,
+            BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
             _RIDGE_PREDICTOR_ID,
             _TARGETWISE_RIDGE_PREDICTOR_ID,
             _HORIZON_TARGETWISE_RIDGE_PREDICTOR_ID,

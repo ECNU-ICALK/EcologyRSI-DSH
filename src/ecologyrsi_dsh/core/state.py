@@ -639,6 +639,7 @@ def validate_generation_comparison_binding(
     persisted_judgments: Mapping[str, Evaluation] | None = None,
     persisted_screening_events=(),
     persisted_batch_evaluations=(),
+    persisted_rechecks=(),
 ) -> None:
     """Bind a comparison to this run's exact durable evidence and Host gates."""
 
@@ -662,6 +663,9 @@ def validate_generation_comparison_binding(
         raise ValueError(
             "generation comparison evaluations differ from durable holdout evidence"
         )
+    expected_rechecks = [item.to_dict() for item in persisted_rechecks]
+    if canonical_json(comparison.to_dict()["gate_results"].get("holdout_rechecks", [])) != canonical_json(expected_rechecks):
+        raise ValueError("generation comparison differs from durable recheck evidence")
     validate_exploration_generation_comparison(task, formal, comparison)
     from .finalist_review import (
         finalist_review_evidence,
@@ -707,6 +711,7 @@ def validate_generation_comparison_binding(
         generation=comparison.generation,
         cohort_digest=comparison.cohort_digest,
         holdout_evaluations=comparison.holdout_evaluations,
+        holdout_rechecks=persisted_rechecks,
         incumbent_candidate_id=holdout.arm_bindings[
             HoldoutArm.INCUMBENT.value
         ]["candidate_id"],
@@ -1584,6 +1589,7 @@ class RunState:
     trajectory_revision_activations: tuple[TrajectoryRevisionActivation, ...] = ()
     generation_holdouts: tuple[GenerationHoldout, ...] = ()
     holdout_evaluations: tuple[HoldoutEvaluation, ...] = ()
+    holdout_rechecks: tuple[HoldoutEvaluation, ...] = ()
     generation_comparisons: tuple[GenerationComparison, ...] = ()
     effective_revision_bindings: tuple[Mapping[str, Any], ...] = ()
     run_adaptation_cohort: RunAdaptationCohort | None = None
@@ -1819,6 +1825,10 @@ class RunState:
             ),
             None,
         )
+
+    def holdout_recheck_for(self, generation: int, arm: HoldoutArm) -> HoldoutEvaluation | None:
+        return next((item for item in self.holdout_rechecks
+                     if item.scope.generation == generation and item.scope.holdout_arm == arm), None)
 
     def comparison_for(self, generation: int) -> GenerationComparison | None:
         return next(
@@ -2149,6 +2159,7 @@ class RunStateReducer:
         ] = {}
         self.generation_holdouts: dict[int, GenerationHoldout] = {}
         self.holdout_evaluations: dict[tuple[int, HoldoutArm], HoldoutEvaluation] = {}
+        self.holdout_rechecks: dict[tuple[int, HoldoutArm], HoldoutEvaluation] = {}
         self.generation_comparisons: dict[int, GenerationComparison] = {}
         self.effective_revision_bindings: dict[int, dict[str, Any]] = {}
         self.champion_generations: set[int] = set()
@@ -3003,7 +3014,7 @@ class RunStateReducer:
                     if revision is None:
                         raise ValueError("artifact actual revision is missing")
                     scope = resolve_artifact_scope(item, holdouts=self.generation_holdouts.values(),
-                                                   evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
+                                                   evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values(), *self.holdout_rechecks.values()))
                     self.artifact_revision_bindings[item.artifact_id] = validate_artifact_revision_binding(
                         payload.get("artifact_revision_binding"), artifact=item, revision=revision, scope=scope)
                 else:
@@ -3516,7 +3527,7 @@ class RunStateReducer:
                 if revision is None or payload["candidate_revision_id"] != revision.revision_id:
                     raise ValueError("formal stage actual artifact revision is missing")
                 scope = resolve_artifact_scope(artifact, holdouts=self.generation_holdouts.values(),
-                                               evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
+                                               evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values(), *self.holdout_rechecks.values()))
                 binding = validate_artifact_revision_binding(payload["artifact_revision_binding"], artifact=artifact, revision=revision, scope=scope)
                 if binding["genome_digest"] != payload["genome_digest"]:
                     raise ValueError("formal stage actual genome binding mismatch")
@@ -4708,7 +4719,7 @@ class RunStateReducer:
             if existing is not None and existing.to_dict() != holdout.to_dict():
                 raise ValueError("conflicting generation holdout")
             self.generation_holdouts.setdefault(holdout.generation, holdout)
-        elif event.kind == "HoldoutArmStarted":
+        elif event.kind in {"HoldoutArmStarted", "HoldoutRecheckStarted"}:
             expected_fields = {
                 "schema_version",
                 "generation",
@@ -4745,6 +4756,11 @@ class RunStateReducer:
                 or payload["origin_count"] != holdout.origin_count
             ):
                 raise ValueError("HoldoutArmStarted scope is invalid")
+            if event.kind == "HoldoutRecheckStarted":
+                schedule = OptimizationSchedule.from_dict(self.task.metadata["optimization_schedule"])
+                if (not schedule.unified or (generation, arm) not in self.holdout_evaluations
+                        or generation in self.generation_comparisons):
+                    raise ValueError("conditional recheck requires an unsealed unified comparison")
         elif event.kind == "HoldoutEvaluationRecorded":
             if set(payload) != {"evaluation"}:
                 raise ValueError("HoldoutEvaluationRecorded payload is invalid")
@@ -4765,10 +4781,19 @@ class RunStateReducer:
             ):
                 raise ValueError("holdout evaluation scope is invalid")
             key = (holdout.generation, arm)
-            existing = self.holdout_evaluations.get(key)
+            target = self.holdout_evaluations
+            if evaluation.scope.inference_replica:
+                schedule = OptimizationSchedule.from_dict(self.task.metadata["optimization_schedule"])
+                original = self.holdout_evaluations.get(key)
+                if (not schedule.unified or evaluation.scope.inference_replica != 1
+                        or original is None or evaluation.evaluator_digest != original.evaluator_digest
+                        or evaluation.scope.generation in self.generation_comparisons):
+                    raise ValueError("invalid conditional holdout recheck")
+                target = self.holdout_rechecks
+            existing = target.get(key)
             if existing is not None and existing.to_dict() != evaluation.to_dict():
                 raise ValueError("conflicting holdout evaluation")
-            self.holdout_evaluations.setdefault(key, evaluation)
+            target.setdefault(key, evaluation)
         elif event.kind == "GenerationComparisonRecorded":
             if set(payload) != {"comparison"}:
                 raise ValueError("GenerationComparisonRecorded payload is invalid")
@@ -4796,6 +4821,7 @@ class RunStateReducer:
                 persisted_judgments={item.candidate_id: item for item in self.evaluations.values()},
                 persisted_screening_events=self.candidate_screening_events.values(),
                 persisted_batch_evaluations=self.formal_batch_evaluations.values(),
+                persisted_rechecks=tuple(item for item in self.holdout_rechecks.values() if item.scope.generation == comparison.generation),
             )
             existing = self.generation_comparisons.get(comparison.generation)
             if existing is not None and existing.to_dict() != comparison.to_dict():
@@ -4951,6 +4977,7 @@ class RunStateReducer:
             ),
             generation_holdouts=tuple(self.generation_holdouts.values()),
             holdout_evaluations=tuple(self.holdout_evaluations.values()),
+            holdout_rechecks=tuple(self.holdout_rechecks.values()),
             generation_comparisons=tuple(self.generation_comparisons.values()),
             effective_revision_bindings=tuple(self.effective_revision_bindings.values()),
             run_adaptation_cohort=self.run_adaptation_cohort,

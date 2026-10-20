@@ -27,6 +27,7 @@ from .feature_recipe import (
 
 EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-exogenous-ridge@1"
 BASELINE_ALIGNED_RIDGE_MODEL_ID = "greenhouse-baseline-aligned-ridge@1"
+BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID = "greenhouse-baseline-aligned-ridge@2"
 TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-targetwise-ridge@1"
 HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = (
     "greenhouse-horizon-targetwise-ridge@1"
@@ -381,6 +382,22 @@ class HorizonTargetwiseExogenousRidgeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineAlignedCellwiseRidgeConfig(HorizonTargetwiseExogenousRidgeConfig):
+    """V2: nine independent scales, anchored on the same fit-selected baseline.
+
+    The v1 three-horizon contract remains unchanged. Conversion is explicit and
+    preserves each cell's scale; it never reinterprets persistence as seasonal.
+    """
+
+    @classmethod
+    def from_v1(cls, value):
+        old = BaselineAlignedRidgeConfig.from_mapping(value)
+        return cls(history_steps=old.history_steps, ridge_alpha=old.ridge_alpha,
+                   **{name: old.residual_scale_for(target, horizon)
+                      for (target, horizon), name in cls._SCALE_FIELDS.items()})
+
+
+@dataclass(frozen=True, slots=True)
 class RecipeRidgeConfig:
     """Ridge over a host-compiled declarative feature recipe.
 
@@ -459,10 +476,12 @@ def _uses_selected_baseline(config: RidgeConfig) -> bool:
 
     if isinstance(config, RecipeRidgeConfig):
         return config.anchor == "fit_selected_baseline"
-    return isinstance(config, BaselineAlignedRidgeConfig)
+    return isinstance(config, (BaselineAlignedRidgeConfig, BaselineAlignedCellwiseRidgeConfig))
 
 
 def _predictor_model_id(config: RidgeConfig) -> str:
+    if isinstance(config, BaselineAlignedCellwiseRidgeConfig):
+        return BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
     if isinstance(config, RecipeRidgeConfig):
         return RECIPE_RIDGE_MODEL_ID
     if isinstance(config, BaselineAlignedRidgeConfig):
@@ -1880,6 +1899,8 @@ def _digest(value: Any) -> str:
 
 
 __all__ = [
+    "BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID",
+    "BaselineAlignedCellwiseRidgeConfig",
     "BASELINE_ALIGNED_RIDGE_MODEL_ID",
     "BaselineAlignedRidgeConfig",
     "EXOGENOUS_RIDGE_MODEL_ID",

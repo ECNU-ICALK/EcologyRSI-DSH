@@ -9,6 +9,7 @@ mutation.
 from __future__ import annotations
 
 from .mutation_specs import mutation_spec
+from . import joint_policy
 
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
@@ -42,13 +43,15 @@ _PROGRAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*(?:@[A-Za-z0-9][A-Za-z
 _PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
-def mutation_policy_contract() -> dict[str, Any]:
+def mutation_policy_contract(metadata=None) -> dict[str, Any]:
     """Public numerical rules included in the frozen strategy identity.
 
     @2 retains its original 0.15 boundary. A wider search needs a new policy
     version and new runs, rather than changing what an existing ID accepts.
     """
 
+    if metadata is not None and joint_policy.enabled(metadata):
+        return joint_policy.contract()
     return {
         "schema_version": "ecologyrsi-dsh.mutation-policy/1",
         "mutation_operator_id": TRUST_REGION_MUTATION_OPERATOR_ID,
@@ -353,13 +356,14 @@ def _role_profile(value: Any) -> dict[str, Any]:
             "authored_directive",
             "skill_program",
             "skill_policy_ref",
+            "strategy_program",
         },
         # Optional, and omitted from the normalized result when absent rather
         # than stored as null or {} -- the same discipline `scientific_program`
         # uses for `feature_recipe`. That keeps the historical seven-key
         # projection byte-identical, so every archived genome_digest,
         # behavior_digest and genome_id stays reproducible and replayable.
-        optional=frozenset({"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref"}),
+        optional=frozenset({"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref", "strategy_program"}),
     )
     role = _text(raw["role"], "role_profile.role", pattern=_PRESET_ID_RE)
     if role not in {"sample-planner", "sample-repair"}:
@@ -450,6 +454,11 @@ def _role_profile(value: Any) -> dict[str, Any]:
             raise ValueError("only sample-planner can author skills")
         result["skill_program"] = validate_skill_program(raw["skill_program"])
         result["skill_policy_ref"] = _program_ref(raw["skill_policy_ref"], "skill_policy_ref")
+    if "strategy_program" in raw:
+        from ..evaluators.strategy_program import validate_strategy_program
+        if role != "sample-planner":
+            raise ValueError("only sample-planner can author strategy programs")
+        result["strategy_program"] = validate_strategy_program(raw["strategy_program"])
     return result
 
 
@@ -1118,7 +1127,7 @@ def apply_genome_mutation(
         )
     strict_trust_region = (
         context.mutation_operator_id
-        in {TRUST_REGION_MUTATION_OPERATOR_ID, LOCAL_EDIT_MUTATION_OPERATOR_ID}
+        in {TRUST_REGION_MUTATION_OPERATOR_ID, LOCAL_EDIT_MUTATION_OPERATOR_ID, joint_policy.MUTATION_OPERATOR}
     )
     if (
         context.mutation_operator_id == TRUST_REGION_MUTATION_OPERATOR_ID
@@ -1133,12 +1142,20 @@ def apply_genome_mutation(
     parent_agent = deep_thaw_json(deep_freeze_json(result["agent_program"]))
     scientific = result["scientific_program"]
     agent = result["agent_program"]
+    coordinates = set()
     for raw_operation in operations:
         if not isinstance(raw_operation, Mapping):
             raise TypeError("mutation operation must be an object")
         op = _text(raw_operation.get("op"), "mutation op", pattern=_PROGRAM_ID_RE)
         spec = mutation_spec(op)
+        if op == "author_strategy_program" and context.mutation_operator_id not in {joint_policy.MUTATION_OPERATOR, LOCAL_EDIT_MUTATION_OPERATOR_ID}:
+            raise ValueError("strategy program requires the joint mutation policy")
         item = _operation(raw_operation, op)
+        if context.mutation_operator_id == joint_policy.MUTATION_OPERATOR:
+            coordinate = (op, item.get("role"), item.get("name"), item.get("component"))
+            if coordinate in coordinates:
+                raise ValueError("joint mutation cannot repeat a coordinate")
+            coordinates.add(coordinate)
         if spec.roles:
             role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
             if role not in spec.roles:
@@ -1158,7 +1175,7 @@ def apply_genome_mutation(
             if scientific["parameter_overrides"].get(name) == value:
                 raise ValueError(f"mutation operation {op} does not change {name}")
             if strict_trust_region:
-                schemas = parameter_schemas
+                schemas = (None if scientific["predictor_ref"] != parent_scientific["predictor_ref"] else parameter_schemas)
                 if schemas is None:
                     predictor = registry.program(
                         "predictors", scientific["predictor_ref"]["id"]
@@ -1338,6 +1355,12 @@ def apply_genome_mutation(
             # change roles, tool grants, instruction parameters or host gates.
             del profile[component]
             profile.pop(policy_field, None)
+        elif op == "author_strategy_program":
+            from ..evaluators.strategy_program import validate_strategy_program
+            program = validate_strategy_program(item["strategy_program"])
+            if profile.get("strategy_program") == program:
+                raise ValueError("strategy mutation does not change the program")
+            profile["strategy_program"] = program
         elif op == "author_skill_program":
             from ..evaluators.skill_program import SKILL_POLICY_ID, validate_skill_program
             program = validate_skill_program(item["skill_program"])

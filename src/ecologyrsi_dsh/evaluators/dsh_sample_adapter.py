@@ -11,9 +11,12 @@ from ..core.models import digest
 from .sample_contracts import _causal_wave_identity, _safe_mapping, _normalized_operation_max_tokens, _normalized_remote_critic_policy
 from .shared_sample_context import normalized_sample_planner_prompt_profile
 from .sample_execution import SampleExecutionPausedError, SampleExecutionCancelledError, SampleExecutionControlUnavailableError, classify_sample_failure
-from ..core.errors import dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable
+from ..core.errors import (
+    DshNativeRuntimeUnavailableError, DshSamplePlannerOutputBudgetError,
+    dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable,
+)
 from ..core.model_execution_policy import (
-    NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
     SAMPLE_OPERATION_MAX_MAX_TOKENS,
     SAMPLE_OPERATION_MIN_MAX_TOKENS,
 )
@@ -42,13 +45,16 @@ def _sample_routing_wave(
     samples: Sequence[Mapping[str, Any]],
     context: Mapping[str, Any],
     available_tools: Sequence[Mapping[str, Any]],
+    identity_digests: Mapping[str, str],
 ) -> dict[str, Any]:
     return {
         "schema_version": "ecologyrsi-dsh.sample-routing-wave/1",
         "role": role,
         "model_route_id": model_id,
         "samples": [dict(item) for item in samples],
-        "context": dict(context),
+        # Bind at the final wire boundary, after origin-context compaction.
+        # Otherwise a revision can reuse its predecessor's persisted request.
+        "context": {**dict(context), "candidate_execution_identity": dict(identity_digests)},
         "available_tools": [dict(item) for item in available_tools],
         "allowed_reason_codes": sorted(REMOTE_REASON_CODES),
     }
@@ -82,6 +88,12 @@ class _DshSampleDecisionClient:
     ) -> Mapping[str, Any]:
         if role not in {"planner", "repair", "critic"}:
             raise SampleExecutionContractError("unsupported DSH sample role")
+        expected_identity = context.get("candidate_execution_identity")
+        if expected_identity is not None and dict(expected_identity) != self.identity_digests:
+            raise SampleExecutionContractError("sample wave execution identity mismatch")
+        if (context.get("candidate_genome_digest") is not None
+                and context["candidate_genome_digest"] != self.identity_digests.get("genome_digest")):
+            raise SampleExecutionContractError("sample wave genome identity mismatch")
         dsh_role = "sample-critic" if role == "critic" else "sample-planner"
         stage = "sample.critic" if role == "critic" else "sample.plan"
         schema_id = (
@@ -106,6 +118,7 @@ class _DshSampleDecisionClient:
             samples=samples,
             context=context,
             available_tools=available_tools,
+            identity_digests=self.identity_digests,
         )
         wave_digest = digest(wave)
         revisions = dict(self.revision_provider(self.run_id))
@@ -155,6 +168,7 @@ class _DshSampleDecisionClient:
             "model_route_id": model_id,
             "sample": dict(sample),
             "outcome": dict(outcome),
+            "candidate_execution_identity": dict(self.identity_digests),
         }
         wave_digest = digest(wave)
         revisions = dict(self.revision_provider(self.run_id))
@@ -246,7 +260,10 @@ class DshSampleCollaborationAdapter:
     """Run the only supported DSH sample protocol: one vector chain per origin."""
 
     adapter_id = "dsh-native-sample-collaboration"
-    adapter_version = "7-native-origin-agent-policy"
+    adapter_version = "11-native-plan-catalog-reference"
+    # This plan is deterministic Host assembly, not a fallible model output.
+    # A broken local contract must never become synthetic failed predictions.
+    host_authored_batch_plan = True
     # Rejected predictions return to the Agent under the ordinary retry budget.
     terminal_constraint_repair_is_local = False
 
@@ -337,7 +354,9 @@ class DshSampleCollaborationAdapter:
         self._advisory_critic_degraded_reason: str | None = None
         self.remote_critic_policy = _normalized_remote_critic_policy(remote_critic_policy)
         self.sample_planner_prompt_profile = normalized_sample_planner_prompt_profile(sample_planner_prompt_profile)
-        self.operation_max_tokens = _normalized_operation_max_tokens(operation_max_tokens or NATIVE_SAMPLE_OPERATION_MAX_TOKENS)
+        self.operation_max_tokens = _normalized_operation_max_tokens(
+            LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS if operation_max_tokens is None else operation_max_tokens
+        )
         self._decision_client = client
 
     def _check_control(self):
@@ -356,8 +375,13 @@ class DshSampleCollaborationAdapter:
 
     def _agent_decide(self, model_id, *, role, samples, context, available_tools, **_unused):
         self._check_control()
-        result = self._decision_client.sample_decide(model_id, role=role, samples=samples,
-            context=context, available_tools=available_tools, max_tokens=self.operation_max_tokens["sample." + role])
+        try:
+            result = self._decision_client.sample_decide(model_id, role=role, samples=samples,
+                context=context, available_tools=available_tools, max_tokens=self.operation_max_tokens["sample." + role])
+        except DshNativeRuntimeUnavailableError as exc:
+            if role in {"planner", "repair"} and exc.error_code == "structured_child_output_budget_exhausted":
+                raise DshSamplePlannerOutputBudgetError() from exc
+            raise
         self._check_control()
         return result
 
@@ -423,6 +447,7 @@ class DshSampleCollaborationAdapter:
             samples=samples,
             context=context,
             available_tools=available_tools,
+            identity_digests=self._decision_client.identity_digests,
         )
         wave_digest = digest(wave)
         stage_attempt = max(1, int(wave_digest[:12], 16))
@@ -443,9 +468,11 @@ class DshSampleCollaborationAdapter:
             catalog=available_tools,
             sample_ids=sample_ids,
             executor=lambda tool_id, parameters: self._execute_agent_tool(
-                frozen_requests, tool_id, parameters
+                frozen_requests, tool_id, parameters, profile.get("strategy_program")
             ),
             prediction_tool_call_budget=prediction_tool_call_budget,
+            allowed_methods=_allowed_prediction_methods(profile),
+            identity_digests=self._decision_client.identity_digests,
             **({"mean_blend_required": True} if mean_required else {}),
             origin_timestamp=next(iter(origins)) if len(origins) == 1 else None,
         )
@@ -630,7 +657,7 @@ class DshSampleCollaborationAdapter:
                 raise SampleExecutionContractError("sample model route does not match frozen task")
         fields = {"run_id", "candidate_id", "dataset_digest", "partition", "algorithm_id", "algorithm_version",
             "evaluator_id", "horizons_hours", "candidate_parameters", "tool_experience", "agent_policy",
-            "stage_context_digest", "candidate_genome_digest", "candidate_agent_profile", "derived_execution_plan", "evaluation_scope"}
+            "stage_context_digest", "candidate_genome_digest", "candidate_agent_profile", "candidate_execution_identity", "derived_execution_plan", "evaluation_scope"}
         decision_context = _safe_mapping({key: context[key] for key in fields if key in context}, "sample policy context")
         plan = {"plan_id": "native-origin-agent@1", "remote_sample_agents": True,
                 "strategy_model_id": self.strategy_model_id, "review_model_id": self.review_model_id,
@@ -661,9 +688,19 @@ class DshSampleCollaborationAdapter:
                 "remote_roles": required_remote_roles,
                 "routing_policy": "sample_agent_analyzes_and_optionally_calls_tools_then_submits_prediction;host_validates_then_scores",
                 "forecast_value_source": "agent_final_structured_prediction",
-                "tools": self._available_tool_catalog(None, plan, role="planner"),
             }
         )
+        catalog = self._available_tool_catalog(None, plan, role="planner")
+        # The full schema is already held by the adapter and passed to every
+        # prediction wave. Repeating it in the bounded batch plan can reject
+        # a valid authored strategy before its first Agent call.
+        plan["tool_catalog_digest"] = digest(catalog)
+        plan["tool_catalog_source"] = "frozen_native_adapter"
+        plan["tools"] = [
+            {"tool_id": tool["tool_id"], "version": tool["version"],
+             "definition_digest": digest(tool)}
+            for tool in catalog
+        ]
         return plan
 
     def reflect_sample(
@@ -789,18 +826,42 @@ class DshSampleCollaborationAdapter:
             "cell_sample_ids": sample_ids,
         }
 
+    @staticmethod
+    def _joint_tools(plan):
+        return (plan.get("decision_context", {}).get("agent_policy") or {}).get("inference", {}).get("tool_selection_policy") == "autonomous-plugin-tools@1"
+
     def _available_tool_catalog(self, request, plan, *, role):
         if role not in {"planner", "repair"}:
             return []
-        return [
+        from .strategy_program import causal_tool_catalog
+        profile = plan.get("decision_context", {}).get("candidate_agent_profile") or {}
+        program = profile.get("strategy_program")
+        extras = causal_tool_catalog() if self._joint_tools(plan) else []
+        if program and self._joint_tools(plan):
+            extras.append({"tool_id": "candidate-program", "version": "1", "parameters": {},
+                "call_cost": len(program["calls"]) + 1, "program_digest": digest(program),
+                "purpose": "Execute this immutable candidate strategy: all internal calls plus calculation are charged."})
+        catalog = [
             {"tool_id": "candidate-model", "version": "1",
-             "purpose": "This candidate's own evolved model over the whole origin vector; the expected first evidence call",
+             "purpose": ("Optional candidate model; select according to evidence" if self._joint_tools(plan) else "This candidate's own evolved model over the whole origin vector; the expected first evidence call"),
              "parameters": {}},
             {"tool_id": "persistence", "version": "1", "purpose": "Latest causal history value", "parameters": {}},
-            *self._agent_tool_catalog,
+            *self._agent_tool_catalog, *extras,
         ]
+        expected = plan.get("tool_catalog_digest")
+        if expected is not None and digest(catalog) != expected:
+            raise SampleExecutionContractError("native prediction tool catalog changed after batch planning")
+        return catalog
 
-    def _execute_agent_tool(self, requests, tool_id, parameters):
+    def _execute_agent_tool(self, requests, tool_id, parameters, program=None):
+        from .strategy_program import execute_strategy_program, execute_causal_tool
+        if tool_id == "candidate-program":
+            if parameters or program is None:
+                raise ValueError("candidate-program requires the frozen strategy and no overrides")
+            return execute_strategy_program(program, requests,
+                lambda name, params: self._execute_agent_tool(requests, name, params))
+        if tool_id in {"causal-trend@1", "causal-mean@1", "causal-seasonal@1"}:
+            return execute_causal_tool(requests, tool_id, parameters)
         if tool_id in {"candidate-model", "persistence"}:
             if parameters:
                 raise ValueError("this tool takes no parameters")
@@ -842,6 +903,21 @@ class DshSampleCollaborationAdapter:
             "evolution_context": {key: decision_context[key] for key in
                                   ("candidate_parameters", "tool_experience", "agent_policy") if key in decision_context},
         }
+        if any(
+            feedback.get("error_type") == "DshSamplePlannerOutputBudgetError"
+            for sample in samples for feedback in sample["failure_feedback"]
+        ):
+            context["output_repair_contract"] = {
+                "reason": "previous_planner_exhausted_output_without_submission",
+                "retry_uses_existing_sample_attempt_budget": True,
+                "instruction": (
+                    "Reacquire the evidence required by this candidate within the unchanged tool budget. "
+                    "Do not repeat the abandoned analysis or reconstruct model fits. "
+                    "Resolve only necessary discrepancies, then immediately submit the complete finite "
+                    "vector with concise reason codes and valid evidence references. "
+                    "All candidate method restrictions and scientific checks still apply."
+                ),
+            }
         skill_traces = {}
         profile = decision_context.get("candidate_agent_profile")
         if isinstance(profile, Mapping) and profile.get("skill_program") is not None:
@@ -901,6 +977,15 @@ class DshSampleCollaborationAdapter:
             "allowed_methods": list(allowed_methods),
             "training_boundary": "Models fit training_fit only; evaluation labels are unavailable",
         }
+        if self._joint_tools(plans[indices[0]]):
+            context["prediction_contract"]["analysis_stopping_rule"] = (
+                "Choose registered capabilities and parameters using causal evidence. No tool is mandatory. "
+                "A candidate-program call charges its declared internal calls plus calculation. "
+                "Execute the changed mechanism to test it, cite its actual results, and submit finite predictions within budget.")
+            context["prediction_contract"]["final_prediction"] = (
+                "Agent owns final numeric predictions. Cite actual tool outputs used; do not claim unused changes were activated.")
+            if isinstance(profile, Mapping) and profile.get("strategy_program"):
+                context["candidate_strategy_guidance"] = profile["strategy_program"]["planner_prompt"]
         catalog = self._available_tool_catalog(selected[0], plans[indices[0]], role=role)
         try:
             with self._prediction_tool_context(

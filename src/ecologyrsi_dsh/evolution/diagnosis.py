@@ -38,7 +38,7 @@ def diagnose_evidence(task, previous, comparison, knowledge) -> DiagnosticReport
     weaknesses: list[str] = []
     failures: list[str] = []
     questions: list[str] = []
-    paired_diagnostics = getattr(task, "metadata", {}).get("optimization_protocol") == "evidence_guided_epoch@1"
+    paired_diagnostics = getattr(task, "metadata", {}).get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}
     if previous is not None:
         references.append("analysis:" + previous.analysis_digest)
         for row in (*previous.target_weaknesses, *previous.horizon_weaknesses):

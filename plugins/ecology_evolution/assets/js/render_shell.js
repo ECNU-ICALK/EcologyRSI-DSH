@@ -153,7 +153,7 @@
 
   function optimizationControlSnapshot() {
     var raw = {
-      experiment_mode: $("#experiment-mode") ? $("#experiment-mode").value : "quick",
+      experiment_mode: "joint",
       formal_origin_count: $("#formal-origin-count").value,
       local_batch_origin_count: $("#local-batch-origin-count").value,
       max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
@@ -218,9 +218,10 @@
       ["研究领域（自动推导）", itemLabel(selectedCatalogItem("domain_packs", "#domain-pack"))],
       ["策略模型（API）", itemLabel(selectedModelCatalogItem("#policy-model-id"))],
       ["独立评审模型（API）", itemLabel(selectedModelCatalogItem("#judge-model-id"))],
+      ["新运行搜索方式", searchModeLabel($("#targeted-search-policy") && $("#targeted-search-policy").value)],
       ["进化预算", formatNumber(effectiveBudget.max_generations) + " 轮 · 每轮 " + formatNumber(effectiveBudget.candidates_per_generation) + " 个 · 总上限 " + formatNumber(effectiveBudget.requested_max_candidates) + " 个候选"],
-      ["入围候选持续优化", optimizationControls.valid
-        ? formatNumber(optimizationControls.schedule.formal_origin_count_per_finalist) + " 个预测时点 · 每批 " + formatNumber(optimizationControls.schedule.local_batch_origin_count) + " · 每批最多 " + formatNumber(optimizationControls.schedule.max_local_edits_per_batch) + " 处改动 · 样本并发 " + formatNumber(optimizationControls.sample_concurrency)
+      ["联合策略进化", optimizationControls.valid
+        ? "10 时点初筛 → 25 时点配对 → 50 时点比较；基础 200 次＋复核预留 100 次 / 轮"
         : "参数无效：" + optimizationControls.message + "（" + optimizationControlInputText(optimizationControls) + "）"],
       ["预测方案", "运行中由模型选择、切换和优化，可仅使用基线"],
       ["独立评测器", itemLabel(selectedCatalogItem("evaluators", "#evaluator-id"))],
@@ -252,15 +253,14 @@
   }
 
   function renderParameters() {
-    var fixedTrial = $("#experiment-mode") && $("#experiment-mode").value === "evidence_guided";
-    [["#formal-origin-count", 35], ["#local-batch-origin-count", 25], ["#max-local-edits-per-batch", 1], ["#selection-holdout-origin-count", 50]].forEach(function (entry) {
+    var cellwiseSearch = $("#targeted-search-policy") && $("#targeted-search-policy").value === "cellwise_training_evidence@1";
+    if ($("#local-edit-limit-help")) { $("#local-edit-limit-help").textContent = cellwiseSearch
+      ? "当前逐目标、逐时距模式每次仅允许一处局部修改；流程上限 2 不会扩大此限制。"
+      : "每轮一次局部修订，标准搜索最多两处关联修改。"; }
+    [["#formal-origin-count", 35], ["#local-batch-origin-count", 25],
+     ["#max-local-edits-per-batch", 2], ["#selection-holdout-origin-count", 50]].forEach(function (entry) {
       var field = $(entry[0]);
-      if (!field) { return; }
-      if (fixedTrial) {
-        if (!field.disabled) { field.previousEditableValue = field.value; }
-        field.value = String(entry[1]);
-      } else if (field.disabled && field.previousEditableValue != null) { field.value = field.previousEditableValue; }
-      field.disabled = Boolean(fixedTrial);
+      if (field) { field.value = String(entry[1]); field.readOnly = true; }
     });
     var optimizationControls = optimizationControlSnapshot();
     if (!optimizationControls.valid) {
@@ -279,62 +279,48 @@
       return;
     }
     var schedule = optimizationControls.schedule;
-    var cellsPerOrigin = predictionCellsPerOrigin();
     var microbatch = optimizationControls.sample_agent_batch_size;
     var candidateConcurrency = optimizationControls.candidate_concurrency;
     var concurrency = optimizationControls.sample_concurrency;
     var budget = candidateBudgetStatus();
-    var guided = schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1";
-    var batchCount = guided ? 2 : schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
-    var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
-    var quick = schedule.finalist_count === 1;
-    if ($("#outer-search-flow")) { $("#outer-search-flow").textContent = quick ? "4 个方案 → 按预登记规则选择 1 条训练主线" : "4 个方案 → 同组 " + formatNumber(schedule.screening_origin_count) + " 个时点评测 → 2 个入围"; }
-    if ($("#parameter-policy-grid")) { $("#parameter-policy-grid").innerHTML = (quick ? ["不执行预筛", "单条训练主线", "完整 " + cellsPerOrigin + " 评分单元", "轮末双臂同组比较"] : [formatNumber(schedule.screening_origin_count) + " 时点初筛", "确定性 Top 2", "完整 " + cellsPerOrigin + " 评分单元", "轮末三臂同组比较"]).map(function (text) { return "<span>" + escapeHTML(text) + "</span>"; }).join(""); }
-    if ($("#agent-update-policy")) { $("#agent-update-policy").textContent = quick ? "批次修订待轮末同组比较；不同批次的分数变化不能证明修改有效。" : "新旧版本在同批数据上比较，轮末统一选择；独立验证另行执行。"; }
-    if (guided) {
-      if ($("#outer-search-flow")) { $("#outer-search-flow").textContent = "4 候选＋冠军各测 10 时点 → 1 个候选及修订各测 25 时点 → 双臂各测 50 时点"; }
-      if ($("#parameter-policy-grid")) { $("#parameter-policy-grid").innerHTML = "<span>初筛 50 次执行</span><span>局部配对 50 次执行</span><span>轮末 100 次执行</span><span>独立认证另计</span>"; }
-      if ($("#agent-update-policy")) { $("#agent-update-policy").textContent = "单次修改先同组配对；证据不足则暂定或保留父版本。单轮 85 个不同评分时点、最多 200 次候选时点执行；不保证优于旧模式。"; }
-    }
+    if ($("#outer-search-flow")) { $("#outer-search-flow").textContent = "4 个联合候选 → 同组初筛 → 1 条主线 → 配对验证 → 轮末比较"; }
+    if ($("#parameter-policy-grid")) { $("#parameter-policy-grid").innerHTML = "<span>相同数据公平比较</span><span>一次局部修订</span><span>条件复核最多一次</span><span>独立验证另计</span>"; }
+    if ($("#agent-update-policy")) { $("#agent-update-policy").textContent = "初筛结果复用作诊断；父子版本在新的 25 个时点上配对。每轮使用 85 个不同评分起点，目标成熟和时间隔离另计。"; }
     var capacity = state.cohortCapacityReport;
     var plan = capacity && capacity.execution_plan;
+    if (state.usingDemo) {
+      var demoCells = predictionCellsPerOrigin();
+      plan = {schedule: schedule, generations: budget.max_generations, required_unique_origins: 85 * budget.max_generations,
+        generation_budget: {base_candidate_origins: 200, recheck_candidate_origins: 100,
+          total_candidate_origins: 300, total_scoring_cells: 300 * demoCells},
+        run_budget: {total_candidate_origins: 300 * budget.max_generations}};
+    }
     var matchingPlan = plan && plan.schedule && Object.keys(schedule).every(function (key) { return plan.schedule[key] === schedule[key]; }) && plan.generations === budget.max_generations;
     var executionBudget = matchingPlan ? plan.generation_budget : {};
     var totalBudget = matchingPlan ? plan.run_budget : {};
-    var screeningCandidateOrigins = executionBudget.screening_candidate_origins;
-    var formalCandidateOrigins = executionBudget.formal_candidate_origins;
-    var holdoutCandidateOrigins = executionBudget.holdout_candidate_origins;
-    var holdoutReplicas = matchingPlan ? plan.holdout_inference_replicas : (quick || state.usingDemo ? 1 : 2);
-    var generationCandidateOrigins = executionBudget.total_candidate_origins;
-    var generationScoringCells = executionBudget.total_scoring_cells;
-    var runCandidateOrigins = totalBudget.total_candidate_origins;
-    var runScoringCells = totalBudget.total_scoring_cells;
-    var capacityOriginText = matchingPlan ? "需要 " + formatNumber(plan.required_unique_origins) + " 个不同起点；" + (plan.fresh_epoch_holdout ? "训练回放复用，每轮比较使用新时点；" : "按冻结时间分区复用；") + "独立认证区另计" : "等待后端核验冻结执行计划";
-    var maximumEdits = Math.max(0, batchCount - (pairedMode ? 1 : 0)) * schedule.max_local_edits_per_batch;
-    $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
-    $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
-    if (guided) {
-      $("#parameter-summary-pill").textContent = "固定 50＋50＋100 = 200 次执行 / 轮";
-      $("#agent-update-scope").textContent = "初筛结果复用作诊断＋一次 25 时点配对";
-    }
+    var capacityOriginText = matchingPlan ? "需要 " + formatNumber(plan.required_unique_origins) + " 个不同起点；各阶段与各轮使用新时点，保留目标成熟和时间隔离；独立验证区另计" : "等待后端核验冻结执行计划";
+    $("#parameter-summary-pill").textContent = "基础 200 次＋复核预留 100 次 / 轮";
+    $("#agent-update-scope").textContent = "初筛诊断 → 一次局部修订 → 父子配对";
     var budgetState = $("#parameter-budget-state");
     var capacitySufficient = state.usingDemo || Boolean(capacity && capacity.sufficient === true);
     var capacityPending = !state.usingDemo && capacityVerificationPending();
-    budgetState.textContent = !budget.budget_sufficient ? "预算不足" : capacityPending ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : state.cohortCapacityError ? "数据容量暂不可用" : "数据容量不足";
+    budgetState.textContent = !budget.budget_sufficient ? "预算不足" : state.usingDemo ? "演示配置" : capacityPending ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : state.cohortCapacityError ? "数据容量暂不可用" : "数据容量不足";
     budgetState.className = budget.budget_sufficient && (capacitySufficient || capacityPending) ? "" : "is-insufficient";
     var values = [
-      ["迭代结构", guided ? formatNumber(budget.max_generations) + " 轮 · 4 候选实测初筛 · 1 次父子配对 · 轮末双臂比较" : quick ? formatNumber(budget.max_generations) + " 轮 · 1 条训练主线 · 轮末候选与冠军共同评测" : formatNumber(budget.max_generations) + " 轮 · 4 个候选预筛后选出 2 个"],
-      ["局部持续优化", guided ? "初筛 10 时点结果复用作诊断，不追加执行；父版本与单一修订各测新的 25 时点。证据不足则保留父版本。" : pairedMode
-        ? "两个入围候选共享 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个预测时点；每个方案包含 1 个初始批次和 " + formatNumber(Math.max(0, batchCount - 1)) + " 个新旧版本同批比较；" + "局部按完整配对增益与分项不退化作探索性选择，轮末统一确认" + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"
-        : "每批完整执行后反思，修订应用后待轮末验证；" + formatNumber(schedule.formal_origin_count_per_finalist) + " 个时点 = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
-      ["单轮执行预算", !matchingPlan ? "等待后端核验" : formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " 次时点预测 = " + formatNumber(generationScoringCells) + " 个评分项"],
-      ["留出重复推理", "每个方案独立推理 " + formatNumber(holdoutReplicas) + " 次，已计入执行预算；独立观测数保持不变"],
-      ["全程执行预算", !matchingPlan ? "等待后端核验" : formatNumber(runCandidateOrigins) + " 次时点预测 / " + formatNumber(runScoringCells) + " 个评分项；" + capacityOriginText],
-      ["数据容量", state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
+      ["进化方式", "联合策略进化 · " + formatNumber(budget.max_generations) + " 轮 · 每轮 4 候选实测初筛、1 条优化主线"],
+      ["策略修改", cellwiseSearch
+        ? "每个候选最多 4 处关联修改；当前模式的局部修订仅 1 处，数值编辑限定单个目标与时距参数"
+        : "每个候选最多 4 处关联修改，局部修订最多 2 处；提示词、参数、Skill、受控计算与经验记忆协同优化"],
+      ["基础执行预算", !matchingPlan ? "等待后端核验" : "初筛 50＋局部配对 50＋轮末比较 100＝" + formatNumber(executionBudget.base_candidate_origins) + " 次时点预测 / 轮"],
+      ["复核预留", !matchingPlan ? "等待后端核验" : "最多 " + formatNumber(executionBudget.recheck_candidate_origins) + " 次 / 轮；仅边界收益或跨日表现混合时双臂复测一次，未触发不消耗"],
+      ["单轮总上限", !matchingPlan ? "等待后端核验" : formatNumber(executionBudget.total_candidate_origins) + " 次时点预测 / " + formatNumber(executionBudget.total_scoring_cells) + " 个评分项"],
+      ["全程总上限", !matchingPlan ? "等待后端核验" : formatNumber(totalBudget.total_candidate_origins) + " 次时点预测；" + capacityOriginText],
+      ["更新条件", "完整执行、总体实用增益、分项不退化和跨日表现共同判断；触发复核后两次均须通过，否则保留原最佳版本"],
+      ["证据边界", "复测不增加独立观测数；缺少时间覆盖时保留原版本。搜索晋级不等于独立验证通过"],
+      ["数据容量", state.usingDemo ? "演示数据，真实运行时重新核验" : state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
       ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个方案；全运行共享 " + formatNumber(concurrency) + " 个同时预测的时点"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
-      ["上下文与输出", "单次生成额度：Planner/Repair 16,384，Critic 8,192 tokens；多步会话累计用量单独记录，不因累计用量降低预测质量"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]
     ];
     $("#parameter-summary").innerHTML = values.map(function (item) {

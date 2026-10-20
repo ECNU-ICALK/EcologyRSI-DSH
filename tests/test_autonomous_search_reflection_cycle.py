@@ -472,6 +472,39 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         self.director.create_run(self.task, run_id=self.run_id)
         self.director.start_run(self.run_id)
 
+    def test_next_generation_search_preserves_reflected_skill_program(self) -> None:
+        from ecologyrsi_dsh.evaluators.skill_program import seed_skill_program
+
+        directions = tuple(CandidateDirection.from_dict(_direction(i, [])) for i in range(2))
+        reflection = GenerationReflection(
+            run_id=self.run_id, generation=0, analysis_digest="a" * 64,
+            summary="No candidate passed the frozen gates.", lessons=("Keep causal Skill evidence.",),
+            recommended_search_queries=("causal greenhouse forecast skills",),
+            candidate_directions=directions, stop_recommendation="continue",
+            canonical_candidate_outcomes=({
+                "rank": None, "candidate_id": "candidate:skill", "direction_id": "direction-skill",
+                "direction_digest": "b" * 64, "slot_index": 0, "status": "rejected",
+                "score": None, "eligible": False, "classification": "screened_out",
+                "selection_reason": "frozen_slot_schedule", "behavior_digest": "c" * 64,
+                "mutation_operations": [{"op": "author_skill_program", "role": "sample-planner",
+                                         "skill_program": seed_skill_program()}],
+            },),
+        )
+        state = self.director.state(self.run_id)
+        plan = self.adapter.plan_generation_search(
+            run=replace(state.run, generation=1), task=state.task_manifest,
+            parent_genome=state.materialized_seed_genome().to_dict(),
+            previous_generation_analysis={"analysis_digest": reflection.analysis_digest},
+            previous_generation_reflection=reflection.to_dict(), current_plan={},
+            host_query_hints=("causal greenhouse forecasting",), candidate_count=2,
+            run_state_revision=state.events[-1].seq, stage_attempt=1,
+            ledger_expected_revision=self.ledger.latest_seq(),
+        )
+        self.assertEqual(plan.source_reflection_digest, reflection.reflection_digest)
+        context = self.runtime.requests[-1]["request"]["context"]
+        self.assertEqual(context["previous_generation_reflection"], reflection.to_dict())
+        self.assertEqual(context["generation"], 1)
+
     def test_search_synthesis_and_candidate_slots_form_one_auditable_chain(self) -> None:
         batch = start_generation_batch(self.director, self.run_id)
         for slot_index in range(batch.batch_size):
@@ -549,8 +582,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 # exists separately from `author` because the operator rejects
                 # an authored value identical to the one already on the profile,
                 # so the two directions are not interchangeable.
-                "instruction_directive": ["author", "revise"],
-                "skill_program": ["author", "revise"],
+                "instruction_directive": ["author"],
+                "skill_program": ["author"],
             },
         )
         self.assertEqual(
@@ -1279,7 +1312,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         # tests/test_workflow_ir.py.
         self.assertNotIn("feature_recipe", targets)
         self.assertEqual(
-            set(targets), set(CANDIDATE_MUTATION_AXES) - {"feature_recipe"}
+            set(targets), set(CANDIDATE_MUTATION_AXES) - {"feature_recipe", "strategy_program"}
         )
 
     def test_direction_preflight_allows_non_assignment_parameter_mentions(self) -> None:

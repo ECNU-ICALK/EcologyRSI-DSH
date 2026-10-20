@@ -3,11 +3,31 @@ from __future__ import annotations
 import json
 import unittest
 
-from ecologyrsi_dsh.api.events import EventEndpointsMixin
+from ecologyrsi_dsh.api.events import EventEndpointsMixin, _duplicate_evaluation_context
 from ecologyrsi_dsh.core.ledger import Event
 
 
 class TrajectoryPublicEventTests(unittest.TestCase):
+    def test_duplicate_notice_uses_later_execution_evidence_and_never_assumes_skip(self):
+        def event(seq, kind, payload):
+            return Event(seq=seq, event_id=f"event:{seq}", run_id="run:duplicate",
+                         kind=kind, payload=payload, created_at="2026-10-08T00:00:00Z")
+        old = event(1, "CandidateScreeningRecorded", {"candidate_id": "c"})
+        marked = event(2, "CandidateMarkedDuplicate", {"candidate_id": "c", "duplicate_of_candidate_id": "parent"})
+        started = event(3, "EvaluationSampleResultsStarted", {"candidate_id": "c", "private": "SECRET"})
+        screened = event(4, "CandidateScreeningRecorded", {"candidate_id": "c", "metrics": {"private_trace": "SECRET"}})
+        def projected(events):
+            return EventEndpointsMixin._event_json(marked, duplicate_evaluations=_duplicate_evaluation_context(events))["payload"]
+        unknown = projected([old, marked])
+        self.assertNotIn("已跳过", unknown["message"])
+        self.assertNotIn("evaluation_disposition", unknown)
+        self.assertEqual(projected([marked, started])["evaluation_disposition"], "started")
+        completed = projected([marked, started, screened])
+        self.assertEqual(completed["evaluation_disposition"], "screening_recorded")
+        self.assertEqual(completed["evaluation_evidence_seq"], 4)
+        self.assertIn("同组初筛结果", completed["message"])
+        self.assertNotIn("SECRET", json.dumps(completed))
+
     def _project(self, kind: str, payload: dict) -> dict:
         event = Event(
             seq=1,

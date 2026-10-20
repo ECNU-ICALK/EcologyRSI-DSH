@@ -52,7 +52,9 @@ from .shared_sample_context import sibling_stage_context_digest
 from .baselines import apply_baseline_profile, fit_baseline_profile
 from .greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
+    BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
     BaselineAlignedRidgeConfig,
+    BaselineAlignedCellwiseRidgeConfig,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
@@ -1218,7 +1220,7 @@ class EvaluationPipeline:
         *,
         dsh_runtime_provider: Callable[[], Any] | None = None,
         dsh_revision_provider: Callable[[str], Mapping[str, int]] | None = None,
-        dsh_identity_provider: Callable[[str, str], Mapping[str, str] | None]
+        dsh_identity_provider: Callable[..., Mapping[str, str] | None]
         | None = None,
         dsh_prediction_tool_binder: Callable[..., Any] | None = None,
         origin_admission_provider: Callable[[str, int], Any] | None = None,
@@ -1293,9 +1295,7 @@ class EvaluationPipeline:
                 or self.dsh_identity_provider is None
             ):
                 raise ValueError("DSH-native sample runtime binding is incomplete")
-            identity = self.dsh_identity_provider(run_id, candidate_id)
-            if not isinstance(identity, Mapping):
-                raise ValueError("DSH-native candidate identity is unavailable")
+            identity = self._dsh_execution_identity(task, run_id, candidate_id, proposal)
             strategy_model_id = str(task.metadata.get("strategy_model_id") or "").strip()
             review_model_id = str(task.metadata.get("review_model_id") or "").strip()
             if not strategy_model_id or not review_model_id:
@@ -1461,8 +1461,24 @@ class EvaluationPipeline:
         return CollaborativeSampleExecutor(adapter)
 
 
-    @staticmethod
+    def _dsh_execution_identity(self, task, run_id, candidate_id, proposal):
+        scope = task.metadata.get("_evaluation_scope")
+        if isinstance(scope, Mapping):
+            if scope.get("run_id") != run_id or scope.get("candidate_id") != candidate_id:
+                raise ValueError("DSH-native evaluation scope identity mismatch")
+            identity = self.dsh_identity_provider(run_id, candidate_id, scope["candidate_revision_id"])
+        else:
+            identity = self.dsh_identity_provider(run_id, candidate_id)
+        if not isinstance(identity, Mapping):
+            raise ValueError("DSH-native candidate identity is unavailable")
+        expected = proposal.metadata.get("genome_digest") if proposal is not None else None
+        if expected is not None and identity.get("genome_digest") != expected:
+            raise ValueError("DSH-native execution identity does not match evaluated genome")
+        return {key: str(identity[key]) for key in (
+            "genome_digest", "compiled_behavior_digest", "phenotype_instance_digest")}
+
     def _dsh_sample_stage_context(
+        self,
         task: TaskManifest,
         candidate: Candidate,
         proposal: Proposal,
@@ -1506,6 +1522,11 @@ class EvaluationPipeline:
             ),
             "candidate_genome_digest": genome_digest,
             "candidate_agent_profile": dict(agent_profile),
+            # Included in checkpoint and wave digests. An old misbound partial
+            # revision is superseded, never resumed or relabelled as the child.
+            "candidate_execution_identity": self._dsh_execution_identity(
+                task, candidate.run_id, candidate.candidate_id, proposal
+            ),
         }
 
 
@@ -1675,6 +1696,7 @@ class EvaluationPipeline:
             )
         elif predictor_model_id in {
             BASELINE_ALIGNED_RIDGE_MODEL_ID,
+            BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
             EXOGENOUS_RIDGE_MODEL_ID,
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
@@ -2099,6 +2121,14 @@ class EvaluationPipeline:
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
+        from ..core.prediction_policy import CONTRIBUTION_POLICIES
+        contribution_policy = task.metadata.get("behavior_diagnostics_policy")
+        if contribution_policy in CONTRIBUTION_POLICIES:
+            from .prediction_contribution import summarize_contribution
+            scope = task.metadata.get("_evaluation_scope") or {}
+            sample_execution_summary["prediction_contribution"] = summarize_contribution(
+                sample_records, scoring_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(raw_prediction_rows),
@@ -2673,6 +2703,14 @@ class EvaluationPipeline:
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
+        from ..core.prediction_policy import CONTRIBUTION_POLICIES
+        contribution_policy = task.metadata.get("behavior_diagnostics_policy")
+        if contribution_policy in CONTRIBUTION_POLICIES:
+            from .prediction_contribution import summarize_contribution
+            scope = task.metadata.get("_evaluation_scope") or {}
+            sample_execution_summary["prediction_contribution"] = summarize_contribution(
+                sample_records, scoring_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -2946,7 +2984,9 @@ class EvaluationPipeline:
             candidate, proposal, None
         )
         parameters = (
-            BaselineAlignedRidgeConfig.from_mapping(proposal.changes)
+            BaselineAlignedCellwiseRidgeConfig.from_mapping(proposal.changes)
+            if predictor_model_id == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
+            else BaselineAlignedRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
             else RecipeRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == RECIPE_RIDGE_MODEL_ID
@@ -3450,6 +3490,14 @@ class EvaluationPipeline:
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scored_feedback_rows)
+        from ..core.prediction_policy import CONTRIBUTION_POLICIES
+        contribution_policy = task.metadata.get("behavior_diagnostics_policy")
+        if contribution_policy in CONTRIBUTION_POLICIES:
+            from .prediction_contribution import summarize_contribution
+            scope = task.metadata.get("_evaluation_scope") or {}
+            sample_execution_summary["prediction_contribution"] = summarize_contribution(
+                sample_records, scored_feedback_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -3628,7 +3676,7 @@ class EvaluationPipeline:
                 **({
                     "baseline_history_source_partitions": ["training_fit", "training_feedback"],
                     "baseline_reference_cutoff": "forecast_origin",
-                } if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID else {}),
+                } if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID) else {}),
                 "minimum_history_steps": MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
                 "embargo_rows_visible": False,
                 **(
@@ -3713,7 +3761,7 @@ class EvaluationPipeline:
                     "runtime_contract": {key: task.metadata.get(key) for key in ("strategy_model_id", "review_model_id", "preset_content_digest", "standing_tool_surface_digest", "resolved_policy_route_config_digest", "resolved_review_route_config_digest")}}
                    if agent_model_tools is not None else {}),
                 **({"baseline_profile": prediction["baseline_profile"]}
-                   if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID else {}),
+                   if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID) else {}),
             },
             metrics=training_metrics,
         )

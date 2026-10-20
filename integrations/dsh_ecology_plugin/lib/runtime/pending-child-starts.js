@@ -90,7 +90,7 @@ export class PendingChildStarts {
         const { provider, ...childRequest } = request;
         return this.ctx.subagents.start(provider, {
           ...childRequest,
-          signal,
+          signal: childRequest.signal ? AbortSignal.any([signal, childRequest.signal]) : signal,
         });
       }
       return this.ctx.subagents.startContinuable({

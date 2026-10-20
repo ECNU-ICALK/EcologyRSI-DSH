@@ -9,15 +9,15 @@ import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
 
 const REALISTIC_PRESET_CATALOG = Object.freeze([
   "ecology-coordinator-v6",
-  "ecology-researcher-v15",
-  "ecology-candidate-proposer-v6",
-  "ecology-sample-planner-v12",
+  "ecology-researcher-v17",
+  "ecology-candidate-proposer-v9",
+  "ecology-sample-planner-v14",
   "ecology-sample-critic-v6",
   "ecology-generation-judge-v10",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v12"
+  required_tools: preset_id === "ecology-sample-planner-v14"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));
@@ -45,7 +45,7 @@ async function startReadyControllerRun(controller, startBinding) {
   const roleAgents = controller.roleAgents;
   controller.stageRunner = null;
   controller.presetCatalog = [
-    { preset_id: "ecology-researcher-v15", tool_profile: "test" },
+    { preset_id: "ecology-researcher-v17", tool_profile: "test" },
   ];
   controller.roleAgents = {
     createRoleAgent: async () => ({ dispose: async () => {} }),
@@ -66,6 +66,12 @@ function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
     item.required_tools,
   ]));
   return {
+    settings: {
+      describe(options) {
+        assert.deepEqual(options, { redactSecrets: true });
+        return [{ ns: "llm-pi-ai", value: { providers: {} } }];
+      },
+    },
     agents: {
       create: async (options) => {
         await beforeCreate(options);

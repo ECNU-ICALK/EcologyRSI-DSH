@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
 from .parameters import PARAMETER_RULES
+from . import joint_policy
 
 
 # Newly created quick runs never attribute a different window's score to an
@@ -23,12 +24,14 @@ OPTIMIZATION_PROTOCOL = "top2_adaptive_epoch@1"
 QUICK_OPTIMIZATION_PROTOCOL = "quick_adaptive_epoch@1"
 EVIDENCE_GUIDED_PROTOCOL = "evidence_guided_epoch@1"
 EVIDENCE_GUIDED_SCHEDULE_SCHEMA = "ecologyrsi-dsh.evidence-guided-epoch-schedule/1"
-ADAPTIVE_PROTOCOLS = (OPTIMIZATION_PROTOCOL, QUICK_OPTIMIZATION_PROTOCOL, EVIDENCE_GUIDED_PROTOCOL)
+ADAPTIVE_PROTOCOLS = (OPTIMIZATION_PROTOCOL, QUICK_OPTIMIZATION_PROTOCOL, EVIDENCE_GUIDED_PROTOCOL, *joint_policy.PROTOCOLS)
 QUICK_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1"
 PREQUENTIAL_LOCAL_EVALUATION_MODE = "prequential"
 PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
 
 _SCHEDULE_MODES = {
+    joint_policy.SCHEDULE_SCHEMA: PAIRED_LOCAL_EVALUATION_MODE,
+    joint_policy.UNIFIED_SCHEDULE_SCHEMA: PAIRED_LOCAL_EVALUATION_MODE,
     LEGACY_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
     ISOLATED_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
@@ -105,7 +108,7 @@ class OptimizationSchedule:
         )
         if self.schema_version in {ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, QUICK_SCHEDULE_SCHEMA_VERSION} and batch < 2:
             raise ValueError("isolated adaptation batches require at least two origins")
-        if self.race and (formal, batch, edits, holdout) != (35, 25, 1, 50):
+        if self.race and (formal, batch, edits, holdout) != (35, 25, 2 if self.joint else 1, 50):
             raise ValueError("evidence-guided pilot freezes 10/25/50 origins and one local edit")
         if not self.race and formal % batch:
             raise ValueError(
@@ -133,7 +136,7 @@ class OptimizationSchedule:
         )
 
     @classmethod
-    def for_new_run(cls) -> "OptimizationSchedule":
+    def for_quick_run(cls) -> "OptimizationSchedule":
         """Repeated training epochs, with independent evaluation kept outside search."""
         return replace(cls.default(), schema_version=QUICK_SCHEDULE_SCHEMA_VERSION,
                        screening_origin_count=0, finalist_count=1,
@@ -143,24 +146,41 @@ class OptimizationSchedule:
                        selection_holdout_origin_count=PARAMETER_RULES["selection_holdout_origin_count"]["default"])
 
     @classmethod
+    def for_new_run(cls) -> "OptimizationSchedule":
+        """The single protocol for new experiments; old factories are replay helpers."""
+        return replace(cls.for_joint_run(), schema_version=joint_policy.UNIFIED_SCHEDULE_SCHEMA)
+
+    @property
+    def unified(self) -> bool:
+        return self.schema_version == joint_policy.UNIFIED_SCHEDULE_SCHEMA
+
+    @classmethod
     def for_evidence_guided_run(cls) -> "OptimizationSchedule":
         return cls(EVIDENCE_GUIDED_SCHEDULE_SCHEMA, 10, 1, 35, 25, 1, 50,
                    PAIRED_LOCAL_EVALUATION_MODE)
 
+    @classmethod
+    def for_joint_run(cls) -> "OptimizationSchedule":
+        return cls(joint_policy.SCHEDULE_SCHEMA, 10, 1, 35, 25, 2, 50, PAIRED_LOCAL_EVALUATION_MODE)
+
+    @property
+    def joint(self) -> bool:
+        return self.schema_version in {joint_policy.SCHEDULE_SCHEMA, joint_policy.UNIFIED_SCHEDULE_SCHEMA}
+
     @property
     def race(self) -> bool:
-        return self.schema_version == EVIDENCE_GUIDED_SCHEDULE_SCHEMA
+        return self.schema_version in {EVIDENCE_GUIDED_SCHEDULE_SCHEMA, joint_policy.SCHEDULE_SCHEMA, joint_policy.UNIFIED_SCHEDULE_SCHEMA}
 
     def batch_origin_count(self, index: int) -> int:
         return self.screening_origin_count if self.race and index == 0 else self.local_batch_origin_count
 
     @property
     def quick(self) -> bool:
-        return self.schema_version in {QUICK_SCHEDULE_SCHEMA_VERSION, EVIDENCE_GUIDED_SCHEDULE_SCHEMA}
+        return self.schema_version in {QUICK_SCHEDULE_SCHEMA_VERSION, EVIDENCE_GUIDED_SCHEDULE_SCHEMA, joint_policy.SCHEDULE_SCHEMA, joint_policy.UNIFIED_SCHEDULE_SCHEMA}
 
     @classmethod
     def for_comparison_run(cls) -> "OptimizationSchedule":
-        return replace(cls.for_new_run(), schema_version=TRAINING_SCHEDULE_SCHEMA_VERSION,
+        return replace(cls.for_quick_run(), schema_version=TRAINING_SCHEDULE_SCHEMA_VERSION,
                        screening_origin_count=64, finalist_count=2,
                        local_evaluation_mode=PAIRED_LOCAL_EVALUATION_MODE)
 
@@ -169,6 +189,10 @@ class OptimizationSchedule:
         return {
             "schema_version": "ecologyrsi-dsh.execution-plan/1",
             "protocol": self.protocol,
+            **({"recheck_policy": "joint-conditional-paired-recheck@1",
+                "maximum_rechecks_per_generation": 1,
+                "maximum_holdout_inference_replicas": 2,
+                "budget_includes_recheck_reserve": True} if self.unified else {}),
             "schedule": self.to_dict(),
             "generations": generations,
             "holdout_inference_replicas": replicas,
@@ -182,22 +206,21 @@ class OptimizationSchedule:
             "fresh_epoch_holdout": self.quick,
             "qualification": "exploratory_only" if self.quick else "comparison_requires_certification_gates",
             "comparison_evidence": "complete_pair_practical_delta_cell_nonregression" if self.quick else "paired_time_blocks_and_inference_replicas",
-            # The per-call values are the frozen NATIVE_SAMPLE_OPERATION_MAX_TOKENS;
-            # the reported thresholds abort a runaway child at twice one full
-            # response, well above the 4087..6347 spent by observed successful
-            # planners and the 1277..3080 spent by observed critics. Keep them
-            # equal to the plugin's SAMPLE_STAGE_LIMITS.
+            # The per-call values are the frozen NATIVE_SAMPLE_OPERATION_MAX_TOKENS.
+            # Provider-reported cumulative usage is not an implicit Token quota.
+            # Execution remains bounded by steps, tool calls and per-call output.
+            # Keep these equal to the plugin's SAMPLE_STAGE_LIMITS.
             # prediction_tool_calls_per_attempt reports the current default only;
             # a run's actual ceiling is the one frozen into its Agent policy.
-            "output_tokens_per_llm_call": {"planner": 16384, "critic": 8192},
+            "output_tokens_per_llm_call": {"planner": 32768, "critic": 8192},
             "sample_execution_limits": {"prediction_tool_calls_per_attempt": PREDICTION_TOOL_CALL_BUDGET,
                 "planner_steps": 10, "critic_steps": 4,
-                "planner_reported_output_threshold": 32768, "critic_reported_output_threshold": 16384},
+                "planner_reported_output_threshold": None, "critic_reported_output_threshold": None},
         }
 
     @property
     def protocol(self) -> str:
-        return EVIDENCE_GUIDED_PROTOCOL if self.race else QUICK_OPTIMIZATION_PROTOCOL if self.quick else OPTIMIZATION_PROTOCOL
+        return joint_policy.UNIFIED_PROTOCOL if self.unified else joint_policy.PROTOCOL if self.joint else EVIDENCE_GUIDED_PROTOCOL if self.race else QUICK_OPTIMIZATION_PROTOCOL if self.quick else OPTIMIZATION_PROTOCOL
 
     @property
     def exploratory_local_comparison(self) -> bool:
@@ -279,8 +302,11 @@ class OptimizationSchedule:
         holdout = replicas * self.selection_holdout_origin_count * (
             self.finalist_count + 1
         )
-        total = screening + formal + holdout
+        reserve = 2 * self.selection_holdout_origin_count if self.unified else 0
+        total = screening + formal + holdout + reserve
         return {
+            **({"base_candidate_origins": screening + formal + holdout,
+                "recheck_candidate_origins": reserve} if self.unified else {}),
             "screening_candidate_origins": screening,
             "formal_candidate_origins": formal,
             "holdout_candidate_origins": holdout,

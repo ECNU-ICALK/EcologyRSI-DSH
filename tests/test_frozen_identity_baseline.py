@@ -158,8 +158,11 @@ class FrozenIdentityBaselineTests(unittest.TestCase):
         current = current_program_registry()
         catalog = current.to_dict()
         legacy = tuple(SeedGenomeTemplate.from_dict(item) for item in catalog["seed_templates"]
-                       if item["template_id"].endswith("@1"))
-        historical = ProgramRegistrySnapshot.from_programs(catalog["programs"], seed_templates=legacy)
+                       if item["template_id"].endswith("@1")
+                       and item["template_id"] != "greenhouse-baseline-aligned-cellwise-default@1")
+        historical_programs = catalog["programs"]
+        historical_programs["predictors"].pop("greenhouse-baseline-aligned-ridge@2")
+        historical = ProgramRegistrySnapshot.from_programs(historical_programs, seed_templates=legacy)
         self.assertEqual(historical.catalog_digest, PROGRAM_CATALOG_DIGEST)
         self.assertNotEqual(current.catalog_digest, PROGRAM_CATALOG_DIGEST)
         for old in legacy:
@@ -167,7 +170,7 @@ class FrozenIdentityBaselineTests(unittest.TestCase):
             expected.pop("template_digest", None)
             expected["template_id"] = old.template_id.removesuffix("@1") + "@2"
             for profile in expected["agent_program"]["candidate_execution_program"]["role_profiles"]:
-                profile["preset_id"] = "ecology-sample-planner-v12"
+                profile["preset_id"] = "ecology-sample-planner-v14"
             self.assertEqual(current.seed_template(expected["template_id"]).to_dict(),
                              SeedGenomeTemplate.from_dict(expected).to_dict())
 

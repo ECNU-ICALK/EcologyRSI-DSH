@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..integrations.role_contracts import PRESET_IDS as _DSH_NATIVE_PRESET_IDS
 
 from ..evolution.diversity import DIVERSITY_POLICY, enabled as diversity_enabled
+from ..evolution.novelty import CANDIDATE_NOVELTY_POLICY, CANDIDATE_NOVELTY_POLICY_KEY
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
@@ -16,7 +17,7 @@ from ..core.model_execution_policy import (
 from ..data.adapters import dataset_adapter
 from ..core.prediction_policy import (
     RUNTIME_PREDICTION_POLICY,
-    RUNTIME_EVALUATOR_ID,
+    RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, TARGETED_SEARCH_POLICY, CONTRIBUTION_POLICY,
     BASELINE_REFERENCE_PREDICTOR_ID,
 )
 
@@ -93,6 +94,7 @@ from ..evolution.schedule import (
     PREQUENTIAL_PERFORMANCE_POLICY,
 )
 from ..evolution.genome import mutation_policy_contract
+from ..evolution import joint_policy
 from ..evolution.parameters import (
     PARAMETER_RULES,
     run_parameter_contract,
@@ -257,6 +259,7 @@ _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
     "greenhouse-rolling-residual@1": "greenhouse-rolling-default@2",
     "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@2",
     "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@2",
+    "greenhouse-baseline-aligned-ridge@2": "greenhouse-baseline-aligned-cellwise-default@2",
     "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@2",
     "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@2",
     "toy-rolling-water@1": "toy-default@2",
@@ -1071,6 +1074,21 @@ class EvolutionRequestHandler(
             try:
                 self._send(HTTPStatus.OK, self.server.dsh_tools.record_session_usage(self._body()))
             except (RuntimeError, TypeError, ValueError) as exc:
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
+            return
+        if raw_path == "/api/ecology-agent-sidecar/v1/structured-results/validate":
+            if not self._authorize_dsh_tool():
+                return
+            try:
+                self._send(HTTPStatus.OK, self.server.dsh_tools.validate_structured(self._body()))
+            except DshStructuredResultPersistenceError as exc:
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, _dsh_sidecar_error(exc))
+            except PermissionError as exc:
+                self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
+            except (RuntimeError, TypeError, ValueError) as exc:
+                # An operational/identity fault is never model INVALID_ARGS.
+                # The only correctable response is the service's bounded 200
+                # valid=false result; no rejected scientific event is written.
                 self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if raw_path == "/api/ecology-agent-sidecar/v1/structured-results":
@@ -1931,8 +1949,8 @@ class EvolutionRequestHandler(
         if isinstance(body.get("task_manifest"), dict):
             raw = dict(body["task_manifest"])
             metadata = dict(raw.get("metadata", {}))
-            for name in ("execution_protocol", "prediction_selection_policy", "prediction_model_id",
-                         "evaluator_id", "seed_genome_template_id"):
+            for name in ("execution_protocol", "prediction_selection_policy", "targeted_search_policy", "prediction_model_id",
+                         "evaluator_id", "seed_genome_template_id", CANDIDATE_NOVELTY_POLICY_KEY):
                 value = self._request_binding(body, name)
                 if name in body or name in metadata:
                     metadata[name] = value
@@ -2291,6 +2309,9 @@ class EvolutionRequestHandler(
                 "autonomous_model@1" if autonomous_requested else "parameter_sweep@1",
             ),
             "prediction_selection_policy": body.get("prediction_selection_policy"),
+            **({"targeted_search_policy": body["targeted_search_policy"]} if body.get("targeted_search_policy") else {}),
+            **({CANDIDATE_NOVELTY_POLICY_KEY: body[CANDIDATE_NOVELTY_POLICY_KEY]}
+               if CANDIDATE_NOVELTY_POLICY_KEY in body else {}),
             "prediction_model_id": body.get("prediction_model_id"),
             "evaluator_id": body.get("evaluator_id"),
             "seed_genome_template_id": body.get("seed_genome_template_id"),
@@ -2580,6 +2601,28 @@ class EvolutionRequestHandler(
             metadata.get("strategy_id")
             or ("autonomous_model@1" if autonomous_mode else "parameter_sweep@1")
         )
+        novelty_policy = metadata.get(CANDIDATE_NOVELTY_POLICY_KEY)
+        from ..evolution.program_preflight import POLICY_KEY as executable_key, POLICY as executable_policy, enabled as executable_enabled
+        executable_enabled(metadata)
+        if native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID:
+            metadata[executable_key] = executable_policy
+        elif metadata.get(executable_key) is not None:
+            raise ValueError("candidate executability preflight requires a native autonomous greenhouse run")
+        if novelty_policy not in (None, CANDIDATE_NOVELTY_POLICY):
+            raise ValueError("unsupported candidate_novelty_policy")
+        if native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID:
+            # This binder only handles creation. Existing manifests are replayed
+            # verbatim, so adding a default never changes a frozen experiment.
+            metadata[CANDIDATE_NOVELTY_POLICY_KEY] = CANDIDATE_NOVELTY_POLICY
+        elif novelty_policy is not None:
+            raise ValueError("candidate novelty requires a native autonomous greenhouse run")
+        targeted_policy = metadata.get("targeted_search_policy")
+        if targeted_policy not in (None, TARGETED_SEARCH_POLICY):
+            raise ValueError("unsupported targeted_search_policy")
+        if targeted_policy:
+            if not native_protocol or not autonomous_mode or dataset_id == TOY_DATASET_ID:
+                raise ValueError("targeted search requires a native autonomous greenhouse run")
+            metadata["behavior_diagnostics_policy"] = CONTRIBUTION_POLICY
         selection_policy = metadata.get("prediction_selection_policy")
         if selection_policy not in (None, RUNTIME_PREDICTION_POLICY):
             raise ValueError("unsupported prediction_selection_policy")
@@ -2594,27 +2637,30 @@ class EvolutionRequestHandler(
                 raise ValueError("runtime predictor selection does not accept a preselected predictor, evaluator or seed template")
             metadata["prediction_selection_policy"] = RUNTIME_PREDICTION_POLICY
             # This is a no-residual comparison anchor, not a user's chosen model.
-            metadata["prediction_model_id"] = BASELINE_REFERENCE_PREDICTOR_ID
-            metadata["evaluator_id"] = dataset_adapter(dataset_id).evaluator_id
+            metadata["prediction_model_id"] = ("greenhouse-baseline-aligned-ridge@2" if targeted_policy else BASELINE_REFERENCE_PREDICTOR_ID)
+            metadata["evaluator_id"] = (CELLWISE_EVALUATOR_ID if targeted_policy else dataset_adapter(dataset_id).evaluator_id)
         prediction_model_id = str(
             metadata.get("prediction_model_id")
             or self.server.evaluators.default_predictor(dataset_id)
         )
         evaluator_id = str(
             metadata.get("evaluator_id")
-            or (GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID
+            or (CELLWISE_EVALUATOR_ID if prediction_model_id == "greenhouse-baseline-aligned-ridge@2"
+                else GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID
                 if prediction_model_id == "greenhouse-baseline-aligned-ridge@1"
                 else self.server.evaluators.default_evaluator(dataset_id))
         )
         if (
             native_protocol
             and dataset_id != TOY_DATASET_ID
-            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
+            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
         ):
             raise ValueError(
                 "DSH-native greenhouse runs require "
                 f"a registered multi-horizon evaluator ({RUNTIME_EVALUATOR_ID} for runtime model choice)"
             )
+        if targeted_policy and evaluator_id != CELLWISE_EVALUATOR_ID:
+            raise ValueError("targeted search requires the versioned cellwise evaluator")
         strategy_model_id = str(
             metadata.get("strategy_model_id")
             or metadata.get("policy_model_id")
@@ -2713,8 +2759,6 @@ class EvolutionRequestHandler(
                 raise ValueError("所选 DSH 独立评审模型尚未配置认证凭据")
             if not self._remote_model_execution_configured(judge):
                 raise ValueError("所选 DSH 独立评审模型的后端调用配置不可执行")
-        if policy_model_id == judge_model_id:
-            raise ValueError("候选生成模型与独立评审模型必须相互分离")
         if native_protocol:
             capabilities = getattr(self, "_dsh_native_capabilities", None)
             if not isinstance(capabilities, dict):
@@ -2820,7 +2864,7 @@ class EvolutionRequestHandler(
             supplied = metadata.get(field)
             if supplied is not None and supplied != computed:
                 raise ValueError(f"任务清单中的{label}校验值与服务端配置不一致")
-        if prediction_model_id == "greenhouse-baseline-aligned-ridge@1":
+        if prediction_model_id in ("greenhouse-baseline-aligned-ridge@1", "greenhouse-baseline-aligned-ridge@2"):
             metadata.setdefault("search_guard_policy", SEARCH_GUARD_POLICY)
         if native_protocol:
             from ..core.model_execution_policy import (
@@ -2892,9 +2936,9 @@ class EvolutionRequestHandler(
                 **metadata,
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
-                "mutation_policy": mutation_policy_contract(),
+                "mutation_policy": mutation_policy_contract(metadata),
                 "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
-                "mutation_policy_digest": digest(mutation_policy_contract()),
+                "mutation_policy_digest": digest(mutation_policy_contract(metadata)),
                 "evaluator_id": evaluator_id,
                 "evaluator_digest": evaluator_digest,
                 "objective_profile": objective_profile,
@@ -2978,20 +3022,17 @@ class EvolutionRequestHandler(
         requested_optimization_protocol = metadata.get("optimization_protocol")
         requested_schedule = metadata.get("optimization_schedule")
         if native_protocol or requested_optimization_protocol is not None or requested_schedule is not None:
-            if requested_optimization_protocol not in (None, *ADAPTIVE_PROTOCOLS):
-                raise ValueError(
-                    f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
-                )
-            schedule = (
-                (OptimizationSchedule.for_evidence_guided_run() if requested_optimization_protocol == "evidence_guided_epoch@1" else OptimizationSchedule.for_comparison_run() if requested_optimization_protocol == OPTIMIZATION_PROTOCOL else OptimizationSchedule.for_new_run())
-                if requested_schedule is None
-                else OptimizationSchedule.from_dict(requested_schedule)
-            )
+            if requested_optimization_protocol not in (None, joint_policy.UNIFIED_PROTOCOL):
+                raise ValueError("New experiments require joint_plugin_epoch@2; legacy protocols are replay-only")
+            schedule = (OptimizationSchedule.for_new_run() if requested_schedule is None
+                        else OptimizationSchedule.from_dict(requested_schedule))
+            if not schedule.unified:
+                raise ValueError("New experiments require the unified joint schedule; legacy schedules are replay-only")
             if requested_optimization_protocol is not None and requested_optimization_protocol != schedule.protocol:
                 raise ValueError("optimization_protocol differs from the frozen schedule")
             if manifest.candidates_per_generation != 4:
                 raise ValueError(
-                    "top2_adaptive_epoch@1 requires candidates_per_generation == 4"
+                    "joint_plugin_epoch@2 requires candidates_per_generation == 4"
                 )
 
         sample_concurrency = metadata.get("sample_concurrency")
@@ -3131,6 +3172,8 @@ class EvolutionRequestHandler(
         runtime_component_catalog["selected_prediction_model_id"] = (
             prediction_model_id
         )
+        if schedule is not None:
+            metadata["optimization_protocol"] = schedule.protocol
         supplied_runtime_build = metadata.get("host_runtime_build")
         diversity_enabled(metadata)
         if (
@@ -3143,12 +3186,12 @@ class EvolutionRequestHandler(
         metadata.update(
             {
                 "host_runtime_build": _host_runtime_build(),
-                "evolution_diversity_policy": metadata.get("evolution_diversity_policy", DIVERSITY_POLICY if native_protocol else None),
+                "evolution_diversity_policy": metadata.get("evolution_diversity_policy", (joint_policy.DIVERSITY_POLICY if schedule is not None and schedule.joint else DIVERSITY_POLICY) if native_protocol else None),
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
-                "mutation_policy": mutation_policy_contract(),
+                "mutation_policy": mutation_policy_contract(metadata),
                 "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
-                "mutation_policy_digest": digest(mutation_policy_contract()),
+                "mutation_policy_digest": digest(mutation_policy_contract(metadata)),
                 "prequential_performance_policy": (
                     PREQUENTIAL_PERFORMANCE_POLICY if schedule is not None and schedule.quick else None
                 ),
@@ -4027,7 +4070,11 @@ class EvolutionRequestHandler(
                     return
             self._send(HTTPStatus.ACCEPTED, accepted_payload)
             return
-        elif native_protocol and action == "resume":
+        if action in {"start", "resume"} and state.run.status.value == "paused":
+            # The generation/native drain barriers above must precede clearing
+            # the failure that rejected queued sibling origins.
+            self.server.sample_admission.reset_execution_failure(run_id)
+        if native_protocol and action == "resume":
             self.server.dsh_native_runtime.resume(native_request)
         if action == "start":
             if native_protocol:

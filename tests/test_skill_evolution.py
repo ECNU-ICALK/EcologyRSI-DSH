@@ -274,6 +274,41 @@ class DiversityPolicyTests(unittest.TestCase):
         state.formal_batch_evaluations = [batch(), later_failed]
         self.assertEqual(exploration_archive(state, 1)["entries"], archive["entries"])
 
+    def test_archive_verifies_nested_frozen_receipts_without_changing_evidence(self):
+        from ecologyrsi_dsh.core.trajectory import _deep_freeze_json
+        _, child = skill_child()
+        revision = NS(revision_id="r1", genome=_deep_freeze_json(child.to_dict(), "genome"))
+        receipt = {"status": "passed", "checks": [
+            {"predicate_id": "candidate_model_evidence", "observed": {"values": [1, 2]}}
+        ]}
+        receipt["receipt_digest"] = digest(receipt)
+        metrics = {"constraint_violations": 0, "sample_execution": {
+            "coverage_pass": True, "observed_behavior": {
+                "method_counts": {"model": 9}, "signature": "b" * 64},
+            "mutation_effect_receipt": receipt}}
+        batch = NS(scope=NS(generation=0, phase=NS(value="formal_batch"), batch_index=0,
+            candidate_id="c1", candidate_revision_id="r1", scope_key="scope"),
+            score=.1, metrics=metrics)
+        state = NS(task_manifest=NS(metadata={"evolution_diversity_policy": DIVERSITY_POLICY}),
+            candidate=lambda _: NS(proposal_id="p1"), revision=lambda _: revision,
+            proposal=lambda _: NS(metadata={"candidate_direction": {"mutation_axis": "skill_program"}}),
+            formal_batch_evaluations=[batch])
+        expected = exploration_archive(state, 1)
+        batch.metrics = _deep_freeze_json(metrics, "metrics")
+        self.assertEqual(exploration_archive(state, 1), expected)
+        evidence = expected["entries"][0]["effect_evidence"]
+        self.assertEqual(evidence["execution_observation_receipt"], receipt["receipt_digest"])
+        self.assertEqual(evidence["execution_observation_status"], "passed")
+        self.assertFalse(evidence["behavior_change_verified"])
+        with self.assertRaises(TypeError):
+            batch.metrics["sample_execution"]["mutation_effect_receipt"]["checks"][0]["observed"]["values"][0] = 9
+        tampered = deepcopy(metrics)
+        tampered["sample_execution"]["mutation_effect_receipt"]["checks"][0]["observed"]["values"][0] = 9
+        batch.metrics = _deep_freeze_json(tampered, "metrics")
+        rejected = exploration_archive(state, 1)["entries"][0]["effect_evidence"]
+        self.assertIsNone(rejected["execution_observation_receipt"])
+        self.assertIsNone(rejected["execution_observation_status"])
+
     def test_every_family_gets_the_primary_slot_without_increasing_batch_size(self):
         targets = {axes[0]: ("registered",) for axes in FAMILY_AXES.values()}
         schedules = [direction_schedule({"evolution_diversity_policy": DIVERSITY_POLICY}, targets, g, 4) for g in range(4)]

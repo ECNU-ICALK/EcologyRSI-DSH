@@ -249,6 +249,7 @@ def build_generation_comparison(
     quick_experiment: bool = False,
     experiment_protocol: str = "quick_adaptive_epoch@1",
     training_effect_evidence: Mapping[str, Mapping[str, Any]] | None = None,
+    holdout_rechecks: Sequence[HoldoutEvaluation] = (),
 ) -> GenerationComparison:
     """Build one immutable three-arm comparison without model-authored ranking.
 
@@ -265,10 +266,13 @@ def build_generation_comparison(
         raise TypeError("require_paired_strict_chain must be a bool")
     if require_paired_strict_chain and legacy_runtime_v2_shape:
         raise ValueError("paired execution qualification cannot use a legacy gate shape")
+    unified = experiment_protocol == "joint_plugin_epoch@2"
+    if holdout_rechecks and not unified:
+        raise ValueError("conditional rechecks require the unified joint protocol")
     evaluations = tuple(holdout_evaluations)
     expected_arms = {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT} if quick_experiment else set(HoldoutArm)
     if quick_experiment:
-        if experiment_protocol not in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1"}:
+        if experiment_protocol not in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
             raise ValueError("unsupported exploratory experiment protocol")
         positive_delta_search = True
     if len(evaluations) != len(expected_arms):
@@ -490,6 +494,16 @@ def build_generation_comparison(
                 gate["review_gate_pass"] = review_pass
                 gate["review_purpose"] = review["review_policy"]["purpose"]
                 gate["review_decision_authority"] = "host_deterministic_gates"
+        if unified:
+            from .joint_recheck import assess_recheck
+            recheck = assess_recheck(item, incumbent, profile,
+                base_eligible=search_eligible, repeats=holdout_rechecks)
+            gate["joint_recheck"] = recheck
+            if not recheck["passed"]:
+                search_eligible = False
+                search_failures.append("joint_recheck_" + recheck["status"] if recheck["temporal"]["passed"]
+                                       else recheck["temporal"]["reason"])
+                gate.update(eligible=False, search_eligible=False)
         finalist_gates[item.scope.holdout_arm.value] = gate
         if search_eligible:
             search_eligible_finalists.append((item, gate))
@@ -582,6 +596,7 @@ def build_generation_comparison(
     incumbent_delta = selected.score - incumbent.score
     gate_results = {
         "schema_version": "ecologyrsi-dsh.generation-comparison/1",
+        **({"holdout_rechecks": [item.to_dict() for item in holdout_rechecks]} if unified else {}),
         **({"training_effect_evidence": _plain_json(training_effect_evidence)}
            if training_effect_evidence is not None else {}),
         **({"finalist_review_qualification": FINALIST_REVIEW_QUALIFICATION,

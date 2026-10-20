@@ -7,7 +7,7 @@ then emits an immutable digest that can be checked before training starts.
 
 from __future__ import annotations
 
-from ..core.prediction_policy import RUNTIME_EVALUATOR_ID
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID
 
 import math
 from collections.abc import Mapping
@@ -76,8 +76,14 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "evaluator_ids": (
                 "greenhouse_time_forward@1",
                 "greenhouse_multihorizon_time_forward@1",
-                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,
+                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID,
             ),
+        },
+        "greenhouse-baseline-aligned-ridge@2": {
+            "version": "greenhouse-baseline-aligned-ridge/2",
+            "parameter_names": ("history_steps", "ridge_alpha", *tuple(f"{t}_{h}h_residual_scale" for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24))),
+            "tool_ids": ("host.predictor.greenhouse-baseline-aligned-ridge.fit-predict@2",),
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@5",),
         },
         "greenhouse-baseline-aligned-ridge@1": {
             "version": "greenhouse-baseline-aligned-ridge/1",
@@ -86,7 +92,7 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "tool_ids": ("host.predictor.greenhouse-baseline-aligned-ridge.fit-predict@1",),
             # Also admissible on the recipe evaluator, where it is the
             # incumbent a recipe challenger is compared against.
-            "evaluator_ids": ("greenhouse_multihorizon_time_forward@3", RUNTIME_EVALUATOR_ID,
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@3", RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID,
                               "greenhouse_recipe_multihorizon_forward@1"),
         },
         "greenhouse-targetwise-ridge@1": {
@@ -104,7 +110,7 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "evaluator_ids": (
                 "greenhouse_time_forward@1",
                 "greenhouse_multihorizon_time_forward@1",
-                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,
+                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID,
             ),
         },
         "greenhouse-horizon-targetwise-ridge@1": {
@@ -125,7 +131,7 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "tool_ids": (
                 "host.predictor.greenhouse-horizon-targetwise-ridge.fit-predict@1",
             ),
-            "evaluator_ids": ("greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,),
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID,),
         },
         "greenhouse-recipe-ridge@1": {
             "version": "greenhouse-recipe-ridge/1",
@@ -143,6 +149,8 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     "evaluator": {
+        CELLWISE_EVALUATOR_ID: {"version": "greenhouse-cellwise-aligned-forward/1",
+            "tool_ids": ("host.evaluator.greenhouse-cellwise-aligned.score@1",)},
         RUNTIME_EVALUATOR_ID: {"version": "greenhouse-runtime-model-selection-forward/1",
                                "tool_ids": ("host.evaluator.greenhouse-runtime-model-selection.score@1",)},
         "toy_time_forward@1": {

@@ -87,6 +87,198 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_zero_execution_race_views_do_not_repeat_physical_work(self) -> None:
+        def evaluated(generation, count, *, reuse=False, failed=0):
+            return SimpleNamespace(
+                # Shared cohort/candidate does not make real parent/challenger
+                # executions duplicates. Only the explicit reuse is omitted.
+                scope=SimpleNamespace(generation=generation, origin_count=count,
+                    candidate_id="candidate:shared", cohort_digest="same-cohort"),
+                metrics={"sample_execution": {
+                    "succeeded_origin_samples": count - failed,
+                    "failed_origin_samples": failed, "failed_examples": failed * 9,
+                }, **({"reused_screening_evidence": True,
+                       "additional_prediction_executions": 0} if reuse else {})},
+            )
+
+        state = SimpleNamespace(
+            artifacts=(), evaluations=(), events=(), proposals=(), candidates=(),
+            formal_batch_evaluations=tuple(item for generation in range(2) for item in (
+                evaluated(generation, 10, reuse=True, failed=1),
+                evaluated(generation, 25), evaluated(generation, 25, failed=1),
+            )),
+            holdout_evaluations=tuple(evaluated(generation, 50)
+                for generation in range(2) for _ in range(2)),
+            candidate_screening_events=tuple(SimpleNamespace(payload={
+                "generation": generation, "origin_count": 10,
+            }) for generation in range(2) for _ in range(5)),
+            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9},
+                max_generations=2),
+            run=SimpleNamespace(generation=2, status=SimpleNamespace(value="completed")),
+        )
+        with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection",
+                return_value={"completed_origins": 600}):
+            result = _execution_diagnostics(state)
+        self.assertEqual(result["adaptive_evaluation_count"], 10)
+        self.assertEqual(result["adaptive_settled_origins"], 300)
+        self.assertEqual(result["adaptive_all_settled_origins"], 400)
+        self.assertEqual(result["adaptive_scored_cells"], 3600)
+        self.assertEqual(result["candidate_work_items"], 3600)
+        self.assertEqual(result["adaptive_succeeded_origins"], 298)
+        self.assertEqual(result["adaptive_failed_origins"], 2)
+        self.assertEqual(result["adaptive_failed_scoring_cells"], 18)
+        self.assertEqual(result["adaptive_live_completed_origins"], 600)
+        self.assertEqual(result["execution_evidence_status"], "recorded")
+        # Conditional confirmation repeats the same origins in two real arms.
+        # It is extra physical work, not extra independent observations.
+        state.holdout_rechecks = tuple(evaluated(generation, 50)
+            for generation in range(2) for _ in range(2))
+        with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection",
+                return_value={"completed_origins": 600}):
+            repeated = _execution_diagnostics(state)
+        self.assertEqual(repeated["adaptive_all_settled_origins"], 600)
+        self.assertEqual(repeated["adaptive_scored_cells"], 5400)
+        self.assertEqual(repeated["candidate_work_items"], 5400)
+        self.assertEqual(repeated["adaptive_evaluation_count"], 14)
+        self.assertEqual(repeated["adaptive_succeeded_origins"], 498)
+        self.assertEqual(repeated["adaptive_failed_origins"], 2)
+        self.assertEqual(repeated["adaptive_failed_scoring_cells"], 18)
+        self.assertTrue(repeated["adaptive_execution_counts_known"])
+        self.assertTrue(repeated["adaptive_outcome_counts_known"])
+
+    @staticmethod
+    def _sealed_replica_state():
+        from dataclasses import replace
+        from ecologyrsi_dsh.core.trajectory import HoldoutArm
+        from tests.test_run_parameter_consistency import small_holdout
+        evaluation = small_holdout(HoldoutArm.INCUMBENT, .1)
+        events = []
+        for index in range(2):
+            scope = replace(evaluation.scope, inference_replica=index)
+            revision = f"results:{index}"
+            events.append(SimpleNamespace(seq=index * 2 + 1,
+                kind="EvaluationSampleResultsStarted", payload={
+                    "run_id": scope.run_id, "generation": scope.generation,
+                    "candidate_id": scope.candidate_id, "revision": revision,
+                    "checkpoint": {"execution_scope_digest": scope.scope_key,
+                        "evaluation_phase": "holdout", "candidate_revision_id": scope.candidate_revision_id,
+                        "cohort_digest": scope.cohort_digest, "holdout_arm": scope.holdout_arm.value,
+                        "inference_replica": index, "sample_count": 450}}))
+            events.append(SimpleNamespace(seq=index * 2 + 2,
+                kind="EvaluationSampleResultBatchRecorded", payload={
+                    "candidate_id": scope.candidate_id, "revision": revision,
+                    "record_count": 450, "batch_index": 1,
+                    "sample_ids": [f"same-environment-cell:{i}" for i in range(450)]}))
+        events.append(SimpleNamespace(seq=5, kind="HoldoutEvaluationRecorded",
+            payload={"evaluation": evaluation.to_dict()}))
+        return SimpleNamespace(artifacts=(), evaluations=(), events=tuple(events), proposals=(), candidates=(),
+            formal_batch_evaluations=(), holdout_evaluations=(evaluation,), holdout_rechecks=(),
+            candidate_screening_events=(), task_manifest=SimpleNamespace(metadata={
+                "prediction_cells_per_origin": 9, "optimization_protocol": "top2_adaptive_epoch@1",
+                "sample_agent_mode": "dsh_native_agent"}, max_generations=1),
+            run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")))
+
+    def test_legacy_replicas_require_bound_host_streams_and_keep_outcomes_unknown(self):
+        state = self._sealed_replica_state()
+        with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection", return_value=None):
+            result = _execution_diagnostics(state)
+            # Replayed duplicate cell batches cannot inflate physical work.
+            state.events = (*state.events[:-1], state.events[3], state.events[-1])
+            replayed = _execution_diagnostics(state)
+        for value in (result, replayed):
+            self.assertEqual(value["adaptive_all_settled_origins"], 100)
+            self.assertEqual(value["adaptive_scored_cells"], 900)
+            self.assertEqual(value["candidate_work_items"], 900)
+            self.assertEqual(value["adaptive_evaluation_count"], 1)
+            self.assertTrue(value["adaptive_execution_counts_known"])
+            self.assertFalse(value["adaptive_outcome_counts_known"])
+            for key in ("adaptive_succeeded_origins", "adaptive_failed_origins", "adaptive_failed_scoring_cells"):
+                self.assertIsNone(value[key])
+
+    def test_legacy_replica_forgery_or_incomplete_source_is_unknown(self):
+        from copy import deepcopy
+        from dataclasses import replace
+        def absent_summary(state):
+            evaluation = state.holdout_evaluations[0]
+            metrics = evaluation.to_dict()["metrics"]
+            metrics.pop("agent_inference_stability")
+            state.holdout_evaluations = (replace(evaluation, metrics=metrics),)
+        def change_evidence(state, key, value, *, rehash=True):
+            evaluation = state.holdout_evaluations[0]
+            metrics = evaluation.to_dict()["metrics"]
+            evidence = metrics["agent_inference_stability"]
+            evidence["replicas"][1][key] = value
+            if rehash:
+                evidence["evidence_digest"] = digest({k: v for k, v in evidence.items() if k != "evidence_digest"})
+            state.holdout_evaluations = (replace(evaluation, metrics=metrics),)
+        cases = {
+            "legacy-no-summary": absent_summary,
+            "model-summary-with-no-host-events": lambda s: setattr(s, "events", ()),
+            "missing-replica-batch": lambda s: setattr(s, "events", (*s.events[:3], s.events[4])),
+            "no-sealed-host-record": lambda s: setattr(s, "events", s.events[:-1]),
+            "partial-replica-batch": lambda s: s.events[3].payload.update(record_count=449, sample_ids=s.events[3].payload["sample_ids"][:-1]),
+            "bool-record-count": lambda s: s.events[3].payload.update(record_count=True),
+            "float-sample-count": lambda s: s.events[2].payload["checkpoint"].update(sample_count=450.0),
+            "bool-replica-index": lambda s: change_evidence(s, "replica_index", True),
+            "duplicate-replica-index": lambda s: change_evidence(s, "replica_index", 0),
+            "bool-origin-count": lambda s: change_evidence(s, "origin_count", True),
+            "duplicate-scope": lambda s: change_evidence(s, "scope_digest", s.holdout_evaluations[0].scope.scope_key),
+            "candidate-binding-drift": lambda s: change_evidence(s, "candidate_revision_id", "another-candidate-revision"),
+            "cohort-binding-drift": lambda s: change_evidence(s, "cohort_digest", "d" * 64),
+            "digest-drift": lambda s: change_evidence(s, "coverage", .5, rehash=False),
+            "host-checkpoint-drift": lambda s: s.events[2].payload["checkpoint"].update(execution_scope_digest="f" * 64),
+            "host-result-revision-drift": lambda s: s.events[3].payload.update(revision="foreign-result-revision"),
+            "duplicate-cell": lambda s: s.events[3].payload["sample_ids"].__setitem__(0, s.events[3].payload["sample_ids"][1]),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                state = self._sealed_replica_state()
+                state.events = tuple(SimpleNamespace(**{**vars(e), "payload": deepcopy(e.payload)}) for e in state.events)
+                mutate(state)
+                with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection", return_value=None):
+                    result = _execution_diagnostics(state)
+                self.assertFalse(result["adaptive_execution_counts_known"])
+                self.assertFalse(result["adaptive_outcome_counts_known"])
+                for key in ("adaptive_settled_origins", "adaptive_all_settled_origins", "adaptive_scored_cells",
+                            "candidate_work_items", "adaptive_succeeded_origins", "adaptive_failed_origins",
+                            "adaptive_failed_scoring_cells"):
+                    self.assertIsNone(result[key])
+                self.assertEqual(result["adaptive_evaluation_count"], 1)
+
+    def test_only_explicit_integer_zero_formal_reuse_is_omitted(self) -> None:
+        state = SimpleNamespace(
+            artifacts=(), evaluations=(), events=(), proposals=(), candidates=(),
+            formal_batch_evaluations=(), holdout_evaluations=(),
+            candidate_screening_events=(),
+            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9},
+                max_generations=1),
+            run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
+        )
+        # Legacy evidence without the complete reuse marker keeps its original
+        # count. Malformed race evidence is rejected by state replay, not here.
+        cases = (
+            ({}, 10),
+            ({"reused_screening_evidence": True}, 10),
+            ({"additional_prediction_executions": 0}, 10),
+            ({"reused_screening_evidence": False, "additional_prediction_executions": 0}, 10),
+            ({"reused_screening_evidence": True, "additional_prediction_executions": 5}, 10),
+            ({"reused_screening_evidence": True, "additional_prediction_executions": False}, 10),
+            ({"reused_screening_evidence": True, "additional_prediction_executions": 0.0}, 10),
+            ({"reused_screening_evidence": True, "additional_prediction_executions": 0}, 0),
+        )
+        for metrics, expected in cases:
+            with self.subTest(metrics=metrics), patch(
+                    "ecologyrsi_dsh.api.projection._adaptive_progress_projection", return_value=None):
+                evaluation = SimpleNamespace(scope=SimpleNamespace(origin_count=10), metrics=metrics)
+                state.formal_batch_evaluations = (evaluation,)
+                formal = _execution_diagnostics(state)
+                self.assertEqual(formal["adaptive_all_settled_origins"], expected)
+                self.assertEqual(formal["adaptive_evaluation_count"], 1)
+                state.formal_batch_evaluations = ()
+                state.holdout_evaluations = (evaluation,)
+                self.assertEqual(_execution_diagnostics(state)["adaptive_all_settled_origins"], 10)
+                state.holdout_evaluations = ()
+
     def test_adaptive_round_shows_shared_advisory_review_without_judge_receipts(self) -> None:
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(metadata={"optimization_protocol": "top2_adaptive_epoch@1"}),
@@ -758,6 +950,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "FormalBatchEvaluated",
                     "FormalBatchCompared",
                     "HoldoutArmStarted",
+                    "HoldoutRecheckStarted",
                     "GenerationComparisonRecorded",
                 )
             },
@@ -769,6 +962,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "FormalBatchEvaluated": "formal.batch_evaluated",
                 "FormalBatchCompared": "formal.batch_compared",
                 "HoldoutArmStarted": "holdout.arm_started",
+                "HoldoutRecheckStarted": "holdout.recheck_started",
                 "GenerationComparisonRecorded": "generation.comparison_recorded",
             },
         )
@@ -3503,7 +3697,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v12"],
+                        "preset_ids": ["ecology-sample-planner-v14"],
                     },
                 ),
                 SimpleNamespace(
@@ -5482,6 +5676,32 @@ if __name__ == "__main__":
     unittest.main()
 
 class NativeReplicaProgressTests(unittest.TestCase):
+    def test_joint_progress_counts_screening_reuse_and_paired_batch(self):
+        schedule = OptimizationSchedule.for_new_run()
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                'optimization_protocol': 'joint_plugin_epoch@2',
+                'optimization_schedule': schedule.to_dict(),
+                'prediction_cells_per_origin': 9,
+            }),
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value='running')),
+            candidates=(), candidate_screening_events=(),
+            formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(),
+            generation_cohort_for=lambda _generation: None,
+            events=(SimpleNamespace(seq=1, kind='FormalSelectionCohortFrozen',
+                payload={'generation': 0}, created_at='2026-10-05T17:19:00+00:00'),),
+        )
+        for index in (0, 1):
+            with self.subTest(batch_index=index):
+                state.formal_batches = (SimpleNamespace(
+                    generation=0, candidate_id='candidate:joint', batch_index=index),)
+                progress = _adaptive_progress_projection(state)
+                self.assertEqual(progress['evaluation_phase'], 'formal_batch')
+                self.assertEqual(progress['current_batch'], index + 1)
+                self.assertEqual(progress['batch_count'], 2)
+                self.assertEqual(progress['formal_total_origins'], 50)
+                self.assertEqual(progress['total_origins'], 300)
+
     def test_independent_replicas_accumulate_without_recounting_checkpoint_replays(self):
         from ecologyrsi_dsh.api.projection import _holdout_arm_live_projection
         def event(seq, kind, **payload):

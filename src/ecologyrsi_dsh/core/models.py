@@ -215,6 +215,8 @@ class TaskManifest:
         preflight_audit_required(self.metadata)
         from .model_execution_policy import research_execution_policy
         research_execution_policy(self.metadata)
+        from ..evolution.program_preflight import enabled as program_preflight_enabled
+        program_preflight_enabled(self.metadata)
 
     @property
     def max_candidates(self) -> int:

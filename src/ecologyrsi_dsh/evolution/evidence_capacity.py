@@ -9,6 +9,7 @@ from ..evaluators.epoch_cohorts import (
     plan_run_adaptation_cohort,
 )
 from ..evaluators.fitness import FitnessProfile, _legal_starts
+from ..evaluators.joint_recheck import MINIMUM_TIME_BLOCKS as JOINT_MINIMUM_TIME_BLOCKS
 from .promotion import PROMOTION_BLOCK_HOURS
 from .schedule import OptimizationSchedule
 
@@ -63,7 +64,11 @@ def guarded_cohort_evidence_capacity(
             formal.extend({"generation": generation, "batch_index": batch.batch_index,
                 **_cohort_evidence(batch.cohort, minimum=LOCAL_PAIRED_BLOCK_MINIMUM if batch.batch_index else 1)}
                 for batch in selection.adaptation.batches)
-        evidence = _cohort_evidence(selection.holdout, minimum=2 if schedule.quick else profile.selection_minimum_paired_blocks)
+        # Unified epochs must be able to satisfy their actual retention gate.
+        # Older quick protocols retain their frozen two-day admission rule.
+        minimum_holdout_blocks = (JOINT_MINIMUM_TIME_BLOCKS if schedule.unified
+                                  else 2 if schedule.quick else profile.selection_minimum_paired_blocks)
+        evidence = _cohort_evidence(selection.holdout, minimum=minimum_holdout_blocks)
         days = tuple(sorted({o.origin_timestamp // PROMOTION_BLOCK_HOURS for o in selection.holdout.origins}))
         starts = len(_legal_starts(days, profile.moving_block_days))
         unique_origins = len(set(selection.holdout.origin_ids))

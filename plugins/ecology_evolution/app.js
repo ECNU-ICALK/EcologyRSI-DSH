@@ -73,6 +73,7 @@
     });
     $("#domain-pack").addEventListener("change", function () { alignDomainDatasetBinding(); ensureAutonomousBindings(); updateSelectionHelp(); loadSelectionPreview(); });
     ["#policy-model-id", "#judge-model-id"].forEach(function (selector) { $(selector).addEventListener("change", updateSelectionHelp); });
+    $("#targeted-search-policy").addEventListener("change", renderReadiness);
     $("#strategy-id").addEventListener("change", function () { alignStrategyModel(); updateSelectionHelp(); });
     $("#dataset-id").addEventListener("change", function () { alignDatasetBinding(); updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
     $("#episode-id").addEventListener("change", function () { updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
@@ -88,9 +89,9 @@
       });
     });
     $("#max-candidates").addEventListener("input", function () { syncCandidateBudget({ markManual: true }); renderReadiness(); renderParameters(); });
-    ["#experiment-mode", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
-      $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); if (["experiment-mode", "formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
-      $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); if (["experiment-mode", "formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
+    ["#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
+      $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); if (["formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
+      $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); if (["formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
     });
     ["#max-generations", "#candidates-per-generation", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
       $(selector).addEventListener("invalid", function () { state.workspace = "parameters"; renderWorkspace(); });
@@ -198,7 +199,7 @@
       // Predictor selection belongs to the runtime research loop.
       return createRun({
         autonomous_mode: form.get("autonomous_mode") === "true" || form.get("autonomous_mode") === "on",
-        experiment_mode: form.get("experiment_mode") || "quick",
+        experiment_mode: "joint",
         model_workflow: form.get("model_workflow") || "research_compile_evolve@1",
         dataset_id: form.get("dataset_id"),
         episode_id: form.get("episode_id") || undefined,
@@ -214,6 +215,7 @@
         sample_agent_batch_size: Number(form.get("sample_agent_batch_size")),
         sample_concurrency: Number(form.get("sample_concurrency")),
         max_candidates: Number(form.get("max_candidates")),
+        targeted_search_policy: form.get("targeted_search_policy") || "",
         fixed_seed: form.get("fixed_seed") === "on", knowledge_online_enabled: form.get("knowledge_online_enabled") === "on"
       });
     });

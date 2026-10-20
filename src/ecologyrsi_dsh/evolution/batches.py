@@ -48,6 +48,8 @@ from .analysis import (
     sample_update_windows_enabled,
 )
 from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
+from .research_recovery import research_checkpoint
+from . import novelty
 from .interventions import expert_directive_context
 from .schedule import (
     OPTIMIZATION_PROTOCOL,
@@ -620,6 +622,10 @@ def _ensure_generation_research_iteration(
         historical_states=_historical_experience_states(director, state),
         history_cutoff_seq=history_cutoff_seq,
     )
+    if novelty.enabled(state.task_manifest.metadata):
+        cross_generation_experience[novelty.ARCHIVE_KEY] = novelty.archive_reference(
+            novelty.build_archive(state, generation)
+        )
     diagnostic = diagnose_generation(state, knowledge)
     cross_generation_experience["diagnostic_report"] = diagnostic.to_dict()
     research_attempt: int | None = None
@@ -738,6 +744,7 @@ def _ensure_generation_research_iteration(
                             "run_state_revision": state.events[-1].seq,
                             "stage_attempt": research_attempt,
                             "ledger_expected_revision": director.ledger.latest_seq(),
+                            "research_recovery": research_checkpoint(state, parent),
                         }
                     )
                 raw_result = planner(
@@ -1190,6 +1197,8 @@ def _canonical_candidate_outcomes(
                 "classification": row.get("classification"),
                 "selection_reason": row.get("selection_reason"),
                 "mutation_operations": metadata.get("mutation_operations"),
+                **({"mutation_operator_id": "joint-plugin-mutation@1"}
+                   if getattr(getattr(state, "task_manifest", None), "metadata", {}).get("optimization_protocol") in {"joint_plugin_epoch@1", "joint_plugin_epoch@2"} else {}),
                 "behavior_digest": metadata.get("behavior_digest"),
             }
         )

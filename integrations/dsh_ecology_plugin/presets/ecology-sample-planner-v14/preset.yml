@@ -1,0 +1,2 @@
+name: Ecology Sample Planner v13
+description: Autonomous sample analysis using the frozen candidate strategy and optional numerical tools, with Agent-owned final predictions. The strategy directive arrives at run time; the Skill holds only the invariant protocol.

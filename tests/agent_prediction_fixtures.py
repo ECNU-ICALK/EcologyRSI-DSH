@@ -34,3 +34,24 @@ def prediction_rows(context, result):
     return [dict(sample_id=row['sample_id'], predicted=row['predicted'], confidence=0.9,
                  reason_code='agent_model', method='model', evidence_call_ids=[result['call_id']])
             for row in result['outputs']]
+
+
+class TestActivationAuthority:
+    """Explicit native-state double; envelopes cannot create their own leases.
+
+    Integration tests separately exercise the actual rc.2 registry and HTTP
+    attestation. These policy doubles record the session they create here.
+    """
+    def __init__(self):
+        from threading import Lock
+        self._lock = Lock()
+        self._identities = {}
+
+    def register(self, identity, parent_session_id):
+        with self._lock:
+            self._identities[identity["session_id"]] = (dict(identity), parent_session_id)
+
+    def __call__(self, identity, *, parent_session_id, timeout):
+        assert 0 < timeout <= 10
+        with self._lock:
+            return self._identities.get(identity["session_id"]) == (dict(identity), parent_session_id)

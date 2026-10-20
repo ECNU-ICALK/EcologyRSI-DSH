@@ -35,6 +35,9 @@ _NUMERIC = ("increase", "decrease")
 _AUTHORING = ("author", "revise")
 _EXECUTION_ROLES = ("sample-planner", "sample-repair")
 MUTATION_SPECS = {
+    "author_strategy_program": MutationSpec(
+        "strategy_program", "role strategy_program", "bounded_strategy_program@1",
+        "strategy-program:{role}", _AUTHORING, ("sample-planner",)),
     "set_bounded_parameter": MutationSpec(
         "scientific_parameter", "name value", "{name}", "parameter:{name}", _NUMERIC),
     "select_registered_pipeline": MutationSpec(

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createServer } from "node:http";
+import { ClientRequest, createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 import { Readable, Writable } from "node:stream";
-import { registerApiProxy, MODEL_PREFLIGHT_PROXY_TIMEOUT_MS } from "../lib/web/proxy.js";
+import { registerApiProxy, MODEL_PREFLIGHT_PROXY_TIMEOUT_MS, MODEL_PREFLIGHT_ROLE_TIMEOUT_MS } from "../lib/web/proxy.js";
+import { CANARY_PRESETS } from "../lib/runtime/contracts.js";
 
 class Response extends Writable {
   constructor() { super(); this.statusCode = null; this.headersSent = false; this.chunks = []; }
@@ -16,7 +18,12 @@ function request(path, method = "POST") {
   return req;
 }
 
-test("only canonical POST model-preflight waits beyond ordinary proxy timeout", async () => {
+test("only canonical POST model-preflight waits beyond ordinary proxy timeout", async (t) => {
+  const deadlines = [], setSocketTimeout = ClientRequest.prototype.setTimeout;
+  t.mock.method(ClientRequest.prototype, "setTimeout", function (milliseconds, callback) {
+    deadlines.push(milliseconds);
+    return setSocketTimeout.call(this, milliseconds, callback);
+  });
   const seen=[];
   const upstream=createServer((req,res)=>{
     seen.push({method:req.method,url:req.url,authorization:req.headers.authorization});
@@ -33,11 +40,20 @@ test("only canonical POST model-preflight waits beyond ordinary proxy timeout", 
   try {
     const success=new Response();await proxy.handler(request("/api/ecology-evolution/model-preflight"),success);
     assert.equal(success.statusCode,200);assert.equal(success.json().passed,true);
-    assert.equal(MODEL_PREFLIGHT_PROXY_TIMEOUT_MS,250000);
+    assert.equal(deadlines[0], MODEL_PREFLIGHT_PROXY_TIMEOUT_MS);
     assert.equal(seen[0].authorization,"Bearer service-test-only");
     for(const [path,method] of [["/api/ecology-evolution/health","GET"],["/api/ecology-evolution/runs","POST"],["/api/ecology-evolution/model-preflight","GET"],["/api/ecology-evolution/model-preflight/extra","POST"],["/api/ecology-evolution/%6dodel-preflight","POST"]]){
       const res=new Response();await proxy.handler(request(path,method),res);assert.equal(res.statusCode,502,`${method} ${path}`);
       assert.doesNotMatch(JSON.stringify(res.json()),/service-test-only/);
     }
+    assert.deepEqual(deadlines.slice(1), [20,20,20,20,20]);
   } finally { upstream.closeAllConnections();await new Promise(resolve=>upstream.close(resolve)); }
+});
+
+test("preflight deadline covers every manifest role using the Host default bound", async () => {
+  const source = await readFile(new URL("../../../src/ecologyrsi_dsh/integrations/model_canary.py", import.meta.url), "utf8");
+  const roleTimeout = Number(source.match(/total_timeout_ms: int = (\d+)/)?.[1]);
+  assert.equal(MODEL_PREFLIGHT_ROLE_TIMEOUT_MS, roleTimeout);
+  assert.ok(Object.keys(CANARY_PRESETS).length >= 4);
+  assert.equal(MODEL_PREFLIGHT_PROXY_TIMEOUT_MS, Object.keys(CANARY_PRESETS).length * roleTimeout + 10000);
 });

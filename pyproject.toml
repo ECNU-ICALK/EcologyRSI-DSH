@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecologyrsi-dsh"
-version = "0.9.0"
+version = "0.10.11"
 description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
@@ -76,14 +76,14 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v15" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v15/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v17" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v6" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v6/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/*.yml",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/*.yml",
@@ -94,14 +94,14 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v15/skills/autonomous-ecology-research" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v15/skills/autonomous-ecology-research/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/skills/autonomous-ecology-research" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/skills/autonomous-ecology-research/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v6/skills/bounded-plugin-experiment" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v6/skills/bounded-plugin-experiment/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12/skills/origin-vector-forecasting" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12/skills/origin-vector-forecasting/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review/SKILL.md",
@@ -113,7 +113,7 @@ where = ["src"]
     "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.9.0.tgz",
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.11.tgz",
 ]
 "share/ecologyrsi-dsh/scripts" = [
     "scripts/install_dsh_ecology_runtime.mjs",

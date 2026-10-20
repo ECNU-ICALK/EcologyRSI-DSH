@@ -8,7 +8,7 @@ from typing import Any
 # decision object in one output budget, so it is bounded above the single-answer
 # stages, exactly as research synthesis already is.
 SAMPLE_OPERATION_MIN_MAX_TOKENS = 512
-SAMPLE_OPERATION_MAX_MAX_TOKENS = 16384
+SAMPLE_OPERATION_MAX_MAX_TOKENS = 32768
 
 # Shared by run creation and the native adapter. Multi-tool, nine-cell Agent
 # inference needs the same output room in both paths; never keep API-local
@@ -28,9 +28,19 @@ SAMPLE_OPERATION_MAX_MAX_TOKENS = 16384
 # reasoning tier the runtime cannot request "off", so review reasoning shares
 # this budget with the decision object it must still emit; 8192 leaves the
 # largest observed submission its measured room instead of 1016 tokens.
-NATIVE_SAMPLE_OPERATION_MAX_TOKENS = MappingProxyType({
+LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS = MappingProxyType({
     "sample.planner": 16384,
     "sample.repair": 16384,
+    "sample.critic": 8192,
+})
+
+# Two responses in the same origin exhausted 16384 tokens before emitting a
+# structured result, including the one bounded corrective attempt. New runs
+# freeze more response room; historical explicit budgets and missing-budget
+# adapter defaults retain their old meaning. This is not a cumulative quota.
+NATIVE_SAMPLE_OPERATION_MAX_TOKENS = MappingProxyType({
+    "sample.planner": 32768,
+    "sample.repair": 32768,
     "sample.critic": 8192,
 })
 

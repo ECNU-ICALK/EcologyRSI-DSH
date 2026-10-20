@@ -1,0 +1,308 @@
+{
+  "source": "latest failed planner, minimized scientific arguments only",
+  "wave_digest": "3e78b24f81ad0ee3931316c2eabf5aeefe4ba6e1d379b3568d70741d72395f20",
+  "sample_ids": [
+    "prediction-sample:6f36e391741968f8dd418ce86d3b3f81",
+    "prediction-sample:8c23f3e2f2c405ad75306fd9412da806",
+    "prediction-sample:61e5f86e1e3691ef730bb2deb39388ff",
+    "prediction-sample:568f9f6c10cfeeb29a46bfafabcbcae3",
+    "prediction-sample:4139fdcb48a95fc5f9fdc228397103e0",
+    "prediction-sample:9a04fedf363afa82a9671988a8171650",
+    "prediction-sample:7c1e6a73439ca0dc150d81c3e837809b",
+    "prediction-sample:043fa0bb2909dc018f4c3286729aec58",
+    "prediction-sample:8a5f099c36c376ebf7bf6a12b8590a2e"
+  ],
+  "submissions": [
+    {
+      "decisions": [
+        {
+          "confidence": 0.8,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 18.987744721293147,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:6f36e391741968f8dd418ce86d3b3f81"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 21.195867284525587,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:8c23f3e2f2c405ad75306fd9412da806"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 19.020508126568245,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:61e5f86e1e3691ef730bb2deb39388ff"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 499.9637766808337,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:568f9f6c10cfeeb29a46bfafabcbcae3"
+        },
+        {
+          "confidence": 0.6,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 652.4682043849743,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:4139fdcb48a95fc5f9fdc228397103e0"
+        },
+        {
+          "confidence": 0.55,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 497.2651301609748,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:9a04fedf363afa82a9671988a8171650"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 88.01738547018132,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:7c1e6a73439ca0dc150d81c3e837809b"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 85.55724215050465,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:043fa0bb2909dc018f4c3286729aec58"
+        },
+        {
+          "confidence": 0.6,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 87.84626678671104,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:8a5f099c36c376ebf7bf6a12b8590a2e"
+        }
+      ]
+    },
+    {
+      "decisions": [
+        {
+          "confidence": 0.8,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 18.987744721293147,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:6f36e391741968f8dd418ce86d3b3f81"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 21.195867284525587,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:8c23f3e2f2c405ad75306fd9412da806"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 19.020508126568245,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:61e5f86e1e3691ef730bb2deb39388ff"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 499.9637766808337,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:568f9f6c10cfeeb29a46bfafabcbcae3"
+        },
+        {
+          "confidence": 0.6,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 652.4682043849743,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:4139fdcb48a95fc5f9fdc228397103e0"
+        },
+        {
+          "confidence": 0.55,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 497.2651301609748,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:9a04fedf363afa82a9671988a8171650"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 88.01738547018132,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:7c1e6a73439ca0dc150d_empty"
+        }
+      ],
+      "schema_version": "ecology-sample-predictions@2",
+      "wave_digest": "3e78b24f81ad0ee3931316c2eabf5aeefe4ba6e1d379b3568d70741d72395f20"
+    },
+    {
+      "decisions": [
+        {
+          "confidence": 0.8,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 18.987744721293147,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:6f36e391741968f8dd418ce86d3b3f81"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 21.195867284525587,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:8c23f3e2f2c405ad75306fd9412da806"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 19.020508126568245,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:61e5f86e1e3691ef730bb2deb39388ff"
+        },
+        {
+          "confidence": 0.65,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 499.9637766808337,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:568f9f6c10cfeeb29a46bfafabcbcae3"
+        },
+        {
+          "confidence": 0.6,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 652.4682043849743,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:4139fdcb48a95fc5f9fdc228397103e0"
+        },
+        {
+          "confidence": 0.55,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 497.2651301609748,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:9a04fedf363afa82a9671988a8171650"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 88.01738547018132,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:7c1e6a73439ca0dc150d81c3e837809b"
+        },
+        {
+          "confidence": 0.7,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 85.55724215050465,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:043fa0bb2909dc018f4c3286729aec58"
+        },
+        {
+          "confidence": 0.6,
+          "evidence_call_ids": [
+            "call-01-candidate-model",
+            "call-02-recipe-ridge"
+          ],
+          "method": "blend",
+          "predicted": 87.84626678671104,
+          "reason_code": "agent_blend",
+          "sample_id": "prediction-sample:8a5f099c36c376ebf7bf6a12b8590a2e"
+        }
+      ],
+      "schema_version": "ecology-sample-predictions@2",
+      "wave_digest": "3e78b24f81ad0ee3931316c2eabf5aeefe4ba6e1d379b3568d70741d72395f20"
+    }
+  ]
+}

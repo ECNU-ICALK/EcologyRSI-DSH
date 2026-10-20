@@ -119,9 +119,9 @@
     "research.started": "模型自主调研已开始", "research.completed": "模型自主调研已完成",
     "implementation.started": "预测模型与进化策略能力编译已开始", "implementation.completed": "宿主能力编译已完成",
     "optimization.started": "迭代优化分析已开始", "optimization.completed": "迭代优化决策已完成",
-    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "重复候选已跳过", "candidate.screening_recorded": "候选初筛结果已记录", "candidate.screened_out": "候选未进入训练主线",
+    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "等价候选已标记", "candidate.screening_recorded": "候选初筛结果已记录", "candidate.screened_out": "候选未进入训练主线",
     "formal.selection_cohort_frozen": "正式评测队列已冻结", "formal.batch_started": "正式 epoch 微批已启动", "formal.batch_evaluated": "正式 epoch 微批已完成",
-    "holdout.arm_started": "轮末留出评测臂已启动", "generation.comparison_recorded": "轮末三臂比较结果已记录",
+    "holdout.arm_started": "轮末留出评测臂已启动", "holdout.recheck_started": "条件复核已启动", "generation.comparison_recorded": "轮末比较结果已记录",
     "artifact.recorded": "候选训练产物已记录",
     "evaluation.progress": "真实样本评测正在推进", "evaluation.sample_results_started": "样本评测结果开始写入", "evaluation.sample_result_batch": "样本评测结果批次已写入", "evaluation.sample_results_completed": "样本评测结果已写入", "evaluation.completed": "训练反馈检查已完成", "evaluation.judged": "候选方案独立评审结论已记录", "promotion.decided": "搜索保留决策已记录", "promotion.pending": "等待搜索保留决策",
     "intervention.recorded": "专家主动意见已记录", "intervention.applied": "专家主动意见处理结果已记录", "intervention.submitted": "专家主动意见已提交",
@@ -560,6 +560,9 @@
     if (status === "failed") {
       return { runId: run.id, state: "failed", message: "运行创建后失败：" + runFailureMessage(run, events) };
     }
+    if (status === "paused") {
+      return { runId: run.id, state: "paused", message: "运行已暂停，当前进度已保存。" + (runPauseReason(run) || "可在运行过程查看原因并恢复运行。") };
+    }
     if (status === "completed") {
       return { runId: run.id, state: "completed", message: "进化运行已完成，可以继续创建新运行。" };
     }
@@ -734,7 +737,7 @@
       not_started: "未开始", unavailable: "未开放", restricted: "外部受限",
       denied: "拒绝", fail: "未通过", failed: "未通过", false: "未通过",
       approved: "已保留", accepted: "已保留", promoted: "已保留", rejected: "未保留",
-      evaluating: "训练反馈检查中", evaluated: "等待搜索保留决策", spawned: "等待训练反馈", duplicate: "重复版本已跳过"
+      evaluating: "训练反馈检查中", evaluated: "等待搜索保留决策", spawned: "等待训练反馈", duplicate: "已标记等价版本"
     }[text.toLowerCase()] || text || "未提供";
   }
   function environmentText(value) {
@@ -1205,6 +1208,11 @@
   function createDisplayStatus() {
     var creation = state.createStatus;
     return creation && creation.state === "failed" && !creation.runId ? creation : pendingCreateStatus();
+  }
+  function displayedRun() {
+    // Keep the selected history in memory while a new creation owns the view.
+    // Incremental renderers must use the same identity as a full page render.
+    return createDisplayStatus() ? null : state.activeRun;
   }
 
   function localizeError(message, errorCode, status) {

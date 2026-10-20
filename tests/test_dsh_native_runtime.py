@@ -164,7 +164,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "root_services": {"required": ["agents"], "missing": [], "declared": True},
             "presets": [
                 {
-                    "preset_id": "ecology-researcher-v15",
+                    "preset_id": "ecology-researcher-v17",
                     "declared": True,
                     "standing_key": "standing:researcher",
                     "preset_mountable": True,
@@ -192,7 +192,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_capabilities_and_mutations_are_strict_and_bearer_authenticated(self) -> None:
         self.server.responses.extend([(200, self._capabilities()), (200, self._accepted())])  # type: ignore[attr-defined]
         capability = self.client.capabilities()
-        self.client.require_capabilities(capability, ["ecology-researcher-v15"])
+        self.client.require_capabilities(capability, ["ecology-researcher-v17"])
         response = self.client.create_run(
             {
                 "run_id": "run-1",
@@ -211,9 +211,9 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_python_resume_handshake_accepts_real_node_restored_paused_hosts(self) -> None:
         preset_ids = (
             "ecology-coordinator-v6",
-            "ecology-researcher-v15",
-            "ecology-candidate-proposer-v6",
-            "ecology-sample-planner-v12",
+            "ecology-researcher-v17",
+            "ecology-candidate-proposer-v9",
+            "ecology-sample-planner-v14",
             "ecology-sample-critic-v6",
             "ecology-generation-judge-v10",
         )
@@ -338,7 +338,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             )
         with self.assertRaises(DshNativeRuntimeUnavailableError):
             self.client.require_capabilities(
-                self._capabilities(ready=False), ["ecology-researcher-v15"]
+                self._capabilities(ready=False), ["ecology-researcher-v17"]
             )
 
     def test_remote_errors_and_transport_failures_never_disclose_token(self) -> None:
@@ -384,6 +384,18 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.error_code, "dsh_native_runtime_cancelled")
         self.assertEqual(self.server.requests, [])  # type: ignore[attr-defined]
 
+    def test_provider_quota_http_429_is_not_a_rate_limit_retry(self) -> None:
+        self.server.responses.append((429, {
+            "schema_version": "ecology-runtime-failure/1",
+            "error_code": "model_provider_quota_exhausted",
+            "failure_domain": "provider", "provider_status": 429,
+            "retry_after_ms": None, "retryable": False,
+        }))
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+            self.client.status("run-1")
+        self.assertEqual(raised.exception.provider_status, 429)
+        self.assertFalse(dsh_native_runtime_retryable(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -406,9 +418,9 @@ class _FakeNativeRuntime:
         presets = []
         for preset_id in (
             "ecology-coordinator-v6",
-            "ecology-researcher-v15",
-            "ecology-candidate-proposer-v6",
-            "ecology-sample-planner-v12",
+            "ecology-researcher-v17",
+            "ecology-candidate-proposer-v9",
+            "ecology-sample-planner-v14",
             "ecology-sample-critic-v6",
             "ecology-generation-judge-v10",
         ):
@@ -539,24 +551,16 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(payload["dsh"]["harness_execution"], "dsh_native_agent_runtime")
         self.assertTrue(payload["dsh"]["official_harness_agent_loop"])
 
-    def test_native_create_freezes_top2_adaptive_epoch_schedule(self) -> None:
+    def test_native_create_freezes_unified_joint_schedule(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime
-        schedule = {
-            "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
-            "screening_origin_count": 64,
-            "finalist_count": 2,
-            "formal_origin_count_per_finalist": 500,
-            "local_batch_origin_count": 50,
-            "max_local_edits_per_batch": 2,
-            "selection_holdout_origin_count": 169,
-            "local_evaluation_mode": "prequential",
-        }
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        schedule = OptimizationSchedule.for_new_run().to_dict()
 
         status, payload = self._post(
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_protocol": "joint_plugin_epoch@2",
                 "optimization_schedule": schedule,
                 "run_id": "run:native-adaptive-schedule",
                 "domain_pack_id": "crop_soil_water",
@@ -583,20 +587,22 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["projection"]["optimization_protocol"],
-            "top2_adaptive_epoch@1",
+            "joint_plugin_epoch@2",
         )
         state = self.server.director.state("run:native-adaptive-schedule")
         metadata = state.task_manifest.metadata
-        self.assertEqual(metadata["optimization_protocol"], "top2_adaptive_epoch@1")
+        self.assertEqual(metadata["optimization_protocol"], "joint_plugin_epoch@2")
         self.assertEqual(metadata["optimization_schedule"], schedule)
         self.assertEqual(
             metadata["derived_execution_budget"],
             {
-                "screening_candidate_origins": 256,
-                "formal_candidate_origins": 1000,
-                "holdout_candidate_origins": 1014,
-                "total_candidate_origins": 2270,
-                "total_scoring_cells": 2270,
+                "screening_candidate_origins": 50,
+                "formal_candidate_origins": 50,
+                "holdout_candidate_origins": 100,
+                "base_candidate_origins": 200,
+                "recheck_candidate_origins": 100,
+                "total_candidate_origins": 300,
+                "total_scoring_cells": 300,
             },
         )
         self.assertNotIn("samples_per_update", metadata)
@@ -768,7 +774,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             state.task_manifest.metadata["optimization_schedule"][
                 "formal_origin_count_per_finalist"
             ],
-            100,
+            35,
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],

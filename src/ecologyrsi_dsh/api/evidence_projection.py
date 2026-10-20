@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import math
 
 from ..evolution.diagnosis import failure_category
+from ..core.immutable import thaw_json
 from ..core.models import digest
 
 
@@ -67,8 +68,10 @@ def _ratio(numerator, denominator, unit, *, unavailable=None):
 
 
 def _identified(value, schema, identity):
+    # Replay deep-freezes batch metrics. Hash their original JSON representation
+    # so nested mapping proxies remain verifiable without mutating the evidence.
     return (isinstance(value, Mapping) and value.get("schema_version") == schema
-            and value.get(identity) == digest({key: item for key, item in value.items() if key != identity}))
+            and value.get(identity) == digest(thaw_json({key: item for key, item in value.items() if key != identity})))
 
 
 def execution_effect_observations(state, candidates):
@@ -178,6 +181,7 @@ def evidence_funnel(state):
         "registered_candidates": len(ids), "budget_unallocated_candidates": len(omitted),
         "applied_edits": applied, "applied_is_verified_gain": False,
         "generated_attempts": None, "execution_effect_observations": effects,
+        "prediction_contribution": contribution_observations(state),
         "stages": {
             "structural_validity": structural,
             "behavior_change": _ratio(None, None, "revision", unavailable="controlled_behavior_comparison_not_recorded"),
@@ -195,3 +199,24 @@ def evidence_funnel(state):
         "failure_count_unit": "recorded_reason_observations_not_unique_candidates",
         "aggregation_scope": "this_run_and_frozen_protocol_only",
     }
+
+
+def contribution_observations(state):
+    """Expose compact versioned metrics; never reinterpret historical receipts."""
+    from ..evaluators.prediction_contribution import paired_tool_effect
+    batches = list(getattr(state, "formal_batch_evaluations", ()))
+    metrics = {b.evaluation_id: b.metrics.get("sample_execution", {}).get("prediction_contribution") for b in batches if getattr(b, "evaluation_id", None)}
+    summaries = [thaw_json(value) for value in metrics.values() if value]
+    pairs = []
+    for pair in getattr(state, "formal_batch_comparisons", ()):
+        if metrics.get(getattr(pair, "champion_evaluation_id", None)) or metrics.get(getattr(pair, "challenger_evaluation_id", None)):
+            pairs.append({"comparison_id": pair.comparison_id, **paired_tool_effect(
+                metrics.get(getattr(pair, "champion_evaluation_id", None)), metrics.get(getattr(pair, "challenger_evaluation_id", None)))})
+    policy = state.task_manifest.metadata.get("behavior_diagnostics_policy")
+    from ..core.prediction_policy import CONTRIBUTION_POLICIES
+    enabled = policy in CONTRIBUTION_POLICIES
+    return {"policy": policy, "enabled": enabled,
+            "status": "not_enabled" if not enabled else "recorded" if summaries else "awaiting_evidence",
+            "activation_source": "frozen_task_manifest",
+            "latest_training_summary": summaries[-1] if summaries else None,
+            "paired_tool_effects": pairs[-12:], "scope": "training_only"}

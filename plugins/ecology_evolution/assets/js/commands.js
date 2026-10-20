@@ -59,42 +59,24 @@
 
   function normalizedOptimizationSchedule(values) {
     var input = values || {};
-    if (input.experiment_mode === "evidence_guided") {
-      return {schema_version: "ecologyrsi-dsh.evidence-guided-epoch-schedule/1", screening_origin_count: 10,
-        finalist_count: 1, formal_origin_count_per_finalist: 35, local_batch_origin_count: 25,
-        max_local_edits_per_batch: 1, selection_holdout_origin_count: 50, local_evaluation_mode: "paired_champion_challenger"};
+    if (input.experiment_mode && input.experiment_mode !== "joint") {
+      throw new Error("新实验统一使用联合策略进化；历史模式仅支持原运行回放");
     }
-    var quick = input.experiment_mode !== "comparison";
-    var formal = runParameterInteger(input.formal_origin_count, "formal_origin_count", "每个入围候选更新时点数");
-    var batch = runParameterInteger(input.local_batch_origin_count, "local_batch_origin_count", "局部 batch 时点数");
-    var edits = runParameterInteger(input.max_local_edits_per_batch, "max_local_edits_per_batch", "每批最大局部改动数");
-    var holdout = runParameterInteger(input.selection_holdout_origin_count, "selection_holdout_origin_count", "轮末比较时点数");
-    if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
-    return {
-      schema_version: quick ? "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1" : "ecologyrsi-dsh.top2-adaptive-epoch-schedule/4",
-      screening_origin_count: quick ? 0 : 64,
-      finalist_count: quick ? 1 : 2,
-      formal_origin_count_per_finalist: formal,
-      local_batch_origin_count: batch,
-      max_local_edits_per_batch: edits,
-      selection_holdout_origin_count: holdout,
-      local_evaluation_mode: quick ? "prequential" : "paired_champion_challenger"
-    };
+    runParameterInteger(50, "selection_holdout_origin_count", "固定轮末比较时点数");
+    return {schema_version: "ecologyrsi-dsh.joint-plugin-epoch-schedule/2", screening_origin_count: 10,
+      finalist_count: 1, formal_origin_count_per_finalist: 35, local_batch_origin_count: 25,
+      max_local_edits_per_batch: 2, selection_holdout_origin_count: 50, local_evaluation_mode: "paired_champion_challenger"};
   }
 
   function optimizationProtocolForSchedule(schedule) {
-    return schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1" ? "evidence_guided_epoch@1"
+    return schedule.schema_version === "ecologyrsi-dsh.joint-plugin-epoch-schedule/2" ? "joint_plugin_epoch@2"
+      : schedule.schema_version === "ecologyrsi-dsh.joint-plugin-epoch-schedule/1" ? "joint_plugin_epoch@1"
+      : schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1" ? "evidence_guided_epoch@1"
       : schedule.finalist_count === 1 ? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1";
   }
 
   function optimizationScheduleFromControls() {
-    return normalizedOptimizationSchedule({
-      experiment_mode: $("#experiment-mode") ? $("#experiment-mode").value : "quick",
-      formal_origin_count: $("#formal-origin-count").value,
-      local_batch_origin_count: $("#local-batch-origin-count").value,
-      max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
-      selection_holdout_origin_count: $("#selection-holdout-origin-count").value
-    });
+    return normalizedOptimizationSchedule({});
   }
 
   function candidateBudgetStatus() {
@@ -251,7 +233,7 @@
       renderAll();
       return reconcileModelPreflight(body, 30);
     }
-    return request("/model-preflight", {method: "POST", body: body, timeout: 490000})
+    return request("/model-preflight", {method: "POST", body: body, timeout: 500000})
       .then(function (result) {
         if (result && result.pending === true) { return reconcile(); }
         if (!result || result.passed !== true) {
@@ -261,8 +243,14 @@
           var modelLabel = [identity.provider_id, identity.model_id].filter(Boolean).join("/") || "所选模型";
           var context = receipt ? modelLabel + " / " + (identity.stage || "预检") + "：" : "";
           var reason = failure && failure.code;
+          if (reason === "model_provider_quota_exhausted") {
+            throw new Error(context + "模型网关返回 QUOTA 限制（HTTP 429），不是本地 Token 预算限制，尚未创建运行；请稍后重试或检查服务端限制。");
+          }
           if (reason === "structured_child_tool_protocol_error") {
             throw new Error(context + "模型接口将工具调用返回为普通文本，DSH 无法执行。请更换支持标准工具调用的模型，或由服务方修复工具调用解析；尚未创建运行。（" + reason + "）");
+          }
+          if (reason === "structured_role_operational_timeout") {
+            throw new Error(context + "模型预检响应超时，尚未创建运行。请稍后重试；有效期内已通过的预检会自动复用。若持续超时，请检查模型服务的可用性。（" + reason + "）");
           }
           if (reason === "model_canary_provider_unavailable" || reason === "model_canary_rate_limited" || reason === "model_canary_transport_failure") {
             throw new Error(context + "模型服务暂不可用" + (failure.provider_status ? "（HTTP " + failure.provider_status + "）" : "") + "，尚未创建运行；服务恢复后可重试。");
@@ -332,6 +320,7 @@
       requested_mode: "autonomous", auto_advance: payload.auto_advance === 0 ? 0 : continuousAutoAdvance ? true : 1
     };
     body.prediction_selection_policy = "model_during_run@1";
+    if (payload.targeted_search_policy) { body.targeted_search_policy = payload.targeted_search_policy; }
     body.search_guard_policy = "practical_delta_cell_noninferiority_paired_blocks@1";
     body.require_model_contract_preflight = true;
     var signature = JSON.stringify(body);
@@ -342,6 +331,9 @@
     state.runReadRequest += 1;
     state.runOverviewLoading = null;
     state.runOverviewError = null;
+    // Retain history, but retire its pending sample reads before this attempt
+    // owns the view. A late success, error or finally must not repaint it.
+    invalidateCandidateSampleRequest();
     state.createStatus = {state: "submitting", runId: null, message: "提交已接收，正在创建运行并连接实时进度。"};
     state.commandError = null;
     // Move to the process workspace before the POST resolves.  Creation is a
@@ -952,7 +944,7 @@
         return true;
       }
       return state.activeRun && !state.runMonitorRunId ? refreshProgressForRun(state.activeRun.id) : true;
-    }).catch(function () { return false; }).finally(function () { state.refreshing = false; });
+    }).catch(function () { return false; }).finally(function () { state.refreshing = false; renderContext(); });
   }
 
   var independentEvaluationTimer = null;

@@ -12,6 +12,25 @@ from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 
 
 class RunSampleAdmissionTests(unittest.TestCase):
+    def test_failure_reset_requires_drained_origins_and_preserves_frozen_limit(self):
+        admission = RunSampleAdmission()
+        error = DshNativeRuntimeUnavailableError(error_code='structured_output_attempt_limit_exceeded')
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            with admission.admit('run:resume', 4):
+                with self.assertRaisesRegex(RuntimeError, 'quiescence'):
+                    admission.reset_execution_failure('run:resume')
+                raise error
+        self.assertIs(admission.execution_failure_for('run:resume'), error)
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            with admission.admit('run:resume', 4):
+                self.fail('failed admission reopened before explicit reset')
+        snapshot = admission.snapshot('run:resume')
+        admission.reset_execution_failure('run:resume')
+        self.assertEqual(admission.snapshot('run:resume'), snapshot)
+        with admission.admit('run:resume', 4):
+            pass
+        self.assertEqual(admission.snapshot('run:resume')['limit'], 4)
+
     def test_fatal_error_cancels_siblings_before_their_join_and_preserves_cause(self):
         cancelled = threading.Event()
         started = threading.Event()
@@ -269,7 +288,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
                 raise DshNativeRuntimeUnavailableError(
                     "provider unavailable",
                     error_code="dsh_native_runtime_http_error",
-                    status_code=502,
+                    status_code=502, failure_domain="provider", provider_status=502,
                 )
 
         snapshot = admission.snapshot("run:congested")
@@ -292,7 +311,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         error = DshNativeRuntimeUnavailableError(
             "provider unavailable",
             error_code="dsh_native_runtime_http_error",
-            status_code=502,
+            status_code=502, failure_domain="provider", provider_status=502,
         )
         self.assertFalse(
             failing.__exit__(type(error), error, error.__traceback__)

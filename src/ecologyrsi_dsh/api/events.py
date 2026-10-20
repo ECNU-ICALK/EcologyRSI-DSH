@@ -96,6 +96,7 @@ _EVENT_FIELDS = {
     'TrajectoryRevisionAdvanced': ('activation', 'activation_id generation candidate_id batch_index from_revision_id to_revision_id reason'),
     'FormalTrajectoryCompleted': ('', 'candidate_id final_revision_id'),
     'HoldoutArmStarted': ('', 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest'),
+    'HoldoutRecheckStarted': ('', 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest'),
     'CandidateEffectiveRevisionFrozen': ('', 'generation selected_candidate_id selected_revision_id comparison_digest'),
     'CandidateMarkedDuplicate': ('', 'candidate_id duplicate_of_candidate_id'),
     'ArtifactRecorded': ('artifact', 'artifact_id candidate_id'),
@@ -107,12 +108,36 @@ _EVENT_FIELDS = {
 }
 
 
+def _duplicate_evaluation_context(events):
+    """Report later execution evidence without rewriting a duplicate event."""
+    marked = {event.payload.get("candidate_id"): event.seq for event in events
+              if event.kind == "CandidateMarkedDuplicate"}
+    if not marked:
+        return {}
+    result = {}
+    ranks = {"started": 1, "evaluation_recorded": 2, "screening_recorded": 3}
+    for event in events:
+        if event.kind not in {"EvaluationSampleResultsStarted", "CandidateScreeningRecorded", "EvaluationRecorded"}:
+            continue
+        source = event.payload.get("evaluation", {}) if event.kind == "EvaluationRecorded" else event.payload
+        candidate_id = source.get("candidate_id")
+        if candidate_id not in marked or event.seq <= marked[candidate_id]:
+            continue
+        disposition = {"EvaluationSampleResultsStarted": "started", "CandidateScreeningRecorded": "screening_recorded",
+                       "EvaluationRecorded": "evaluation_recorded"}[event.kind]
+        previous = result.get(candidate_id, {})
+        if ranks[disposition] >= ranks.get(previous.get("evaluation_disposition"), 0):
+            result[candidate_id] = {"evaluation_disposition": disposition, "evaluation_evidence_seq": event.seq}
+    return result
+
+
 class EventEndpointsMixin:
     @staticmethod
     def _event_json(
         event: Any,
         *,
         intervention_kinds: dict[str, str] | None = None,
+        duplicate_evaluations: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if event.kind in _PRIVATE_SAMPLE_EVENT_KINDS:
             raise ValueError("private sample-result events cannot be publicly projected")
@@ -135,25 +160,26 @@ class EventEndpointsMixin:
             "GenerationReflected": "反思模型已基于本轮聚合结果生成下一轮多套方向。",
             "GenerationChampionSelected": "本轮下一轮有效搜索版本已冻结。",
             "CandidateRevisionCreated": "候选方案修订已冻结。",
-            "FormalTrajectoryStarted": "Top 2 候选的正式轨迹已启动。",
+            "FormalTrajectoryStarted": "入围候选的优化轨迹已启动。",
             "FormalBatchStarted": "正式轨迹的下一局部批次已启动。",
             "FormalBatchEvaluated": "局部批次评测已完成。",
             "FormalBatchCompared": "同 cohort 冠军—挑战者比较已完成。",
             "LocalEditProposalRecorded": "局部小改动提案已记录。",
             "LocalEditDecided": "局部小改动的宿主决策已记录。",
             "TrajectoryRevisionAdvanced": "下一批次的有效修订已冻结。",
-            "FormalTrajectoryCompleted": "Top 2 候选的正式轨迹已完成。",
+            "FormalTrajectoryCompleted": "入围候选的优化轨迹已完成。",
             "GenerationHoldoutFrozen": "本轮独立留出评测队列已冻结。",
             "HoldoutArmStarted": "本轮一个留出评测臂已启动。",
+            "HoldoutRecheckStarted": "本轮一个条件复核评测臂已启动。",
             "HoldoutEvaluationRecorded": "本轮一个留出评测臂已完成。",
-            "GenerationComparisonRecorded": "本轮三臂留出比较已完成。",
+            "GenerationComparisonRecorded": "本轮留出比较已完成。",
             "CandidateEffectiveRevisionFrozen": "本轮有效修订已冻结。",
-            "RunAdaptationCohortFrozen": "本次运行的 500 时点自适应队列已冻结。",
+            "RunAdaptationCohortFrozen": "本次运行的自适应队列已冻结。",
             "GenerationCohortsFrozen": "本轮初筛与独立留出队列已冻结。",
             "ProposalSubmitted": "变更提案已提交。",
             "CandidateSpawned": "候选方案已生成。",
             "CandidateFailed": "候选方案训练或评测失败。",
-            "CandidateMarkedDuplicate": "候选与本次运行已有等价方案重复，已跳过评测。",
+            "CandidateMarkedDuplicate": "候选已标记为本次运行中的等价方案；是否评测以本轮执行记录为准。",
             "ArtifactRecorded": "候选训练产物已记录。",
             "EvaluationRecorded": "候选方案科学评测已完成。",
             "EvaluationProgressRecorded": "候选方案正在逐微批执行真实样本评测。",
@@ -177,6 +203,16 @@ class EventEndpointsMixin:
             "AlgorithmAttemptRecorded": "候选算法编译或调试证据已记录。",
         }.get(event.kind, "运行记录已更新。")
         public_payload: dict[str, Any] = {"message": message}
+        if event.kind == "CandidateMarkedDuplicate":
+            context = (duplicate_evaluations or {}).get(payload.get("candidate_id"), {})
+            disposition = context.get("evaluation_disposition")
+            if disposition in {"started", "screening_recorded", "evaluation_recorded"}:
+                public_payload.update(context)
+                public_payload["message"] = {
+                    "started": "候选已标记为等价方案，随后仍启动了本轮评测；完成情况待确认。",
+                    "screening_recorded": "候选已标记为等价方案，随后仍记录了本轮同组初筛结果；不能按跳过评测统计。",
+                    "evaluation_recorded": "候选已标记为等价方案，随后仍记录了评测结果；不能按跳过评测统计。",
+                }[disposition]
         if event.kind in _EVENT_FIELDS:
             path, fields = _EVENT_FIELDS[event.kind]
             source = payload.get(path, {}) if path else payload
@@ -373,7 +409,7 @@ class EventEndpointsMixin:
             public_payload.update(
                 {
                     "evaluation_id": evaluation.get("evaluation_id"),
-                    **public_fields(scope, 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest'),
+                    **public_fields(scope, 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest inference_replica'),
                     **public_fields(evaluation, 'score passed evaluator_digest'),
                 }
             )
@@ -755,12 +791,14 @@ class EventEndpointsMixin:
         intervention_kinds = {
             item.intervention_id: item.kind.value for item in state.interventions
         }
+        duplicate_evaluations = _duplicate_evaluation_context(state.events)
         return {
             "run_id": run_id,
             "events": [
                 self._event_json(
                     event,
                     intervention_kinds=intervention_kinds,
+                    duplicate_evaluations=duplicate_evaluations,
                 )
                 for event in public_events
             ],

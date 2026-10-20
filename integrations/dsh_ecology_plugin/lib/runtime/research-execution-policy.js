@@ -24,7 +24,7 @@ export function researchExecutionPolicy(context) {
 // nine-cell decision object is bounded above the default; the synthesis stage
 // reads its exact value from its frozen policy.
 const DEFAULT_STAGE_MAX_OUTPUT_TOKENS = 8192;
-const STAGE_MAX_OUTPUT_TOKENS = Object.freeze({ "sample.plan": 16384 });
+const STAGE_MAX_OUTPUT_TOKENS = Object.freeze({ "sample.plan": 32768 });
 
 export function validateStructuredStageBudget(stage, maxTokens, context, label) {
   const policy = stage === "generation.research-synthesis" ? researchExecutionPolicy(context) : null;

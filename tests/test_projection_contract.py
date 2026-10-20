@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from ecologyrsi_dsh import TaskManifest
@@ -44,6 +45,18 @@ class ProjectionContractTests(unittest.TestCase):
         )
         self.assertEqual(progress["total_candidates"], 1)
         self.assertEqual(progress["completed_candidates"], 0)
+
+    def test_feature_activation_comes_only_from_frozen_metadata(self):
+        state = self._state()
+        keys = ("targeted_search_policy", "behavior_diagnostics_policy", "candidate_novelty_policy")
+        old_task = state.task_manifest
+        for profile in ("full", "summary"):
+            historical = build_configuration(old_task, state, profile)
+            self.assertTrue(all(historical[key] is None for key in keys))
+        policies = dict(zip(keys, ("cellwise_training_evidence@1", "prediction_contribution@1", "run_behavior_novelty@1")))
+        new_task = replace(old_task, metadata=policies)
+        self.assertEqual({key: build_configuration(new_task, state)[key] for key in keys}, policies)
+        self.assertFalse(any(key in old_task.metadata for key in keys))
 
     def test_evidence_projection_is_separate_from_compact_monitor(self):
         state = self._state()

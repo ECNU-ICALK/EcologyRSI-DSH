@@ -120,6 +120,33 @@ export class ChildBindingRegistry {
     });
   }
 
+  attest(identity, parentSessionId, session) {
+    // Pure read: never claim an unknown child or manufacture an activation.
+    // A completed turn may still have a live lease while its Host persist is
+    // in flight. releaseChild/revoke terminates that authority, not turn/end.
+    if (!identity || typeof identity !== "object" || Array.isArray(identity)
+      || typeof parentSessionId !== "string" || !parentSessionId) return false;
+    const childId = identity.session_id;
+    const reservation = this.children.get(childId);
+    if (!reservation || reservation.status !== "claimed"
+      || reservation.claimed_child_id !== childId
+      || reservation.parent_session_id !== parentSessionId
+      || this.durable.reservations.get(`${parentSessionId}\u0000${reservation.label}`) !== reservation) return false;
+    const leaseId = this.activeByChild.get(childId);
+    const lease = this.durable.activations.get(leaseId);
+    if (!lease || lease.status !== "active" || lease.child_id !== childId
+      || identity.activation_lease_id !== leaseId
+      || lease.revision !== reservation.binding.run_state_revision
+      || lease.stage_attempt !== reservation.binding.stage_attempt
+      || lease.idempotency_key !== reservation.binding.idempotency_key) return false;
+    if (session?.id !== childId || session.header?.parentSession !== parentSessionId
+      || this.foldDescriptor(sessionEvents(session) || []) !== reservation.label) return false;
+    const { allowed_tools: _allowedTools, ...frozen } = reservation.binding;
+    const expected = { ...frozen, session_id: childId,
+      child_reservation_id: reservation.launch.reservation_id, activation_lease_id: leaseId };
+    return canonical(identity) === canonical(expected);
+  }
+
   releaseChild(childId) {
     const reservation = this.children.get(childId);
     if (!reservation) return;

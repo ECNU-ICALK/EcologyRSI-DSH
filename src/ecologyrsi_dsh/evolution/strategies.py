@@ -25,7 +25,8 @@ from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
-from ..core.errors import DshNativeRuntimeUnavailableError
+from ..core.errors import DshNativeRuntimeUnavailableError, DshResearchOutputBudgetError
+from .research_recovery import validate_research_checkpoint
 from ..core.model_execution_policy import research_execution_policy
 from ..core.models import Proposal, Run, TaskManifest, canonical_json, digest
 from ..core.protocols import is_strict_origin_protocol
@@ -33,6 +34,7 @@ from ..core.redaction import public_error_summary, public_exception_summary
 from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ..evaluators.greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
+    BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     RECIPE_RIDGE_MODEL_ID,
@@ -73,7 +75,7 @@ from ..knowledge.autonomous_cycle import (
 from ..knowledge.mapping import knowledge_focus_parameter
 from ..knowledge.models import validate_knowledge_context
 from ..knowledge.program_registry import current_program_registry
-from ..knowledge.research_iteration import ResearchIteration
+from ..knowledge.research_iteration import ResearchIteration, validate_research_plan
 from .context import (
     analysis_focus_parameter,
     is_sensitive_context_field,
@@ -93,11 +95,13 @@ from .genome import (
     parameter_trust_region_neighborhood,
 )
 from .agent_policy import build_agent_policy
+from . import joint_policy, novelty, program_preflight
+from ..evaluators.strategy_program import strategy_program_grammar, seed_strategy_program
 from .interventions import apply_bounded_interventions, expert_directive_context
 from .parameter_activity import (
     parameter_activity_contract,
 )
-from .research_context import compact_research_context, research_report_size_diagnostics
+from .research_context import compact_research_context, research_report_size_diagnostics, research_reflection_reference
 from .workflow_ir import (
     DEFAULT_COMPILER_SEMANTIC_DIGEST,
     EXECUTABLE_WORKFLOW_PARAMETERS,
@@ -141,7 +145,7 @@ def _predictor_semantics(parent: EcologyEvolutionPluginGenome) -> dict[str, Any]
             "numerical_prediction_owner": "sample_agent",
             "predictor_scope": "optional candidate default; each sample Agent can select other capabilities or predict directly",
             "evolvable_agent_policy": "candidate-selected instruction Skill and its parameters guide analysis, model use and final prediction",
-            "tool_budget_per_origin_attempt": 6,
+            "tool_budget_per_origin_attempt": "follow the current frozen prediction_contract.max_prediction_tool_calls and Host remaining_calls; failed calls also consume budget",
             "model_parameters": "Agent may override supported tool parameters within the catalog bounds; only training_fit is used for fitting",
             "scoring_scope": "final Agent vector, not the first numerical tool result",
         },
@@ -152,6 +156,7 @@ def _predictor_semantics(parent: EcologyEvolutionPluginGenome) -> dict[str, Any]
     }
     scales = {
         BASELINE_ALIGNED_RIDGE_MODEL_ID: "one fixed scale per horizon, shared across targets",
+        BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID: "one independent fit-selected-baseline residual scale per target and horizon",
         EXOGENOUS_RIDGE_MODEL_ID: "shared across targets and horizons",
         TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID: "one scale per target, shared across horizons",
         HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID: "one scale per target and horizon",
@@ -169,7 +174,7 @@ def _predictor_semantics(parent: EcologyEvolutionPluginGenome) -> dict[str, Any]
             variant_fit_parameter_count="at identical history and feature settings, changing residual scale layout does not add fitted ridge coefficients",
             numerical_formula="persistence + genome residual scale * independently fitted ridge residual",
         )
-    if predictor_id == BASELINE_ALIGNED_RIDGE_MODEL_ID:
+    if predictor_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID):
         result["numerical_formula"] = "training-fit-selected persistence/seasonal baseline + genome residual scale * ridge residual fitted against that same baseline"
         result["prediction_usage"] = prediction_usage(predictor_id, program["parameter_overrides"])
         result["fit_scope"] = "independent ridge coefficients only for target-horizon cells with a nonzero residual scale; zero-scale cells use the selected baseline and skip residual fitting"
@@ -353,27 +358,28 @@ def _host_validation_feedback(
     return feedback
 
 
-def _output_budget_feedback(*, attempt: int, max_output_tokens: int) -> dict[str, Any]:
+def _output_budget_feedback(*, attempt: int, max_output_tokens: int | None = None) -> dict[str, Any]:
     """Turn one budget-exhausted turn into a correctable Host rejection.
 
     A `max-tokens` terminal means the child spent its whole single-call output
     budget reasoning and never called `structured_output`, so there is no
     rejected output to digest and nothing the model can learn from the failure
-    alone.  Naming the exact budget and the ordering it violated changes the
+    alone.  Identifying the exhausted budget and the submission ordering changes the
     request, which is what `retry_identical_exhausted_request: False` requires:
     the frozen policy forbids replaying the same request, not repairing it.
     """
 
+    budget_label = f"{max_output_tokens}-token " if max_output_tokens is not None else ""
     return {
         "schema_version": "ecologyrsi-dsh.host-validation-feedback/1",
         "rejection_code": _OUTPUT_BUDGET_REJECTION_CODE,
         "validation_detail": (
-            f"The previous attempt spent its entire {max_output_tokens}-token "
+            f"The previous attempt spent its entire {budget_label}"
             "single-response output budget on reasoning and ended without "
             "calling structured_output, so it produced no result."
         ),
         "rejected_attempt": attempt,
-        "output_token_budget": max_output_tokens,
+        **({"output_token_budget": max_output_tokens} if max_output_tokens is not None else {}),
         "required_action": (
             "Call structured_output first with one complete object, then stop. "
             "Keep every field at its concise target and do not draft or "
@@ -1286,6 +1292,7 @@ class StrategyRouterDSHAdapter:
         *,
         max_proposals: int = 256,
         native_runtime_provider: Callable[[], Any] | None = None,
+        candidate_novelty_provider: Callable[[str, int], Mapping[str, Any]] | None = None,
     ) -> None:
         if isinstance(max_proposals, bool) or not isinstance(max_proposals, int) or max_proposals < 1:
             raise ValueError("max_proposals must be a positive integer")
@@ -1295,6 +1302,19 @@ class StrategyRouterDSHAdapter:
         self._session_plans: dict[str, dict[str, Any]] = {}
         self._resolved_plan_sessions: set[str] = set()
         self._native_runtime_provider = native_runtime_provider
+        self._candidate_novelty_provider = candidate_novelty_provider
+
+    def _candidate_novelty_archive(self, run, task, reference):
+        if not novelty.enabled(task.metadata):
+            return None
+        if self._candidate_novelty_provider is None:
+            raise ValueError("candidate novelty archive provider is not configured")
+        archive = novelty.validate_archive(
+            self._candidate_novelty_provider(run.run_id, run.generation), run=run, task=task,
+        )
+        if reference != novelty.archive_reference(archive):
+            raise ValueError("candidate novelty archive differs from the frozen research reference")
+        return archive
 
     def _native_runtime(self) -> DshStructuredRoleRuntime:
         client = self._native_runtime_provider() if self._native_runtime_provider else None
@@ -1458,6 +1478,7 @@ class StrategyRouterDSHAdapter:
             ),
             "candidate_count": candidate_count,
             "parent_genome": parent.to_dict(),
+            **_inherited_strategy_context(parent, task),
             "previous_generation_analysis": previous_analysis,
             "previous_generation_reflection": previous_reflection,
             "current_research_plan": safe_aggregate_feedback(
@@ -1757,6 +1778,7 @@ class StrategyRouterDSHAdapter:
         run_state_revision: int = 0,
         stage_attempt: int = 1,
         ledger_expected_revision: int = 0,
+        research_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve one bounded research plan for an autonomous run.
 
@@ -1770,17 +1792,22 @@ class StrategyRouterDSHAdapter:
             if not isinstance(parent_genome, Mapping):
                 raise ValueError("DSH-native research requires the frozen parent genome")
             parent = EcologyEvolutionPluginGenome.from_dict(parent_genome)
+            novelty_archive = self._candidate_novelty_archive(
+                run, task, (cross_generation_experience or {}).get(novelty.ARCHIVE_KEY),
+            )
             context = {
                 "generation": run.generation,
                 "objective": task.objective,
                 "forecast_objective": _forecast_objective_context(task),
                 "parent_genome": parent.to_dict(),
+            **_inherited_strategy_context(parent, task),
                 "parent_plan": dict(current_plan or {}),
                 "previous_generation_analysis": previous_generation_analysis,
                 "knowledge_snapshot": knowledge_snapshot,
                 "previous_knowledge_assessment": previous_knowledge_assessment,
                 "cross_generation_experience": cross_generation_experience,
                 "expert_collaboration": expert_collaboration,
+                **({novelty.ARCHIVE_KEY: novelty.context_view(novelty_archive)} if novelty_archive is not None else {}),
             }
             active_search_cycle = _model_search_cycle_enabled(task)
             if active_search_cycle:
@@ -1828,8 +1855,9 @@ class StrategyRouterDSHAdapter:
                         "required_candidate_direction_count": candidate_count,
                         "synthesis_contract": {
                             "one_distinct_direction_per_candidate_slot": True,
-                            "exactly_one_operation_per_direction": True,
-                            "one_operation_must_fully_test_the_hypothesis": True,
+                            "exactly_one_operation_per_direction": not joint_policy.enabled(task.metadata),
+                            "one_operation_must_fully_test_the_hypothesis": not joint_policy.enabled(task.metadata),
+                            "maximum_related_operations": mutation_policy_contract(task.metadata)["candidate_maximum_operations"],
                             **deepcopy(mutation_catalog),
                             **({"diversity_schedule": family_schedule} if family_schedule else {}),
                             "prior_failure_advice": deepcopy(
@@ -1859,6 +1887,15 @@ class StrategyRouterDSHAdapter:
                 else "ecology-research-result@1"
             )
             if active_search_cycle:
+                # Validate Host provenance before starting the model repair
+                # loop. The full reflection remains in the model input and
+                # ledger; the durable plan needs only a bound reference.
+                reflection_reference = research_reflection_reference(
+                    previous_generation_reflection
+                )
+                historical_guardrails = _historical_parameter_guardrails_from_experience(
+                    cross_generation_experience
+                )
                 execution_policy = research_execution_policy(task.metadata)
                 if execution_policy is not None:
                     _boundary, synthesis_parameter_schemas = _genome_parameter_boundary(task, parent)
@@ -1867,53 +1904,66 @@ class StrategyRouterDSHAdapter:
                         policy=execution_policy,
                     )
                 feedback: dict[str, Any] | None = None
+                rejected_synthesis = validate_research_checkpoint(
+                    research_recovery, run=run, parent=parent,
+                    search=frozen_search_plan, knowledge=knowledge,
+                )
+                semantic_feedback = None
+                semantic_failures = 0
+                output_failures = 0
                 synthesis_max_output_tokens = (
                     execution_policy["synthesis_max_output_tokens"]
                     if execution_policy is not None
                     else _DEFAULT_SYNTHESIS_MAX_OUTPUT_TOKENS
                 )
-                for contract_attempt in range(
-                    1,
-                    _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS + 1,
-                ):
+                # Local checkpoint validation costs no model attempt. New
+                # submissions and output exhaustion have separate bounded
+                # budgets: an incomplete response cannot consume the sole
+                # opportunity to correct a later, real structured submission.
+                first_attempt = 0 if rejected_synthesis is not None else 1
+                for contract_attempt in range(first_attempt, 5):
                     stage_context = {
                         **deepcopy(context),
                         "host_validation_feedback": deepcopy(feedback),
+                        **({"rejected_research_synthesis": deepcopy(rejected_synthesis),
+                            "semantic_validation_feedback": deepcopy(semantic_feedback),
+                            "repair_instruction": (
+                                "Correct the stated validation failure using the actual frozen parent. "
+                                "Preserve unaffected valid directions and evidence; submit a complete "
+                                "concise object through structured_output, not a patch or plain text."
+                            )} if semantic_feedback is not None else {}),
                     }
-                    dsh_stage_attempt = _semantic_contract_stage_attempt(
-                        stage_attempt,
-                        contract_attempt,
-                    )
+                    # Separate namespace from the historical two-slot loop;
+                    # four slots per activation also prevents resume collisions.
+                    dsh_stage_attempt = (max(1, int(stage_attempt)) - 1) * 4 + contract_attempt
                     try:
-                        structured = self._native_runtime().run(
-                            run_id=run.run_id,
-                            stage=stage,
-                            role="researcher",
-                            context=stage_context,
-                            output_schema_id=output_schema_id,
-                            run_state_revision=run_state_revision,
-                            stage_attempt=dsh_stage_attempt,
-                            ledger_expected_revision=ledger_expected_revision,
-                            idempotency_key=(
-                                f"{run.run_id}:generation:{run.generation}:{stage}:"
-                                f"attempt:{dsh_stage_attempt}"
-                            ),
-                            identity_digests=self._native_stage_identity(
-                                parent, task, run, stage, stage_context
-                            ),
-                            max_tokens=synthesis_max_output_tokens,
+                        structured = (
+                            deepcopy(rejected_synthesis) if contract_attempt == 0
+                            else self._native_runtime().run(
+                                run_id=run.run_id,
+                                stage=stage,
+                                role="researcher",
+                                context=stage_context,
+                                output_schema_id=output_schema_id,
+                                run_state_revision=run_state_revision,
+                                stage_attempt=dsh_stage_attempt,
+                                ledger_expected_revision=ledger_expected_revision,
+                                idempotency_key=(
+                                    f"{run.run_id}:generation:{run.generation}:{stage}:"
+                                    f"repair-v2:attempt:{dsh_stage_attempt}"
+                                ),
+                                identity_digests=self._native_stage_identity(
+                                    parent, task, run, stage, stage_context
+                                ),
+                                max_tokens=synthesis_max_output_tokens,
+                            )
                         )
                     except DshNativeRuntimeUnavailableError as exc:
-                        # The child burned the whole budget reasoning and never
-                        # submitted. That is terminal for the runtime but not
-                        # for the Host: one attempt remains, and telling the
-                        # model what it overran is new request content.
-                        if (
-                            exc.error_code != _OUTPUT_BUDGET_ERROR_CODE
-                            or contract_attempt
-                            >= _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS
-                        ):
+                        if exc.error_code != _OUTPUT_BUDGET_ERROR_CODE:
                             raise
+                        output_failures += 1
+                        if output_failures >= 2:
+                            raise DshResearchOutputBudgetError() from exc
                         feedback = _output_budget_feedback(
                             attempt=contract_attempt,
                             max_output_tokens=synthesis_max_output_tokens,
@@ -1936,18 +1986,20 @@ class StrategyRouterDSHAdapter:
                             avoid_behaviors=evolution_reflection[
                                 "avoid_behaviors"
                             ],
+                            prior_generation_behaviors=(novelty_archive["entries"]
+                                if novelty_archive is not None and not joint_policy.enabled(task.metadata) else ()),
                         )
                     except (TypeError, ValueError) as exc:
-                        if (
-                            contract_attempt
-                            >= _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS
-                        ):
+                        semantic_failures += int(contract_attempt != 0)
+                        if semantic_failures >= _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS:
                             raise
                         feedback = _host_validation_feedback(
                             exc,
                             rejected_output=structured,
                             attempt=contract_attempt,
                         )
+                        semantic_feedback = feedback
+                        rejected_synthesis = deepcopy(structured)
                         continue
                     plan = dict(current_plan or {})
                     plan.update(
@@ -1963,22 +2015,34 @@ class StrategyRouterDSHAdapter:
                                 "candidate_directions"
                             ],
                             "candidate_direction_preflight": direction_preflight,
+                            **({novelty.ARCHIVE_KEY: novelty.archive_reference(novelty_archive)}
+                               if novelty_archive is not None else {}),
                             **({"exploration_archive": cross_generation_experience["exploration_archive"]}
                                if isinstance(cross_generation_experience, Mapping) and "exploration_archive" in cross_generation_experience else {}),
                             **({"diversity_schedule": family_schedule} if family_schedule else {}),
                             "report_size_advisories": research_report_size_diagnostics(normalized) if execution_policy is not None else [],
                             "previous_generation_reflection": (
-                                safe_aggregate_feedback(
-                                    previous_generation_reflection,
-                                    name=(
-                                        "research previous generation "
-                                        "reflection plan"
-                                    ),
-                                )
+                                reflection_reference
                             ),
                             "dsh_evolution_reflection": evolution_reflection,
                         }
                     )
+                    # The final storage contract must participate in the same
+                    # bounded repair loop as the output schema, rather than
+                    # first rejecting an accepted result during ledger commit.
+                    plan = _host_guardrail_plan(plan, historical_guardrails)
+                    try:
+                        plan = validate_research_plan(plan)
+                    except (TypeError, ValueError) as exc:
+                        semantic_failures += int(contract_attempt != 0)
+                        if semantic_failures >= _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS:
+                            raise
+                        feedback = _host_validation_feedback(
+                            exc, rejected_output=structured, attempt=contract_attempt,
+                        )
+                        semantic_feedback = feedback
+                        rejected_synthesis = deepcopy(structured)
+                        continue
                     return plan
                 raise RuntimeError("research synthesis repair loop did not terminate")
             structured = self._native_runtime().run(
@@ -2170,6 +2234,7 @@ class StrategyRouterDSHAdapter:
         run_state_revision: int = 0,
         stage_attempt: int = 1,
         ledger_expected_revision: int = 0,
+        research_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Request one bounded advisory plan for the current generation."""
 
@@ -2207,6 +2272,7 @@ class StrategyRouterDSHAdapter:
                 run_state_revision=run_state_revision,
                 stage_attempt=stage_attempt,
                 ledger_expected_revision=ledger_expected_revision,
+                research_recovery=research_recovery,
             )
         except GatewayResponseError as exc:
             if metadata.get("remote_fallback_policy") == "fail_run":
@@ -3031,6 +3097,9 @@ class StrategyRouterDSHAdapter:
             and isinstance(research_iteration.get("plan"), Mapping)
             else {}
         )
+        novelty_archive = self._candidate_novelty_archive(
+            run, task, research_plan.get(novelty.ARCHIVE_KEY),
+        )
         assigned_direction = None
         family_schedule = {}
         if _model_search_cycle_enabled(task):
@@ -3075,12 +3144,13 @@ class StrategyRouterDSHAdapter:
             )[:16],
             16,
         )
+        mutation_policy = mutation_policy_contract(task.metadata)
         mutation_budget_digest = digest(
             {
-                "policy": TRUST_REGION_MUTATION_OPERATOR_ID,
+                "policy": mutation_policy["mutation_operator_id"],
                 "generation": run.generation,
                 "slot_index": slot_index,
-                "maximum_operations": 1,
+                "maximum_operations": mutation_policy["candidate_maximum_operations"],
                 "maximum_normalized_parameter_step": (
                     TRUST_REGION_MAX_NORMALIZED_STEP
                 ),
@@ -3102,7 +3172,7 @@ class StrategyRouterDSHAdapter:
             research_iteration_digest=str(stage_digests["research_iteration_digest"]),
             knowledge_snapshot_digest=str(stage_digests["knowledge_snapshot_digest"]),
             mutation_budget_digest=mutation_budget_digest,
-            mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+            mutation_operator_id=mutation_policy["mutation_operator_id"],
         )
         research_directives = research_plan.get("dsh_evolution_reflection")
         if not isinstance(research_directives, Mapping):
@@ -3120,10 +3190,14 @@ class StrategyRouterDSHAdapter:
         mutation_catalog = _mutation_contract_catalog(task, parent)
         mutation_contract = {
             "schema_version": "ecologyrsi-dsh.genome-mutation-contract/1",
+            **({"candidate_executability": program_preflight.contract(task.metadata)}
+               if program_preflight.enabled(task.metadata) else {}),
+            **({novelty.ARCHIVE_KEY: novelty.context_view(novelty_archive)}
+               if novelty_archive is not None else {}),
             **({"exploration_archive": research_plan["exploration_archive"]}
                if diversity_enabled(task.metadata) and "exploration_archive" in research_plan else {}),
-            "mutation_operator_id": TRUST_REGION_MUTATION_OPERATOR_ID,
-            "maximum_operations": 1,
+            "mutation_operator_id": mutation_policy["mutation_operator_id"],
+            "maximum_operations": mutation_policy["candidate_maximum_operations"],
             "maximum_normalized_parameter_step": (
                 TRUST_REGION_MAX_NORMALIZED_STEP
             ),
@@ -3141,7 +3215,7 @@ class StrategyRouterDSHAdapter:
                 for name, contract in active_parameter_schemas.items()
             },
             **deepcopy(mutation_catalog),
-            "policy": "single_axis_reject_out_of_bounds_without_clamping",
+            "policy": ("bounded_related_joint_edits" if joint_policy.enabled(task.metadata) else "single_axis_reject_out_of_bounds_without_clamping"),
             "runtime_constraints": runtime_constraints,
         }
         explicit_sibling_feedback = research_execution_policy(task.metadata) is not None
@@ -3259,6 +3333,7 @@ class StrategyRouterDSHAdapter:
             )
             stage_context = {
                 "parent_genome": parent.to_dict(),
+            **_inherited_strategy_context(parent, task),
                 "mutation_context": context.to_dict(),
                 "mutation_contract": deepcopy(mutation_contract),
                 "assigned_candidate_direction": assigned_direction_execution,
@@ -3348,7 +3423,9 @@ class StrategyRouterDSHAdapter:
                     {
                         "reason": "compiled_behavior_validation_failed",
                         "rejection_code": (
-                            "predictor_evaluator_incompatible"
+                            "candidate_program_not_executable"
+                            if isinstance(exc, program_preflight.CandidateProgramPreflightError)
+                            else "predictor_evaluator_incompatible"
                             if "predictor and evaluator" in message
                             else "candidate_compile_validation_failed"
                         ),
@@ -3393,6 +3470,7 @@ class StrategyRouterDSHAdapter:
                     # below, which needs the parent to answer.
                     "instruction_directive": {"role": "sample-planner"},
                     "skill_program": {"role": "sample-planner"},
+                    "strategy_program": {"role": "sample-planner"},
                     "feature_recipe": {},
                 }
                 if assigned_direction.mutation_axis not in expected_fields_by_axis:
@@ -3464,9 +3542,9 @@ class StrategyRouterDSHAdapter:
                         or assigned_direction.mutation_direction
                         not in {"author", "revise"}
                     )
-                if not direction_mismatch and assigned_direction.mutation_axis in {"skill_program", "feature_recipe"}:
-                    current = (resolve_candidate_agent_profile(parent, current_program_registry()).get("skill_program")
-                               if assigned_direction.mutation_axis == "skill_program"
+                if not direction_mismatch and assigned_direction.mutation_axis in {"skill_program", "feature_recipe", "strategy_program"}:
+                    current = (resolve_candidate_agent_profile(parent, current_program_registry()).get(assigned_direction.mutation_axis)
+                               if assigned_direction.mutation_axis in {"skill_program", "strategy_program"}
                                else parent.scientific_program.get("feature_recipe"))
                     direction_mismatch = (assigned_direction.mutation_direction == "author") == (current is not None)
                 if direction_mismatch:
@@ -3488,6 +3566,25 @@ class StrategyRouterDSHAdapter:
                     )
                     continue
             scientific = proposed_child.to_dict()["scientific_program"]
+            prior_repeated = next((item for item in novelty_archive["entries"]
+                                   if item["behavior_digest"] == proposed_child.behavior_digest), None) if novelty_archive is not None else None
+            if prior_repeated is not None:
+                host_rejections.append({
+                    "reason": "prior_generation_behavior_duplicate",
+                    "rejection_code": "candidate_behavior_already_proposed",
+                    "prior_candidate_id": prior_repeated["candidate_id"],
+                    "prior_revision_id": prior_repeated["revision_id"],
+                    "prior_generation": prior_repeated["generation"],
+                    "prior_behavior_digest": prior_repeated["behavior_digest"],
+                    "rejected_operations": deepcopy(mutation["operations"]),
+                    "validation_detail": (
+                        "The complete executable behavior was already proposed in this run. "
+                        "Keep the frozen primary direction and bounds; choose a different legal value "
+                        "or, only when permitted by maximum_operations, a related additional edit. "
+                        "A changed explanation or genome identity is not a new behavior."
+                    ),
+                })
+                continue
             sibling_repeated = next(
                 (
                     item
@@ -3534,6 +3631,8 @@ class StrategyRouterDSHAdapter:
                     }
                 )
         if child is None:
+            if host_rejections and host_rejections[-1]["reason"] == "prior_generation_behavior_duplicate":
+                raise ValueError("DSH proposal repeats a prior-generation behavior after bounded retry")
             if host_rejections and host_rejections[-1]["reason"] == "sibling_behavior_duplicate":
                 raise ValueError(
                     "DSH proposal repeats an existing sibling behavior after bounded retry"
@@ -3567,8 +3666,9 @@ class StrategyRouterDSHAdapter:
             genome_digest=child.genome_digest, profile=candidate_agent_profile,
             parameters=child.scientific_program["parameter_overrides"],
             previous_analysis=previous_analysis, generation=run.generation,
+            joint=joint_policy.enabled(task.metadata),
             prediction_formula_policy=("mean-referenced-tools@1"
-                if task.metadata.get("optimization_schedule", {}).get("schema_version") == EVIDENCE_GUIDED_SCHEDULE_SCHEMA
+                if task.metadata.get("optimization_schedule", {}).get("schema_version") in {EVIDENCE_GUIDED_SCHEDULE_SCHEMA, joint_policy.SCHEDULE_SCHEMA}
                 else None),
         )
         return Proposal(
@@ -4106,6 +4206,7 @@ def _registered_mutation_targets(
         # run out of unused options.
         "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
         "skill_program": (SKILL_POLICY_ID,),
+        **({"strategy_program": (joint_policy.PROGRAM_POLICY,)} if joint_policy.enabled(task.metadata) else {}),
     }
 
 
@@ -4148,7 +4249,32 @@ def _mutation_contract_catalog(
     diagnostic_only = sample_budget_class == "diagnostic_smoke"
     selection_eligible = sample_budget_class == "selection_eligible"
     axis_contract = mutation_axis_contract(targets)
+    current_profile = resolve_candidate_agent_profile(genome, registry)
+    authoring_state = {
+        axis: {
+            "present": program is not None,
+            "program_digest": digest(program) if program is not None else None,
+            "allowed_direction": "revise" if program is not None else "author",
+        }
+        for axis, program in {
+            "skill_program": current_profile.get("skill_program"),
+            "strategy_program": current_profile.get("strategy_program"),
+            "instruction_directive": current_profile.get("authored_directive"),
+            "feature_recipe": genome.to_dict()["scientific_program"].get("feature_recipe"),
+        }.items() if targets.get(axis)
+    }
+    for axis, entry in authoring_state.items():
+        axis_contract["mutation_directions_by_axis"][axis] = [entry["allowed_direction"]]
     return {
+        "parent_authoring_state": {
+            "genome_digest": genome.genome_digest,
+            "axes": authoring_state,
+            "instruction": (
+                "Only this frozen parent is inherited. Programs from rejected siblings or "
+                "historical proposals are not present in it. Author absent programs; revise "
+                "only existing programs. The Host rejects, and never rewrites, a mismatched direction."
+            ),
+        },
         "scientific_parameter_activity": parameter_activity_contract(genome),
         "allowed_mutation_targets": {
             axis: list(values) for axis, values in targets.items()
@@ -4218,6 +4344,7 @@ def _mutation_contract_catalog(
         # to see both, and one that authors without the grammar can only guess
         # at the enumerations its text will be rejected against.
         "directive_grammar": _directive_authoring_contract(genome),
+        **({"strategy_program_grammar": strategy_program_grammar()} if joint_policy.enabled(task.metadata) else {}),
         **({"skill_grammar": skill_grammar(), "current_skill_program": resolve_candidate_agent_profile(genome, registry).get("skill_program")}
            if targets.get("skill_program") else {}),
     }
@@ -4264,6 +4391,17 @@ def _directive_authoring_contract(
     }
 
 
+def _inherited_strategy_context(parent, task):
+    if not joint_policy.enabled(task.metadata):
+        return {}
+    program = resolve_candidate_agent_profile(parent, current_program_registry()).get("strategy_program")
+    if not program:
+        return {}
+    return {"inherited_search_strategy": {"program_digest": digest(program),
+        **{key: program[key] for key in ("research_prompt", "proposal_prompt", "memory")},
+        "qualification": "candidate_authored_advice_not_verified_fact_or_evaluation_rules"}}
+
+
 def _candidate_direction_execution_view(
     direction: CandidateDirection,
 ) -> dict[str, Any]:
@@ -4290,6 +4428,8 @@ def _parameter_preflight_values(
     schema: Mapping[str, Any],
     current_value: Any,
     mutation_direction: str,
+    *,
+    minimum_witness_count: int = 0,
 ) -> tuple[int | float, ...]:
     """Return deterministic witnesses within the bounded trust region."""
 
@@ -4330,7 +4470,7 @@ def _parameter_preflight_values(
     current = float(current_value)
     if not lower <= current <= upper:
         return ()
-    witness_count = _NATIVE_AVOID_BEHAVIOR_LIMIT + 8
+    witness_count = max(_NATIVE_AVOID_BEHAVIOR_LIMIT + 8, minimum_witness_count)
     values: list[float] = []
     if lower > 0.0 and upper / lower >= 100.0 and current > 0.0:
         lower_coordinate = math.log(lower)
@@ -4452,6 +4592,7 @@ def _validate_candidate_direction_realizability(
     task: TaskManifest,
     parent: EcologyEvolutionPluginGenome,
     avoid_behaviors: Sequence[Mapping[str, Any]],
+    prior_generation_behaviors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Prove each research direction has a legal one-operation implementation.
 
@@ -4468,6 +4609,9 @@ def _validate_candidate_direction_realizability(
         and isinstance(item.get("behavior_digest"), str)
         and re.fullmatch(r"[0-9a-f]{64}", str(item.get("behavior_digest")))
     }
+    prior_behavior_digests = {
+        item["behavior_digest"] for item in prior_generation_behaviors
+    }
     registry = current_program_registry()
     _boundary, parameter_schemas = _genome_parameter_boundary(task, parent)
     parent_parameters = parent.to_dict()["scientific_program"][
@@ -4475,8 +4619,21 @@ def _validate_candidate_direction_realizability(
     ]
     occupied_behavior_digests: set[str] = set()
     checks: list[dict[str, Any]] = []
+    # A complete run archive can outgrow the legacy advisory window. Do not
+    # mistake exhaustion of a small sample of continuous values for no space.
+    witness_count = (len(hard_avoid_digests | prior_behavior_digests) + len(directions) + 8
+                     if novelty.enabled(task.metadata) else 0)
 
     for index, direction in enumerate(directions):
+        # Authored programs/directives have an open composition space. A small
+        # set of Host witnesses cannot prove that history exhausted that space;
+        # the proposer checks its actual complete behavior against all history.
+        direction_avoid_digests = hard_avoid_digests | (
+            prior_behavior_digests if direction.mutation_axis in {
+                "scientific_parameter", "registered_predictor", "instruction_profile",
+                "instruction_parameter", "workflow_parameter",
+            } else set()
+        )
         if direction.mutation_axis == "scientific_parameter":
             schema = parameter_schemas.get(direction.mutation_target)
             if not isinstance(schema, Mapping):
@@ -4487,6 +4644,7 @@ def _validate_candidate_direction_realizability(
                 schema,
                 parent_parameters.get(direction.mutation_target),
                 str(direction.mutation_direction),
+                minimum_witness_count=witness_count,
             )
             operations = tuple(
                 {
@@ -4542,18 +4700,40 @@ def _validate_candidate_direction_realizability(
                     _scalar_axis_preflight_schema(contract),
                     current_value,
                     str(direction.mutation_direction),
+                    minimum_witness_count=witness_count,
                 )
             )
+        elif direction.mutation_axis == "strategy_program":
+            current = resolve_candidate_agent_profile(parent, registry).get("strategy_program")
+            if (direction.mutation_direction == "author") == (current is not None):
+                raise ValueError(
+                    f"candidate_directions[{index}] ({direction.direction_id}): "
+                    "strategy direction must author absent or revise existing program; "
+                    f"frozen parent requires {'revise' if current is not None else 'author'}"
+                )
+            program = deepcopy(current) if current else seed_strategy_program()
+            program["planner_prompt"] = "Check causal changes and use the computed strategy as measured evidence."
+            if program == current:
+                program["planner_prompt"] = "Compare actual tool evidence by horizon before submitting."
+            operations = ({"op": "author_strategy_program", "role": "sample-planner", "strategy_program": program},)
         elif direction.mutation_axis == "skill_program":
             current = resolve_candidate_agent_profile(parent, registry).get("skill_program")
             if (direction.mutation_direction == "author") == (current is not None):
-                raise ValueError("skill direction must author an absent program or revise an existing one")
+                raise ValueError(
+                    f"candidate_directions[{index}] ({direction.direction_id}): "
+                    "skill direction must author an absent program or revise an existing one; "
+                    f"frozen parent requires {'revise' if current is not None else 'author'}"
+                )
             operations = tuple({"op": "author_skill_program", "role": "sample-planner", "skill_program": program}
                                for program in skill_preflight_programs() if program != current)
         elif direction.mutation_axis == "feature_recipe":
             current = parent.to_dict()["scientific_program"].get("feature_recipe")
             if (direction.mutation_direction == "author") == (current is not None):
-                raise ValueError("feature direction must author an absent recipe or revise an existing one")
+                raise ValueError(
+                    f"candidate_directions[{index}] ({direction.direction_id}): "
+                    "feature direction must author an absent recipe or revise an existing one; "
+                    f"frozen parent requires {'revise' if current is not None else 'author'}"
+                )
             from ..evaluators.greenhouse_prediction import seed_feature_recipe
             recipe = deepcopy(current) if current else seed_feature_recipe(horizons=task.metadata.get("fitness_profile", {}).get("expected_horizons", (1, 6, 24)))
             operations_list = []
@@ -4617,7 +4797,7 @@ def _validate_candidate_direction_realizability(
                     "direction_digest": direction.direction_digest,
                 }
             ),
-            mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+            mutation_operator_id=mutation_policy_contract(task.metadata)["mutation_operator_id"],
         )
         valid_child: EcologyEvolutionPluginGenome | None = None
         last_error: BaseException | None = None
@@ -4649,7 +4829,7 @@ def _validate_candidate_direction_realizability(
             except (TypeError, ValueError) as exc:
                 last_error = exc
                 continue
-            if child.behavior_digest in hard_avoid_digests:
+            if child.behavior_digest in direction_avoid_digests:
                 hard_avoid_conflicts += 1
                 continue
             if child.behavior_digest in occupied_behavior_digests:
@@ -4757,6 +4937,8 @@ def _task_parameter_space(
     predictor_id = str(
         metadata.get("prediction_model_id") or "greenhouse-rolling-residual@1"
     )
+    if predictor_id == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID:
+        return ("greenhouse_baseline_aligned_cellwise_ridge", StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SCHEMAS, StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SWEEP)
     if predictor_id == BASELINE_ALIGNED_RIDGE_MODEL_ID:
         return ("greenhouse_baseline_aligned_ridge", StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SCHEMAS, StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SWEEP)
     if predictor_id == EXOGENOUS_RIDGE_MODEL_ID:

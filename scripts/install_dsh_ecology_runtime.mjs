@@ -377,10 +377,15 @@ export async function installRuntime({
 }
 
 async function main() {
+  const allowedArguments = new Set(["--project-root", "--plugin-root", "--static-root", "--tgz", "--profile"]);
   const argumentsMap = new Map();
   for (let index = 2; index < process.argv.length; index += 2) {
     const name = process.argv[index];
     const value = process.argv[index + 1];
+    // Validate the complete CLI before resolveDshHome can create a directory or
+    // the installer can update a profile. DSH_HOME remains the sole home input.
+    if (!allowedArguments.has(name)) throw new Error(`unknown installer argument: ${name}`);
+    if (argumentsMap.has(name)) throw new Error(`duplicate installer argument: ${name}`);
     if (!name?.startsWith("--") || value == null) throw new Error("installer arguments must be --name value pairs");
     argumentsMap.set(name, value);
   }

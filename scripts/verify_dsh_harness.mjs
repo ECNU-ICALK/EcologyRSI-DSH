@@ -55,12 +55,12 @@ try {
   class LocalAdapter extends LlmAdapter {
     async *stream(options) {
       modelCalls += 1;
-      assert.ok(modelCalls <= 8, "unexpected extra generation");
+      assert.ok(modelCalls <= 10, "unexpected extra generation");
       assert.ok(options.tools.some(tool => tool.name === "structured_output"));
       const block = { type: "tool-call", id: `local-call-${modelCalls}`,
-        name: modelCalls === 7 ? "skill" : "structured_output",
-        arguments: modelCalls === 7 ? JSON.stringify({ name: "autonomous-ecology-research" })
-          : modelCalls === 8 ? JSON.stringify(expectedFixture) : '{"ok":true}' };
+        name: [7, 9].includes(modelCalls) ? "skill" : "structured_output",
+        arguments: [7, 9].includes(modelCalls) ? JSON.stringify({ name: "autonomous-ecology-research" })
+          : [8, 10].includes(modelCalls) ? JSON.stringify(expectedFixture) : '{"ok":true}' };
       yield { type: "block-start", index: 0, blockType: "tool-call" };
       yield { type: "tool-call-delta", index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
       yield { type: "block-end", index: 0, block };
@@ -122,14 +122,39 @@ try {
   const result = await new ModelContractCanary(ctx, { roleAgents: manager }).run({
     schema_version: "ecologyrsi-dsh.model-contract-canary/1",
     identity: { provider_id: "ecology-local-test", model_id: "fake", stage: "generation.search-plan",
-      role: stage.role, preset_id: "ecology-researcher-v15", output_schema_id: stage.schema,
+      role: stage.role, preset_id: "ecology-researcher-v17", output_schema_id: stage.schema,
       preset_content_digest: "a".repeat(64), standing_tool_surface_digest: "b".repeat(64), route_config_digest: "c".repeat(64) },
     bounds: { max_attempts: 1, max_output_tokens: 1024, max_reported_tokens: 30000, total_timeout_ms: 10000, ttl_seconds: 3600 },
   });
   assert.equal(result.passed, true, JSON.stringify(result.failure));
   assert.equal(result.tool_evidence.order_verified, true);
   assert.equal(modelCalls, 8);
-  console.log(`Harness ${installed.version}: six presets, structured children, resume, cleanup and real tool-event canary passed (local adapter).`);
+  // Exercise the actual native compiler and capture with absent protocol
+  // metadata. The full research payload is still emitted by the local model.
+  const { researchOutputTransport } = await import(pathToFileURL(path.join(pkg, "lib/runtime/research-contract.js")));
+  const { dshCompatibleSchema, skillInvocationEvidence } = await import(pathToFileURL(path.join(pkg, "lib/runtime/stage-runner.js")));
+  const { sessionEventLog } = await import(pathToFileURL(path.join(pkg, "lib/runtime/session-events.js")));
+  const synthesisSchema = JSON.parse(await readFile(path.join(pkg, "schemas/research-synthesis.schema.json"), "utf8"));
+  const expectedDomain = fixture(synthesisSchema);
+  expectedFixture = { ...expectedDomain };
+  delete expectedFixture.schema_version;
+  const transport = researchOutputTransport("generation.research-synthesis", dshCompatibleSchema(synthesisSchema));
+  const researcher = await manager.createRoleAgent({ run_id: "isolated-synthesis-transport", role: "researcher",
+    preset_id: "ecology-researcher-v17", model: "ecology-local-test/fake", cwd: home });
+  const synthesisRun = await ctx.subagents.start("spawn", { parent: researcher.agent, label: "verify-synthesis-version",
+    prompt: [{ type: "text", text: "Submit the local transport fixture after Skill." }],
+    signal: AbortSignal.timeout(15000), outputSchema: transport.schema });
+  try {
+    const captured = await synthesisRun.result;
+    assert.equal(captured.stopReason, "completed", captured.diagnostic);
+    assert.deepEqual(captured.structured, expectedFixture);
+    assert.deepEqual(transport.bind(captured.structured), expectedDomain);
+    const evidence = skillInvocationEvidence(sessionEventLog(ctx, synthesisRun.id), {
+      stage: "generation.research-synthesis", skillName: "autonomous-ecology-research" });
+    assert.equal(evidence.order_verified, true);
+    assert.equal(modelCalls, 10);
+  } finally { await synthesisRun.dispose(); }
+  console.log(`Harness ${installed.version}: six presets, structured children, resume, cleanup, real tool-event canary and synthesis protocol binding passed (local adapter).`);
 } finally {
   await manager?.dispose();
   await host?.shutdown.shutdown(0);

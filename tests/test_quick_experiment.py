@@ -20,7 +20,7 @@ class QuickPlanTests(unittest.TestCase):
     def test_first_quick_batch_failure_is_not_reported_as_screening(self):
         from ecologyrsi_dsh.api.auto_progress import _failure_diagnostics
         from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
-        schedule = OptimizationSchedule.for_new_run()
+        schedule = OptimizationSchedule.for_quick_run()
         state = SimpleNamespace(
             run=SimpleNamespace(generation=0),
             task_manifest=SimpleNamespace(metadata={
@@ -39,7 +39,7 @@ class QuickPlanTests(unittest.TestCase):
         self.assertEqual(context["work_unit_kind"], "formal_batch")
 
     def test_default_budget_and_fresh_value_blind_holdouts(self):
-        schedule = OptimizationSchedule.for_new_run()
+        schedule = OptimizationSchedule.for_quick_run()
         plan = schedule.execution_plan(5, cells_per_origin=9)
         self.assertEqual(plan["generation_budget"]["total_candidate_origins"], 200)
         self.assertEqual(plan["run_budget"]["total_candidate_origins"], 1000)
@@ -79,7 +79,7 @@ class QuickPlanTests(unittest.TestCase):
             generation=0, cohort_digest=candidate.scope.cohort_digest, origin_count=50,
             arm_bindings={item.scope.holdout_arm.value: {"candidate_id": item.scope.candidate_id,
                 "candidate_revision_id": item.scope.candidate_revision_id} for item in (candidate, incumbent)})
-        for schedule in (OptimizationSchedule.for_new_run(), OptimizationSchedule.for_evidence_guided_run()):
+        for schedule in (OptimizationSchedule.for_quick_run(), OptimizationSchedule.for_evidence_guided_run(), OptimizationSchedule.for_new_run()):
             with self.subTest(protocol=schedule.protocol):
                 decision = build_generation_comparison(**inputs, experiment_protocol=schedule.protocol)
                 self.assertEqual(decision.gate_results["experiment_protocol"], schedule.protocol)

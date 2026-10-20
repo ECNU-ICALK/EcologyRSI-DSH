@@ -10,6 +10,8 @@ import {
   structuredPhaseError,
 } from "./structured-stage-errors.js";
 import { validateStructuredStageBudget } from "./research-execution-policy.js";
+import { watchStructuredOutputBudget } from "./structured-output-budget.js";
+import { installResearchSchemaFeedback } from "./research-schema-feedback.js";
 
 function structuredResult(run) {
   if (typeof run?.result === "function") return run.result();
@@ -60,6 +62,7 @@ export async function runStructuredRole(
     deadline,
     classifyMissingCapture,
     observeChild,
+    eventContext,
     signal = null,
   } = {},
 ) {
@@ -100,6 +103,13 @@ export async function runStructuredRole(
   let deadlinePromise = null;
   let timedOut = false;
   const timeoutError = operationalTimeoutError();
+  const outputBudget = watchStructuredOutputBudget(eventContext, {
+    stage: reservedBinding.binding?.stage,
+    parentSessionId: roleHost.sessionId || roleHost.agent.session?.id || roleHost.agent.id,
+    label: reservedBinding.label,
+  });
+  let schemaFeedback = null;
+  let enforceOutputBudget = true;
   const abortFromCaller = () => {
     pending?.controller?.abort(signal?.reason);
   };
@@ -116,19 +126,22 @@ export async function runStructuredRole(
   );
   const requireBeforeDeadline = () => {
     if (deadlineExpired()) throw expireDeadline();
+    if (enforceOutputBudget) outputBudget.throwIfExceeded();
+    if (enforceOutputBudget && signal?.aborted) throw structuredPhaseError("aborted");
   };
   const withinDeadline = async (operation) => {
-    if (deadlinePromise === null) return await operation();
     requireBeforeDeadline();
     try {
       const value = await Promise.race([
         Promise.resolve().then(operation),
-        deadlinePromise,
+        ...(deadlinePromise === null ? [] : [deadlinePromise]),
+        ...(enforceOutputBudget ? [outputBudget.failure] : []),
       ]);
       requireBeforeDeadline();
       return value;
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      if (enforceOutputBudget) outputBudget.throwIfExceeded();
       throw error;
     }
   };
@@ -147,6 +160,12 @@ export async function runStructuredRole(
   }
   try {
     requireBeforeDeadline();
+    schemaFeedback = installResearchSchemaFeedback(eventContext, {
+      stage: reservedBinding.binding?.stage,
+      schema: request.outputSchema,
+      parentSessionId: roleHost.sessionId || roleHost.agent.session?.id || roleHost.agent.id,
+      label: reservedBinding.label,
+    });
     const outputSchema = structuredClone(request.outputSchema);
     requireBeforeDeadline();
     try {
@@ -156,6 +175,7 @@ export async function runStructuredRole(
         label: reservedBinding.label,
         prompt: [{ type: "text", text: request.prompt }],
         outputSchema,
+        signal: signal ? AbortSignal.any([signal, outputBudget.signal]) : outputBudget.signal,
         // DSH accepts child generation overrides through
         // SubagentStartRequest.agentOptions. Provider and model deliberately
         // remain inherited from the retained role-host. A larger synthesis
@@ -169,10 +189,13 @@ export async function runStructuredRole(
       });
       requireBeforeDeadline();
       run = await withinDeadline(() => pending.promise);
+      outputBudget.bindChild(run);
       // Failure to observe usage must not invent or replace a model outcome.
       try { usageObserver = observeChild?.(run); } catch { /* reflected as missing coverage */ }
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      outputBudget.throwIfExceeded();
+      if (isTrustedStructuredPhase(error, "aborted")) throw error;
       throw structuredPhaseError(
         error?.code === "provider_stage_admission_closed" ? "control"
           : error?.code === "UNSUPPORTED_SCHEMA" ? "output_schema" : "start",
@@ -184,6 +207,8 @@ export async function runStructuredRole(
       result = await withinDeadline(() => structuredResult(run));
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      outputBudget.throwIfExceeded();
+      if (isTrustedStructuredPhase(error, "aborted")) throw error;
       throw structuredPhaseError("result", error);
     }
     requireBeforeDeadline();
@@ -229,6 +254,7 @@ export async function runStructuredRole(
         ? captureDisposition?.kind
         : captureDisposition;
       if (captureKind === "missing") throw structuredPhaseError("capture");
+      if (captureKind === "provider-quota") throw structuredPhaseError("provider_quota");
       if (captureKind === "retryable-model") {
         throw structuredPhaseError("model");
       }
@@ -296,7 +322,7 @@ export async function runStructuredRole(
         break;
       } catch (error) {
         if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-        if (isTrustedStructuredPhase(error, "capture")) throw error;
+        if (["capture", "output_schema", "output_attempts"].some(phase => isTrustedStructuredPhase(error, phase))) throw error;
         if (
           retryablePersistenceError(error)
           && persistenceAttempt < STRUCTURED_PERSISTENCE_MAX_ATTEMPTS
@@ -323,6 +349,9 @@ export async function runStructuredRole(
     requireBeforeDeadline();
     return response;
   } finally {
+    enforceOutputBudget = false;
+    outputBudget.dispose();
+    schemaFeedback?.dispose();
     try {
       await usageObserver?.settle(resultPersisted ? "succeeded"
         : timedOut ? "timed_out" : signal?.aborted ? "cancelled" : "failed");
@@ -341,7 +370,7 @@ export async function runStructuredRole(
             ? pendingStarts.dispose(pending)
             : run?.dispose?.());
           detachCleanup(() => pendingStarts.finish?.(pending));
-        } else if (timedOut) {
+        } else if (timedOut || outputBudget.signal.aborted || signal?.aborted) {
           if (run === undefined) {
             pending.promise.then(
               (lateRun) => {

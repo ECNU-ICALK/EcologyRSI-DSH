@@ -43,6 +43,11 @@ export class RuntimeController {
     return this.stageRunner;
   }
 
+  attestChildActivation(request) {
+    return this.stageRunner?.attestChildActivation(request)
+      || { schema_version: "ecologyrsi-dsh.child-activation-attestation/1", valid: false };
+  }
+
   runCanary(request) { return this.modelCanary.run(request); }
 
   async capabilities() {

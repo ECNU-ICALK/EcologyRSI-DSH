@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from collections import Counter
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
@@ -42,9 +44,9 @@ INTERNAL_SOURCE_MARKERS = (
 CURRENT_DSH_PRESET_IDS = frozenset(
     {
         "ecology-coordinator-v6",
-        "ecology-researcher-v15",
-        "ecology-candidate-proposer-v6",
-        "ecology-sample-planner-v12",
+        "ecology-researcher-v17",
+        "ecology-candidate-proposer-v9",
+        "ecology-sample-planner-v14",
         "ecology-sample-critic-v6",
         "ecology-generation-judge-v10",
     }
@@ -156,10 +158,82 @@ def _matching_member(
         raise RuntimeError(f"{label} is stale relative to current source: {member_name}")
 
 
+def _project_console_scripts(source_root: Path) -> dict[str, str]:
+    """Read the project's flat string table without adding a Python 3.10 dependency.
+
+    This release contract supports bare command names and single-line quoted
+    string values. Other TOML syntax fails closed instead of being approximated.
+    """
+    source = require_regular_file(source_root, source_root / "pyproject.toml", "project metadata")
+    text = source.read_text(encoding="utf-8")
+    tables = list(re.finditer(r"(?m)^\[project\.scripts\][ \t]*(?:#[^\n]*)?$", text))
+    if len(tables) != 1:
+        raise RuntimeError("project must declare exactly one project.scripts table")
+    table = re.split(r"(?m)^[ \t]*\[", text[tables[0].end():], maxsplit=1)[0]
+    scripts: dict[str, str] = {}
+    for line in table.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        entry = re.fullmatch(r'''([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?''', line)
+        if entry is None:
+            raise RuntimeError("unsupported project.scripts syntax in release metadata")
+        name, raw_value = entry.groups()
+        try:
+            value = json.loads(raw_value) if raw_value.startswith('"') else raw_value[1:-1]
+        except ValueError as exc:
+            raise RuntimeError("unsupported project.scripts string in release metadata") from exc
+        if name in scripts or not value.strip():
+            raise RuntimeError("duplicate or empty project.scripts entry")
+        scripts[name] = value
+    if not scripts:
+        raise RuntimeError("project.scripts must not be empty")
+    return scripts
+
+
+def _verify_wheel_entry_points(data: bytes, source_root: Path) -> None:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    try:
+        parser.read_string(data.decode("utf-8"))
+    except (configparser.Error, UnicodeError) as exc:
+        raise RuntimeError("wheel entry points are invalid") from exc
+    if parser.defaults() or parser.sections() != ["console_scripts"]:
+        raise RuntimeError("wheel entry point groups differ from project.scripts")
+    if dict(parser.items("console_scripts")) != _project_console_scripts(source_root):
+        raise RuntimeError("wheel console scripts differ from project.scripts")
+
+
 def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
     require_regular_file(wheel.parent, wheel, "wheel archive")
     with zipfile.ZipFile(wheel) as archive:
-        names = set(archive.namelist())
+        members = archive.infolist()
+        duplicates = sorted(
+            name for name, count in Counter(member.filename for member in members).items()
+            if count > 1
+        )
+        if duplicates:
+            raise RuntimeError("wheel contains duplicate member: " + ", ".join(duplicates))
+        names = {member.filename for member in members}
+        _reject_sensitive_members(names, "wheel")
+        unsafe = sorted(
+            name for name in names
+            if (
+                "\\" in name
+                or PurePosixPath(name).is_absolute()
+                or ".." in PurePosixPath(name).parts
+                or PurePosixPath(name).as_posix() != name
+            )
+        )
+        if unsafe:
+            raise RuntimeError("wheel contains unsafe member path: " + ", ".join(unsafe))
+        unsupported = sorted(
+            member.filename for member in members
+            if member.is_dir()
+            or stat.S_IFMT(member.external_attr >> 16) not in {0, stat.S_IFREG}
+        )
+        if unsupported:
+            raise RuntimeError("wheel contains unsupported member type: " + ", ".join(unsupported))
         assert_current_dsh_presets(names, "wheel")
         reject_internal_sources(names, "wheel")
         if any(name.endswith("/plugins/ecology_evolution/test/smoke.mjs") for name in names):
@@ -225,7 +299,10 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
             ),
             "wheel",
         )
-        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        dist_info = f"ecologyrsi_dsh-{version}.dist-info"
+        metadata_name = f"{dist_info}/METADATA"
+        if metadata_name not in names:
+            raise RuntimeError("wheel is missing versioned METADATA")
         metadata = BytesParser(policy=default).parsebytes(archive.read(metadata_name))
         if metadata["Name"] != "ecologyrsi-dsh" or metadata["Version"] != version:
             raise RuntimeError("wheel name/version metadata mismatch")
@@ -233,15 +310,23 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
             raise RuntimeError("wheel must carry the proprietary license expression")
         if metadata.get_all("Requires-Dist"):
             raise RuntimeError("wheel must not declare runtime dependencies")
+        _verify_wheel_entry_points(archive.read(f"{dist_info}/entry_points.txt"), source_root)
 
+        expected_files = {
+            f"{dist_info}/{name}" for name in (
+                "METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt",
+                "licenses/LICENSE", "licenses/NOTICE",
+            )
+        }
         for source in sorted((source_root / "src/ecologyrsi_dsh").rglob("*")):
             if not source.is_file() or source.suffix not in {".py", ".json"}:
                 continue
             member_name = source.relative_to(source_root / "src").as_posix()
+            expected_files.add(member_name)
             _matching_member(archive, member_name, source_root, source, "wheel")
 
         data_root = f"ecologyrsi_dsh-{version}.data/data/share/ecologyrsi-dsh"
-        wheel_sources = [source_root / "datasets/autonomous_greenhouse.json"]
+        wheel_sources = sorted((source_root / "datasets").glob("*.json"))
         wheel_sources += [
             path
             for path in sorted((source_root / "plugins/ecology_evolution").glob("*"))
@@ -266,9 +351,21 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
         wheel_sources += [source_root / "scripts/install_dsh_ecology_runtime.mjs"]
         for source in wheel_sources:
             relative = source.relative_to(source_root).as_posix()
+            expected_files.add(f"{data_root}/{relative}")
             _matching_member(
                 archive, f"{data_root}/{relative}", source_root, source, "wheel"
             )
+        for legal_name in ("LICENSE", "NOTICE"):
+            _matching_member(
+                archive, f"{dist_info}/licenses/{legal_name}", source_root,
+                source_root / legal_name, "wheel",
+            )
+        missing = sorted(expected_files - names)
+        if missing:
+            raise RuntimeError("wheel is missing expected member: " + ", ".join(missing))
+        unexpected = sorted(names - expected_files)
+        if unexpected:
+            raise RuntimeError("wheel contains unexpected member: " + ", ".join(unexpected))
 
 
 def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
@@ -512,6 +609,10 @@ def verify_delivery_archive(
             data = member.read()
             if sha256_bytes(data) != sums.get(f"artifacts/{artifact.name}"):
                 raise RuntimeError(f"delivery checksum mismatch: {artifact.name}")
+            if data != artifact.read_bytes():
+                raise RuntimeError(
+                    f"delivery artifact differs from external copy: {artifact.name}"
+                )
         build_info_member = archive.extractfile(f"{prefix}/BUILD-INFO.json")
         if build_info_member is None:
             raise RuntimeError("delivery BUILD-INFO.json cannot be read")

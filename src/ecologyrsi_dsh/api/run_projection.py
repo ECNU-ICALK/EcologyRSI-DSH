@@ -14,6 +14,14 @@ from ..evaluators.catalog import TOY_DATASET_ID
 from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 
 
+def build_frozen_feature_policies(task: Any) -> dict[str, object]:
+    """Small creation-time policy snapshot for detail and compact views."""
+    metadata = getattr(task, "metadata", {}) or {}
+    return {key: metadata.get(key) for key in (
+        "targeted_search_policy", "behavior_diagnostics_policy", "candidate_novelty_policy",
+        "candidate_executability_policy")}
+
+
 def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[str, object]:
     """Build the one public configuration shape used by every run view.
 
@@ -36,6 +44,9 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         "execution_protocol": metadata.get("execution_protocol", "dsh_native_plugin_evolution@1"),
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
+        # Creation-time contract only: deploying a feature does not enable it
+        # for a historical run whose immutable metadata lacks its policy.
+        **build_frozen_feature_policies(task),
         "local_comparison_policy": metadata.get("local_comparison_policy"),
         "derived_execution_budget": metadata.get("derived_execution_budget"),
         "execution_plan": metadata.get("execution_plan"),

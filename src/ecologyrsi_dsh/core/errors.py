@@ -165,10 +165,51 @@ class DshNativeRuntimeUnavailableError(RuntimeError):
         super().__init__(message)
 
 
+class DshSamplePlannerOutputBudgetError(DshNativeRuntimeUnavailableError):
+    """One planner attempt ended before submitting; never a scored forecast."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Sample planner exhausted its output budget before submission.",
+            error_code="structured_child_output_budget_exhausted",
+            status_code=422,
+            failure_domain="execution_contract",
+        )
+
+
+class DshResearchOutputBudgetError(DshNativeRuntimeUnavailableError):
+    """Bounded synthesis repair exhausted; pause research, retain prior work."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Research synthesis exhausted its bounded output repair attempts.",
+            error_code="structured_child_output_budget_exhausted",
+            status_code=422,
+            failure_domain="execution_contract",
+        )
+
+
+# These are trusted Host execution/identity rejections, not upstream outages.
+# Keep them fatal to the evaluation so they cannot become scored failed samples.
+_DSH_PERSISTENCE_CONTRACT_CODES = frozenset({
+    "structured_result_persist_host_rejected",
+    "structured_result_persist_authorization",
+    "structured_result_persist_binding_closed",
+    "structured_result_persist_admission_closed",
+    "structured_result_persist_tool_evidence",
+    "structured_result_persist_invalid_response",
+})
+
+
 def dsh_native_runtime_retryable(
     exc: DshNativeRuntimeUnavailableError,
 ) -> bool:
     """Classify service outages separately from fail-closed DSH contracts."""
+
+    if (exc.error_code == "model_provider_quota_exhausted"
+            or exc.error_code in _DSH_PERSISTENCE_CONTRACT_CODES
+            or exc.failure_domain == "execution_contract"):
+        return False
 
     if exc.error_code == "structured_child_tool_protocol_error":
         # A protocol error may be emitted by the DSH controller after a
@@ -190,6 +231,7 @@ def dsh_native_runtime_retryable(
         "structured_child_execution_budget_exhausted",
         "structured_child_output_schema_invalid",
         "structured_result_missing",
+        "structured_output_attempt_limit_exceeded",
         "dsh_native_runtime_contract_error",
         "evaluation_execution_incomplete",
     }:
@@ -202,6 +244,23 @@ def dsh_native_runtime_retryable(
         "dsh_native_runtime_not_ready",
         "dsh_native_runtime_transport_error",
     }
+
+
+def dsh_native_runtime_congestion_signal(
+    exc: DshNativeRuntimeUnavailableError,
+) -> bool:
+    """Only explicit provider capacity/server failures reduce concurrency.
+
+    Retryable Host persistence, controller HTTP errors and local transport
+    failures may merit recovery without proving anything about model capacity.
+    A generic runtime 502/503 envelope is not an upstream HTTP status.
+    """
+    if not dsh_native_runtime_retryable(exc) or exc.failure_domain != "provider":
+        return False
+    status = exc.provider_status
+    return status in {408, 425, 429} or (
+        isinstance(status, int) and 500 <= status <= 599
+    )
 
 
 def dsh_native_runtime_error_in_chain(
@@ -241,18 +300,24 @@ def preferred_execution_failure(
 
 
 def dsh_native_runtime_evaluation_fatal(exc: DshNativeRuntimeUnavailableError) -> bool:
-    """An irrecoverable origin makes a complete frozen cohort impossible.
+    """Stop the current evaluation when its frozen cohort cannot complete.
 
     Stop admission immediately instead of spending on siblings/retries before
-    discovering the same invalid coverage at the batch boundary.
+    discovering invalid coverage at the batch boundary. This aborts a batch,
+    not necessarily the run: an upstream quota rejection pauses for recovery.
     """
     if exc.error_code == "structured_child_tool_protocol_error":
         return not dsh_native_runtime_retryable(exc)
+    if (exc.error_code in _DSH_PERSISTENCE_CONTRACT_CODES
+            or exc.failure_domain == "execution_contract"):
+        return True
     return exc.error_code in {
+        "model_provider_quota_exhausted",
         "structured_child_output_budget_exhausted",
         "structured_child_execution_budget_exhausted",
         "structured_child_output_schema_invalid",
         "structured_result_missing",
+        "structured_output_attempt_limit_exceeded",
         "evaluation_execution_incomplete",
     }
 

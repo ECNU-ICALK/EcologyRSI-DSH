@@ -17,10 +17,27 @@ function schemaName(value) {
   return value?.name || value?.function?.name || value?.schema?.name || null;
 }
 
+function liveInferenceConfig(ctx) {
+  const settings = ctx.get?.("settings") ?? ctx.settings;
+  // Harness 0.2 exposes live volatile Config values through describe(), not
+  // the removed settings.get(namespace) API. Never freeze an empty contract
+  // merely because the configuration service is absent or ambiguous.
+  let descriptors;
+  try { descriptors = settings?.describe?.({ redactSecrets: true }); }
+  catch { throw new Error("DSH live inference configuration is unavailable or ambiguous"); }
+  const matches = Array.isArray(descriptors)
+    ? descriptors.filter(item => item?.ns === "llm-pi-ai") : [];
+  const config = matches.length === 1 ? matches[0].value : null;
+  if (!config || typeof config !== "object" || Array.isArray(config)
+    || !config.providers || typeof config.providers !== "object" || Array.isArray(config.providers)) {
+    throw new Error("DSH live inference configuration is unavailable or ambiguous");
+  }
+  return config;
+}
+
 export async function runtimeCapabilities(ctx, presetCatalog = []) {
   deployedContent ||= runtimeContentDigest();
-  const settings = ctx.get?.("settings") ?? ctx.settings;
-  const config = settings?.get?.("llm-pi-ai");
+  const config = liveInferenceConfig(ctx);
   const contentDigest = createHash("sha256")
     .update(await deployedContent).update("\0").update(inferenceConfigDigest(config)).digest("hex");
   const missing = ROOT_SERVICES.filter((name) => ctx?.[name] == null);

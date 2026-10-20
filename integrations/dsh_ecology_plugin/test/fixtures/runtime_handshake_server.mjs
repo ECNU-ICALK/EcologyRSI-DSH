@@ -1,19 +1,20 @@
 import { createServer } from "node:http";
+import assert from "node:assert/strict";
 
 import { RuntimeController } from "../../lib/runtime/controller.js";
 import { registerRuntimeRoutes } from "../../lib/runtime/routes.js";
 
 const presetCatalog = [
   "ecology-coordinator-v6",
-  "ecology-researcher-v15",
-  "ecology-candidate-proposer-v6",
-  "ecology-sample-planner-v12",
+  "ecology-researcher-v17",
+  "ecology-candidate-proposer-v9",
+  "ecology-sample-planner-v14",
   "ecology-sample-critic-v6",
   "ecology-generation-judge-v10",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v12"
+  required_tools: preset_id === "ecology-sample-planner-v14"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 }));
@@ -23,6 +24,12 @@ const toolsByStandingKey = new Map(presetCatalog.map((item) => [
 ]));
 let runtimeHandler;
 const ctx = {
+  settings: {
+    describe(options) {
+      assert.deepEqual(options, { redactSecrets: true });
+      return [{ ns: "llm-pi-ai", value: { providers: {} } }];
+    },
+  },
   webServer: {
     register: ({ handler }) => {
       runtimeHandler = handler;

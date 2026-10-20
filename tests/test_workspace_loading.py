@@ -1,6 +1,7 @@
 import json
 import threading
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,20 @@ class WorkspaceHTTPTests(unittest.TestCase):
         for key in ('candidates', 'rounds', 'artifacts', 'training_assets', 'algorithm_attempts'):
             self.assertNotIn(key, value['projection'])
         self.assertEqual(value['projection']['candidates_count'], 1)
+
+    def test_run_views_accept_deep_frozen_batch_receipts_without_writing_evidence(self):
+        from tests.test_evidence_projection import frozen_receipt_batch
+        run, candidate = self.seed()
+        batch = frozen_receipt_batch(run, candidate)
+        state = replace(self.server.director.state(run), formal_batch_evaluations=(batch,))
+        before = self.server.ledger.latest_seq()
+        with patch.object(self.server.director, 'state', return_value=state):
+            for view in ('overview', 'monitor', 'process'):
+                with self.subTest(view=view):
+                    status, result = self.request('/api/runs/' + quote(run) + '?view=' + view)
+                    self.assertEqual(status, 200, result)
+                    self.assertNotIn('private-compressed-trace', json.dumps(result))
+        self.assertEqual(self.server.ledger.latest_seq(), before)
 
     def test_completed_overview_survives_list_reads_without_restoring_full_state(self):
         run, _ = self.seed()

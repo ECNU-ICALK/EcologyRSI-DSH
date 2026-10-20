@@ -29,9 +29,12 @@ ROOT_FILES = (
     "LICENSE",
     "NOTICE",
     "RELEASE-CHECKLIST.md",
+    "docs/plugin-joint-evolution-2026-10-03.md",
+    "docs/reasoning-configuration-2026-10-20.md",
     "MANIFEST.in",
     "Makefile",
     "pyproject.toml",
+    "ruff.toml",
     "uv.lock",
 )
 SOURCE_DIRS = (

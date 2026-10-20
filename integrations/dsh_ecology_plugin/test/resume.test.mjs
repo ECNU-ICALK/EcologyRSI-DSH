@@ -7,7 +7,7 @@ function binding(overrides = {}) {
   const value = {
     run_id: "run-1",
     role: "researcher",
-    preset_id: "ecology-researcher-v15",
+    preset_id: "ecology-researcher-v17",
     model: "dsh/strategy",
     cwd: "/tmp",
     preset_content_digest: "a".repeat(64),

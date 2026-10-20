@@ -32,6 +32,8 @@ from queue import Empty, Queue
 from typing import Any
 
 from ..core.errors import (
+    DshNativeRuntimeUnavailableError,
+    DshResearchOutputBudgetError,
     FrozenRuntimeBindingDriftError,
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
@@ -138,6 +140,16 @@ def _failure_diagnostics(
     """Return only host-owned, bounded failure classification and location."""
 
     generation = int(state.run.generation)
+    if stage is None:
+        # Native transport failures can escape before a failed-stage event is
+        # written. Use the current, unfinished stage, never an older failure.
+        for event in reversed(tuple(getattr(state, "events", ()) or ())):
+            if (event.kind != "EvolutionStageRecorded"
+                    or int(event.payload.get("generation", -1)) != generation):
+                continue
+            if event.payload.get("status") in {"started", "failed"}:
+                stage = event.payload.get("stage")
+            break
     adaptive = (
         state.task_manifest.metadata.get("optimization_protocol")
         in ADAPTIVE_PROTOCOLS
@@ -147,7 +159,7 @@ def _failure_diagnostics(
         "stage": str(stage or "generation")[:80],
         "work_unit_kind": "generation",
     }
-    if stage in {"preflight", "search", "research", "reflection", "generation.judge"}:
+    if stage in {"preflight", "search", "research", "proposal", "candidate", "reflection", "generation.judge"}:
         # These stages precede or follow the sample scheduler. Zero screening
         # records do not mean that a research failure happened in screening.
         context["work_unit_kind"] = stage
@@ -159,13 +171,15 @@ def _failure_diagnostics(
             int(event.payload.get("generation", -1)) == generation
             for event in state.candidate_screening_events
         )
-        if not schedule.quick and screening_count < 4:
+        screening_arm_count = 5 if schedule.race else 4
+        if schedule.screening_origin_count > 0 and screening_count < screening_arm_count:
             context.update(stage="screening", work_unit_kind="candidate_screening")
         else:
             formal_total = sum(
                 item.scope.origin_count
                 for item in state.formal_batch_evaluations
                 if item.scope.generation == generation
+                and getattr(item, "metrics", {}).get("reused_screening_evidence") is not True
             )
             expected_formal = schedule.generation_execution_budget(
                 cells_per_origin=1
@@ -244,9 +258,13 @@ def _failure_diagnostics(
     # Reading an arbitrary ``error_code`` attribute here would let an
     # untrusted provider exception choose the public terminal classification.
     native_error = dsh_native_runtime_error_in_chain(exc)
+    if native_error is not None and native_error.error_code == "model_provider_quota_exhausted":
+        context["failure_domain"] = "provider"
+        return native_error.error_code, context
     if native_error is not None and native_error.error_code in {
         "structured_child_tool_protocol_error", "structured_child_output_budget_exhausted",
         "structured_result_missing", "structured_child_output_schema_invalid",
+        "structured_output_attempt_limit_exceeded",
         "evaluation_execution_incomplete",
         "structured_child_execution_budget_exhausted",
     }:
@@ -273,6 +291,53 @@ def _failure_diagnostics(
     return f"auto_progress_{safe_stage}_{suffix}"[:120], context
 
 
+def _sample_output_protocol_pause(
+    state: Any | None,
+    exc: BaseException,
+    *,
+    stage: str | None,
+) -> _DeferredPause | None:
+    """Stop a broken evaluation vector without discarding durable origins.
+
+    This is an explicit pause, not an outer model retry. Resume still passes
+    the frozen binding and checkpoint checks before executing missing work.
+    Prefer a concrete output error over an incomplete-evaluation wrapper.
+    """
+    if state is None:
+        return None
+    output_codes = {
+        "structured_child_output_budget_exhausted",
+        "structured_child_output_schema_invalid",
+        "structured_result_missing",
+        "structured_output_attempt_limit_exceeded",
+    }
+    native_error = find_exception(
+        exc, DshNativeRuntimeUnavailableError,
+        lambda error: error.error_code in output_codes
+        and error.failure_domain != "provider",
+    )
+    if native_error is None:
+        native_error = find_exception(
+            exc, DshNativeRuntimeUnavailableError,
+            lambda error: error.error_code == "evaluation_execution_incomplete"
+            and error.failure_domain != "provider",
+        )
+    if native_error is None:
+        return None
+    evaluation_stages = {"evaluation", "training", "screening", "formal_batch", "holdout", "recheck", "holdout_recheck"}
+    if stage not in evaluation_stages:
+        _, location = _failure_diagnostics(state, native_error, stage=stage)
+        if location["stage"] not in evaluation_stages:
+            return None
+    return _DeferredPause(
+        code=native_error.error_code,
+        reason=(
+            f"评测阶段输出协议未完成（{native_error.error_code}），已暂停并保留完整时点检查点。"
+            "这不是科学评分失败；修复后恢复运行，仅执行尚未完成的时点，仍须通过原合同校验。"
+        ),
+    )
+
+
 def _host_fault_pause(
     state: Any,
     exc: BaseException,
@@ -280,6 +345,17 @@ def _host_fault_pause(
     stage: str | None = None,
 ) -> _DeferredPause:
     """Build a bounded public pause without retaining exception messages."""
+
+    native_error = dsh_native_runtime_error_in_chain(exc)
+    if native_error is not None and native_error.error_code == "model_provider_quota_exhausted":
+        # QUOTA is an upstream rejection, not proof of an empty balance or a
+        # user-configured budget. Stop the burst without destroying resumable
+        # work; a rolling provider allowance may recover without config edits.
+        return _DeferredPause(
+            reason=(public_exception_summary(native_error)
+                    + "已暂停并保留当前进度；服务恢复后可点击“恢复运行”。"),
+            code=native_error.error_code,
+        )
 
     try:
         _failure_code, context = _failure_diagnostics(state, exc, stage=stage)
@@ -1285,6 +1361,19 @@ class AutoProgressManager:
                     else attempt_anchor_seq
                 )
                 recovery_stage = _latest_failed_stage(recovery_state)
+                if recovery_stage == "research" and find_exception(
+                    exc, DshResearchOutputBudgetError
+                ):
+                    return self._persist_or_defer_pause(
+                        work_item,
+                        _DeferredPause(
+                            reason=(
+                                "研究阶段两次达到单次输出上限，已暂停并保留已完成评测。"
+                                "恢复时将重新校验账本中已提交的结构化研究结果并定点纠错。"
+                            ),
+                            code="research_output_budget_exhausted",
+                        ),
+                    )
                 research_contract_error = find_exception(
                     exc,
                     ResearchResponseContractError,
@@ -1311,6 +1400,11 @@ class AutoProgressManager:
                             code="research_contract_fallback_unavailable",
                         ),
                     )
+                sample_pause = _sample_output_protocol_pause(
+                    recovery_state, exc, stage=recovery_stage,
+                )
+                if sample_pause is not None:
+                    return self._persist_or_defer_pause(work_item, sample_pause)
                 retryable = _progress_failure_retryable(
                     exc,
                     stage=recovery_stage,
@@ -1925,18 +2019,21 @@ class AutoProgressManager:
             self._clear_retry_cooldown_locked(work_item)
         return False
 
-    def abort_native_evaluation(self, run_id: str) -> None:
+    def abort_native_evaluation(self, run_id: str, *, error: BaseException | None = None) -> None:
         """Drain failed native work before candidate executors join siblings.
 
-        The generation owner retains responsibility for persisting RunFailed.
+        The generation owner persists the final pause/failure disposition.
         Reuse the control fence so concurrent user cancellation cannot race a
         second remote control request.
         """
 
         with self.server.mutation_lock:
             state = self.server.director.state(run_id)
-            quiescence = self._close_native_admission(state, action="cancel")
-        self._start_native_quiescence("cancel", quiescence)
+            action = "pause" if error is not None and _sample_output_protocol_pause(
+                state, error, stage="evaluation",
+            ) is not None else "cancel"
+            quiescence = self._close_native_admission(state, action=action)
+        self._start_native_quiescence(action, quiescence)
 
     def _close_native_admission(
         self,
@@ -2395,6 +2492,10 @@ def _progress_failure_irrecoverable(
         return True
     dsh_error = dsh_native_runtime_error_in_chain(exc)
     if dsh_error is not None:
+        if dsh_error.error_code == "model_provider_quota_exhausted":
+            # No immediate retry, but also no terminal RunFailed: the provider
+            # has not told us whether its quota window is temporary.
+            return False
         return not dsh_native_runtime_retryable(dsh_error)
     gateway_error = gateway_error_in_chain(exc)
     if gateway_error is not None:

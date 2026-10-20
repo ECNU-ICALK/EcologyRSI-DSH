@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any
@@ -86,7 +86,7 @@ def _optional_text(
 def _bounded_plan_value(value: Any, name: str, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
         if isinstance(value, str) and len(value) > 4000:
-            raise ValueError(f"{name} contains an overlong string")
+            raise ValueError(f"{name} contains an overlong string (maximum 4000 characters)")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -122,13 +122,50 @@ def _bounded_plan_value(value: Any, name: str, *, depth: int = 0) -> Any:
     raise TypeError(f"{name} must contain only JSON-compatible values")
 
 
-def _bounded_plan(value: Any) -> dict[str, Any]:
+def project_exploration_archive(
+    value: Any, *, name: str, project: Callable[[Any, str], Any],
+) -> dict[str, Any]:
+    """Validate bounded training records independently of their list envelope.
+
+    Each entry contains an already materialized candidate program. Archive and
+    plan wrappers must not consume that record's normal depth allowance. The
+    caller's field, string, list and depth checks still apply to every entry;
+    nested archives receive no recursive exemption.
+    """
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be an object")
+    if len(value) > 128:
+        raise ValueError(f"{name} contains too many fields")
+    entries = value.get("entries")
+    if not isinstance(entries, (list, tuple)) or len(entries) > 128:
+        raise ValueError(f"{name}.entries must contain at most 128 objects")
+    if any(not isinstance(entry, Mapping) for entry in entries):
+        raise TypeError(f"{name}.entries must contain objects")
+    result = project({key: item for key, item in value.items() if key != "entries"}, name)
+    result["entries"] = [project(entry, f"{name}.entries[{index}]")
+                         for index, entry in enumerate(entries)]
+    # Match the archive producer's existing serialized-entry bound.
+    if len(canonical_json(result["entries"]).encode("utf-8")) > 6000:
+        raise ValueError(f"{name}.entries exceeds the bounded contract (maximum 6000 bytes)")
+    return result
+
+
+def validate_research_plan(value: Any) -> dict[str, Any]:
+    """Apply the durable plan contract before accepting a remote synthesis."""
     if not isinstance(value, Mapping):
         raise TypeError("research iteration plan must be an object")
-    result = _bounded_plan_value(value, "research iteration plan")
+    if len(value) > 128:
+        raise ValueError("research iteration plan contains too many fields")
+    ordinary = {key: item for key, item in value.items() if key != "exploration_archive"}
+    result = _bounded_plan_value(ordinary, "research iteration plan")
     assert isinstance(result, dict)
+    if "exploration_archive" in value:
+        result["exploration_archive"] = project_exploration_archive(
+            value["exploration_archive"], name="research iteration plan.exploration_archive",
+            project=_bounded_plan_value,
+        )
     if len(canonical_json(result)) > 24_000:
-        raise ValueError("research iteration plan exceeds the bounded contract")
+        raise ValueError("research iteration plan exceeds the bounded contract (maximum 24000 canonical JSON characters)")
     return result
 
 
@@ -176,7 +213,7 @@ def build_deterministic_research_fallback_plan(
         plan["generation_search_plan"] = {
             "search_plan_digest": search_plan_digest.strip()
         }
-    return _bounded_plan(plan)
+    return validate_research_plan(plan)
 
 
 def _historical_provenance(value: Any) -> dict[str, Any] | None:
@@ -280,7 +317,7 @@ class ResearchIteration:
             ))
         if self.schema_version != RESEARCH_ITERATION_VERSION:
             raise ValueError("unsupported research iteration version")
-        plan = _bounded_plan(self.plan)
+        plan = validate_research_plan(self.plan)
         object.__setattr__(self, "plan", freeze_json(plan))
         adoption = PredictorAdoption.from_dict(self.prediction_model_adoption)
         if adoption.plan_digest != digest(plan):
@@ -396,4 +433,5 @@ __all__ = [
     "RESEARCH_ITERATION_VERSION",
     "ResearchIteration",
     "build_deterministic_research_fallback_plan",
+    "validate_research_plan",
 ]

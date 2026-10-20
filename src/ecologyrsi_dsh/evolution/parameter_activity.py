@@ -1,6 +1,6 @@
 """Default-tool sensitivity is advisory; the Agent owns final predictions."""
 from typing import Any
-from ..evaluators.greenhouse_prediction import BASELINE_ALIGNED_RIDGE_MODEL_ID
+from ..evaluators.greenhouse_prediction import BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
 from .genome import EcologyEvolutionPluginGenome
 
 
@@ -9,6 +9,9 @@ def parameter_activity_contract(genome: EcologyEvolutionPluginGenome) -> dict[st
     parameters = scientific["parameter_overrides"]
     zero = (scientific["predictor_ref"]["id"] == BASELINE_ALIGNED_RIDGE_MODEL_ID
             and all(parameters.get(f"residual_scale_{h}h") == 0.0 for h in (1, 6, 24)))
+    if scientific["predictor_ref"]["id"] == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID:
+        zero = all(parameters.get(f"{target}_{h}h_residual_scale") == 0.0
+                   for target in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24))
     return {
         "schema_version": "ecologyrsi-dsh.default-tool-parameter-activity/2",
         "scope": "optional_candidate_model_only",

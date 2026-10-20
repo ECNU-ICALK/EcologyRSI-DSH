@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..evaluators.skill_program import skill_grammar
+from ..evaluators.strategy_program import strategy_program_grammar
 
 from ..evolution.agent_policy import rebind_agent_policy
 
@@ -43,12 +44,15 @@ from ..evolution.mutation_specs import mutation_coordinates, RESETTABLE_ROLE_COM
 from ..evolution.execution_plan import DerivedExecutionPlan, derive_execution_plan
 from ..evaluators.sample_execution import SampleExecutionPolicy
 from ..evolution.local_edits import (
+    LOCAL_EDIT_REVISIT_MAX_CHARACTERS,
     LocalEditContext,
     LocalEditProposal,
     LocalEditResult,
     apply_or_reject_local_edit_bundle,
 )
 from ..evolution.strategies import (
+    _host_validation_feedback,
+    _output_budget_feedback,
     _directive_authoring_contract,
     _genome_parameter_boundary,
     _registered_mutation_targets,
@@ -122,7 +126,7 @@ def _revision_evaluation_inputs(
             ),
         }
     )
-    if task.metadata.get("optimization_protocol") == "evidence_guided_epoch@1":
+    if task.metadata.get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
         # Host reliability controls are shared by every arm in this epoch;
         # inherited Agent experience and the selected genome remain frozen.
         from ..evolution.execution_plan import derive_execution_plan
@@ -208,10 +212,26 @@ def _durable_batch_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(detached, dict):
         raise TypeError("formal batch metrics must be a JSON object")
     result = _local_edit_evidence_metrics(detached)
+    # The editor's context limit does not apply to durable scientific proof.
+    # Keep the exact digest-bound receipt (including every evidence reference) for
+    # replay and hard-effect gates; only the model-facing view is summarized.
+    sample = detached.get("sample_execution")
+    if isinstance(sample, Mapping) and "mutation_effect_receipt" in sample:
+        result["sample_execution"].pop("mutation_effect_summary", None)
+        result["sample_execution"]["mutation_effect_receipt"] = sample["mutation_effect_receipt"]
+    if isinstance(sample, Mapping):
+        # These generated summaries drive later contribution comparisons and
+        # executed-behavior inheritance. The editor's compact metrics whitelist
+        # must not erase their digest-bound evidence at the durable boundary.
+        # Missing historical diagnostics stay missing; do not synthesize them.
+        for name in ("prediction_contribution", "observed_behavior"):
+            if isinstance(sample.get(name), Mapping):
+                result["sample_execution"][name] = sample[name]
     for name in (
         "promotion_block_evidence",
         "baseline_metrics_digest",
         "baseline_profile_digest",
+        "dataset_task",
         "dataset_digest",
         "evaluation_index_digest",
         "execution_scope_digest",
@@ -757,11 +777,25 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         candidate_family,
         FAMILY_AXES,
     )
-    if diversity_enabled(state.task_manifest.metadata):
+    from ..evolution import joint_policy
+    if joint_policy.enabled(state.task_manifest.metadata):
+        targets["strategy_program"] = (joint_policy.PROGRAM_POLICY,)
+    if diversity_enabled(state.task_manifest.metadata) and not joint_policy.enabled(state.task_manifest.metadata):
         family = candidate_family(state.proposal(candidate.proposal_id))
         if family in FAMILY_AXES:
             targets = {axis: values if axis in FAMILY_AXES[family] else () for axis, values in targets.items()}
     schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+    search_policy = state.task_manifest.metadata.get("targeted_search_policy")
+    if search_policy == "cellwise_training_evidence@1":
+        cell_parameters = {name for name in parameter_schemas if name.endswith("h_residual_scale")}
+        if cell_parameters:
+            # Match the validator's single-cell contract in the advertised
+            # targets and trust regions. Shared fit knobs cannot be offered as
+            # legal alternatives only to be rejected after a model call.
+            targets["scientific_parameter"] = tuple(
+                name for name in targets.get("scientific_parameter", ())
+                if name in cell_parameters
+            )
     if schedule.race:
         role = next(row for row in genome.agent_program["candidate_execution_program"]["role_profiles"]
                     if row["role"] == "sample-planner")
@@ -788,15 +822,16 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
             candidate.candidate_id, batch.batch_index
         ).scope.scope_key,
         parent_genome_digest=revision.genome_digest,
-        maximum_operations=OptimizationSchedule.from_dict(
-            state.task_manifest.metadata["optimization_schedule"]
-        ).max_local_edits_per_batch,
+        maximum_operations=(min(1, schedule.max_local_edits_per_batch)
+                            if search_policy == "cellwise_training_evidence@1"
+                            else schedule.max_local_edits_per_batch),
         allowed_mutation_targets=targets,
         allowed_evidence_refs=("batch:score", "batch:metrics"),
         allowed_effect_cells=cells,
         parameter_schemas=parameter_schemas,
         runtime_constraints=runtime_constraints,
         evidence_phase="formal_batch",
+        search_policy=search_policy,
     )
 
 
@@ -973,6 +1008,7 @@ def _execute_next_prequential_local_edit(
             proposal,
             context,
             current_program_registry(),
+            task=state.task_manifest,
         )
     validated = _check_behavior_revisit(state, candidate_id, proposal, validated, batch_index=pending.batch_index)
     active_revision_id = revision.revision_id
@@ -1195,6 +1231,7 @@ def _execute_next_paired_local_edit(
             proposal,
             context,
             current_program_registry(),
+            task=state.task_manifest,
         )
     validated = _check_behavior_revisit(state, candidate_id, proposal, validated, batch_index=pending.batch_index)
     active_revision_id = revision.revision_id
@@ -1598,6 +1635,43 @@ def _safety_requires_rollback(reason: Any) -> bool:
     }
 
 
+def _validated_local_edit_response(runtime: DshStructuredRoleRuntime, **request: Any) -> LocalEditProposal:
+    """Share one correction between absent and malformed local-edit outputs."""
+    feedback = None
+    for attempt in (1, 2):
+        try:
+            result = runtime.run(**{
+                **request,
+                "context": {
+                    **request["context"],
+                    **({"host_validation_feedback": feedback} if feedback is not None else {}),
+                },
+                "stage_attempt": attempt,
+                "idempotency_key": request["idempotency_key"] + (
+                    "" if attempt == 1 else ":contract-repair:2"
+                ),
+            })
+        except DshNativeRuntimeUnavailableError as exc:
+            if exc.error_code != "structured_child_output_budget_exhausted" or attempt == 2:
+                raise
+            # This uses the existing correction slot, not an extra retry loop.
+            # No result exists to digest; never echo native exception content.
+            feedback = _output_budget_feedback(attempt=attempt, max_output_tokens=request.get("max_tokens"))
+            continue
+        try:
+            return LocalEditProposal.from_dict(result)
+        except (TypeError, ValueError) as exc:
+            if attempt == 2:
+                raise DshNativeRuntimeUnavailableError(
+                    "Local edit output failed Host validation after one bounded correction.",
+                    error_code="structured_child_output_schema_invalid",
+                    failure_domain="execution_contract",
+                    status_code=422,
+                ) from exc
+            feedback = _host_validation_feedback(exc, rejected_output=result, attempt=attempt)
+    raise AssertionError("local edit correction must terminate")
+
+
 def _local_edit_proposal(
     services: GenerationRuntime,
     state: Any,
@@ -1605,7 +1679,7 @@ def _local_edit_proposal(
     batch: Any,
     context: LocalEditContext,
 ) -> LocalEditProposal:
-    """Ask the native local editor when present, with a safe local fallback."""
+    """Ask the native local editor, or keep when no native editor is configured."""
 
     # Zero is an explicit Host-owned switch that disables local mutation for
     # this schedule.  Resolve it before inspecting native-runtime state so a
@@ -1629,6 +1703,10 @@ def _local_edit_proposal(
             expected_effect_cells=(),
             risk_cells=(),
         )
+    from .runtime_bindings import candidate_revision_identity_binding
+    identity = candidate_revision_identity_binding(
+        state, candidate.candidate_id, context.candidate_revision_id
+    )
     evaluation = state.batch_evaluation_for(candidate.candidate_id, batch.batch_index)
     if evaluation is None:
         raise RuntimeError("local editor requires completed batch evidence")
@@ -1658,6 +1736,15 @@ def _local_edit_proposal(
             "physical_and_execution_guards_remain_active": True,
             "repeated_behavior_requires_revisit_reason": True,
             "revisit_reasons": ["safety_recovery", "new_batch_evidence", "paired_recheck"],
+        })
+    if context.search_policy == "cellwise_training_evidence@1":
+        decision_policy.update({
+            "maximum_changed_operations": 1,
+            "parameter_change_scope": "one_target_horizon_residual_cell",
+            "evidence_scope": "completed_training_only",
+            "selection_rule": "use per-cell paired regressions and observed contribution; keep unaffected cells unchanged",
+            "inactive_branch_rule": "unexercised or missing trace is unverified, not scientific failure",
+            "candidate_tool_use_is_scientific_gain": False,
         })
     if inert_axes:
         decision_policy["inert_mutation_axes"] = list(inert_axes)
@@ -1702,14 +1789,22 @@ def _local_edit_proposal(
             if advertised.get("instruction_directive")
             else {}
         ),
+        **({"legal_strategy_program_grammar": strategy_program_grammar()} if advertised.get("strategy_program") else {}),
         **({"legal_skill_grammar": skill_grammar()} if advertised.get("skill_program") else {}),
         "recent_edit_history": _recent_local_edit_history(
             state, candidate.candidate_id, batch.batch_index
         ),
         **_trajectory_score_history(state, candidate.candidate_id, batch.batch_index),
         "decision_policy": decision_policy,
+        "output_contract": {
+            "maximum_revisit_justification_characters": LOCAL_EDIT_REVISIT_MAX_CHARACTERS,
+            "maximum_contract_corrections": 1,
+            "invalid_output_is_not_a_keep_decision": True,
+        },
         **({"recent_behavior_states": _recent_behavior_states(state, candidate.candidate_id)}
            if _cohort_scoped_editor(state) else {}),
+        **({"prediction_contribution": _local_edit_contribution(evaluation.metrics)}
+           if context.search_policy == "cellwise_training_evidence@1" else {}),
         "batch_evidence": {
             "score": evaluation.score,
             "passed": evaluation.passed,
@@ -1772,37 +1867,26 @@ def _local_edit_proposal(
                 challenger_evaluation.metrics
             ),
         }
-    try:
-        result = DshStructuredRoleRuntime(runtime, admission=admission).run(
-            run_id=state.run.run_id,
-            stage="candidate.local_edit",
-            role="candidate-proposer",
-            context=context_payload,
-            output_schema_id="ecology-local-edit@1",
-            run_state_revision=state.events[-1].seq,
-            stage_attempt=1,
-            ledger_expected_revision=services.ledger.latest_seq(),
-            idempotency_key=(
-                f"{state.run.run_id}:candidate:{candidate.candidate_id}:"
-                f"batch:{batch.batch_index}:local-edit"
-            ),
-            identity_digests={
-                key: str(identity[key])
-                for key in ("genome_digest", "compiled_behavior_digest", "phenotype_instance_digest")
-                if key in identity
-            },
-        )
-    except DshNativeRuntimeUnavailableError:
-        # A test/local run without the native process keeps the trajectory
-        # resumable. Real native runs surface other failures to auto-progress.
-        return LocalEditProposal(
-            decision="keep",
-            operations=(),
-            evidence_refs=("batch:score",),
-            expected_effect_cells=(),
-            risk_cells=(),
-        )
-    return LocalEditProposal.from_dict(result)
+    return _validated_local_edit_response(
+        DshStructuredRoleRuntime(runtime, admission=admission),
+        run_id=state.run.run_id,
+        stage="candidate.local_edit",
+        role="candidate-proposer",
+        context=context_payload,
+        output_schema_id="ecology-local-edit@1",
+        run_state_revision=state.events[-1].seq,
+        stage_attempt=1,
+        ledger_expected_revision=services.ledger.latest_seq(),
+        idempotency_key=(
+            f"{state.run.run_id}:candidate:{candidate.candidate_id}:"
+            f"batch:{batch.batch_index}:local-edit"
+        ),
+        identity_digests={
+            key: str(identity[key])
+            for key in ("genome_digest", "compiled_behavior_digest", "phenotype_instance_digest")
+            if key in identity
+        },
+    )
 
 
 def _local_edit_current_state(revision: CandidateRevision) -> dict[str, Any]:
@@ -2177,6 +2261,13 @@ def _inactive_axis_rejection_reason(
     return None
 
 
+
+def _local_edit_contribution(metrics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Detach bounded diagnostics from replay's recursively frozen metrics."""
+    value = metrics.get("sample_execution", {}).get("prediction_contribution")
+    return deep_thaw_json(value) if isinstance(value, Mapping) else None
+
+
 def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Return detached aggregate evidence safe for the native JSON boundary.
 
@@ -2242,10 +2333,28 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "agent_tool_invocations",
                 "agent_tool_usage_rate",
                 "agent_prediction_method_counts",
-                "mutation_effect_receipt",
             )
             if key in sample
         }
+        receipt = sample.get("mutation_effect_receipt")
+        if isinstance(receipt, Mapping):
+            # Sample-level references grow with origins, cells and predicates.
+            # Preserve counts/statuses for the editor and point to the full
+            # durable receipt; never disguise a projection as the full receipt.
+            safe["sample_execution"]["mutation_effect_summary"] = {
+                "schema_version": "ecologyrsi-dsh.edit-effect-summary/1",
+                "source_receipt_digest": receipt.get("receipt_digest"),
+                **{key: receipt[key] for key in (
+                    "contract_id", "scope_digest", "child_genome_digest", "status", "qualification"
+                ) if key in receipt},
+                "checks": [{
+                    **{key: check[key] for key in (
+                        "predicate_id", "semantics", "status", "eligible", "matched"
+                    ) if key in check},
+                    "evidence_ref_count": len(check.get("evidence_refs", ())),
+                    "evidence_refs_digest": digest(check.get("evidence_refs", [])),
+                } for check in receipt.get("checks", ())],
+            }
     target_rows: list[dict[str, Any]] = []
     targets = detached.get("targets")
     if isinstance(targets, (list, tuple)):

@@ -20,12 +20,21 @@ from .ports import GenerationRuntime
 
 def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
     self.ledger = ledger
-    self.dsh_tools = DshToolService(self.ledger)
+    def attest_activation(identity, *, parent_session_id, timeout):
+        native = getattr(self, "dsh_native_runtime", None)
+        if native is None:
+            from ..integrations.dsh_tools import DshStructuredResultPersistenceError
+            raise DshStructuredResultPersistenceError("native activation attestation is unavailable")
+        return native.attest_child_activation(identity, parent_session_id=parent_session_id, timeout=timeout)
+
+    self.dsh_tools = DshToolService(self.ledger, activation_attestor=attest_activation)
     def abort_failed_evaluation(run_id: str) -> None:
         self.dsh_tools.close_run_admissions(run_id)
         manager = getattr(self, "auto_progress", None)
         if manager is not None:
-            manager.abort_native_evaluation(run_id)
+            manager.abort_native_evaluation(
+                run_id, error=self.sample_admission.execution_failure_for(run_id),
+            )
 
     from ..execution.host_activity import HostActivityMonitor, HOST_INTERRUPTION_EVENT
     def record_host_gap(payload):
@@ -62,8 +71,12 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
         if runtime_origin and runtime_token
         else None
     )
+    from ..evolution.novelty import build_archive as build_candidate_novelty_archive
     self.strategy_router = StrategyRouterDSHAdapter(
         self.model_gateway,
+        candidate_novelty_provider=lambda run_id, generation: build_candidate_novelty_archive(
+            self.director.state(run_id), generation
+        ),
         native_runtime_provider=lambda: DshStructuredRoleRuntime(
             self.dsh_native_runtime,
             admission=self.dsh_tools,

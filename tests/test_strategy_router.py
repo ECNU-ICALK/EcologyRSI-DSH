@@ -42,6 +42,38 @@ class _PolicyGatewayStub:
 
 
 class AggregateFeedbackBoundaryTests(unittest.TestCase):
+    def test_skill_outcomes_keep_program_and_provenance_across_reflection_envelope(self):
+        from ecologyrsi_dsh.evaluators.skill_program import seed_skill_program
+
+        feedback = {"reflection_digest": "a" * 64, "canonical_candidate_outcomes": [{
+            "candidate_id": "candidate:skill", "score": None, "eligible": False,
+            "mutation_operations": [{"op": "author_skill_program", "role": "sample-planner",
+                                     "skill_program": seed_skill_program()}],
+        }]}
+        self.assertEqual(safe_aggregate_feedback(feedback, name="reflection"), feedback)
+
+    def test_outcome_envelope_preserves_sensitive_field_and_resource_limits(self):
+        from copy import deepcopy
+        from ecologyrsi_dsh.evaluators.skill_program import seed_skill_program
+
+        row = {"mutation_operations": [{"op": "author_skill_program", "skill_program": seed_skill_program()}]}
+        poisoned = deepcopy(row)
+        step = poisoned["mutation_operations"][0]["skill_program"]["steps"][0]
+        step.update({"GroundTruth": "private-label", "source_code": "private-code",
+                     "sample_execution_trace_archive": "private-trace"})
+        self.assertEqual(safe_aggregate_feedback({"canonical_candidate_outcomes": [poisoned]},
+                         name="reflection"), {"canonical_candidate_outcomes": [row]})
+        deep = {"safe": 1}
+        for _ in range(8):
+            deep = {"canonical_candidate_outcomes": [deep]}
+        for payload in (deep, {"text": "x" * 4001}, {"items": list(range(129))}):
+            with self.subTest(payload_type=next(iter(payload))), self.assertRaises(ValueError):
+                safe_aggregate_feedback({"canonical_candidate_outcomes": [payload]}, name="reflection")
+        with self.assertRaises(ValueError):
+            safe_aggregate_feedback({"canonical_candidate_outcomes": [row] * 9}, name="reflection")
+        with self.assertRaises(TypeError):
+            safe_aggregate_feedback({"canonical_candidate_outcomes": [None]}, name="reflection")
+
     def test_sample_execution_detail_is_removed_before_agent_feedback(self) -> None:
         projected = safe_aggregate_feedback(
             {

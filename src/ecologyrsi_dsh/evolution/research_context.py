@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.model_execution_policy import research_execution_policy
 from ..core.models import digest
+from ..knowledge.autonomous_cycle import GenerationReflection
 from .genome import EcologyEvolutionPluginGenome, TRUST_REGION_MAX_NORMALIZED_STEP, parameter_trust_region_neighborhood
 
 
@@ -21,6 +22,26 @@ CONCISE_REPORT_LIMITS = {
         "capability_focus": 160, "expected_tradeoff": 240, "success_criterion": 240,
     },
 }
+
+
+def research_reflection_reference(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Bind the saved reflection without copying it into every durable plan.
+
+    The researcher still receives the full reflection as a separate input.
+    Its original ledger record retains all lessons, directions and outcomes;
+    downstream proposals use the newly synthesized directions in this plan.
+    """
+    if value is None:
+        return None
+    reflection = GenerationReflection.from_dict(value)
+    return {
+        "schema_version": "ecologyrsi-dsh.research-reflection-reference/1",
+        "run_id": reflection.run_id,
+        "generation": reflection.generation,
+        "analysis_digest": reflection.analysis_digest,
+        "reflection_digest": reflection.reflection_digest,
+        "source_payload_digest": digest(reflection.to_dict()),
+    }
 
 
 def _deduplicate_knowledge(knowledge: Mapping[str, Any], search_plan: Mapping[str, Any]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter
 from ecologyrsi_dsh.application import generation_execution as execution, formal_trajectory
+from ecologyrsi_dsh.api.projection import _execution_diagnostics
 from ecologyrsi_dsh.core.models import Proposal, canonical_json, digest
 from ecologyrsi_dsh.core.trajectory import CandidateRevision, RevisionStatus
 from ecologyrsi_dsh.core.training_race import race_bindings
@@ -133,11 +134,18 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
         chosen = execution._prepare_formal_finalists(self.services, self.run_id, self.candidates, max_concurrency=1)
         self.assertEqual([c.candidate_id for c in chosen], [self.candidates[0].candidate_id])
         cid = chosen[0].candidate_id
+        before_reuse = _execution_diagnostics(self.director.replay(self.run_id))
+        self.assertEqual(before_reuse['adaptive_all_settled_origins'], 50)
         with patch.object(formal_trajectory, 'EvaluationSession', fixtures._NoopScopedCallbacks), \
              patch.object(formal_trajectory, '_local_edit_context', side_effect=fixtures.PairedFormalTrajectoryTests._local_context), \
              patch.object(formal_trajectory, '_local_edit_proposal', return_value=replace(fixtures.PairedFormalTrajectoryTests._mutate_proposal(), operations=({'op':'set_bounded_parameter','name':'ridge_alpha','value':.7},))):
             self.assertTrue(formal_trajectory.execute_next_formal_batch(self.services, self.run_id, cid))
             self.assertEqual(self.evaluator.calls, [])
+            after_reuse = _execution_diagnostics(self.director.replay(self.run_id))
+            for field in ('adaptive_all_settled_origins', 'adaptive_scored_cells',
+                          'candidate_work_items', 'adaptive_live_completed_origins'):
+                self.assertEqual(after_reuse[field], before_reuse[field], field)
+            self.assertEqual(after_reuse['adaptive_evaluation_count'], 1)
             self.assertTrue(formal_trajectory.execute_next_formal_batch(self.services, self.run_id, cid))
             self.assertTrue(formal_trajectory.execute_next_local_edit(self.services, self.run_id, cid))
             for _ in range(4):
@@ -147,6 +155,9 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
         self.assertEqual(state.trajectory_for(cid).status.value, 'completed')
         self.assertTrue(state.batch_evaluation_for(cid, 0).metrics['reused_screening_evidence'])
         self.assertEqual(state.trajectory_for(cid).final_revision_id, 'revision:race:0:r0')
+        executed = _execution_diagnostics(state)
+        self.assertEqual(executed['adaptive_all_settled_origins'], 100)
+        self.assertEqual(executed['adaptive_evaluation_count'], 3)
 
     def test_wrong_revision_is_rejected_before_scoring(self):
         c = self.candidates[0]

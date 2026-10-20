@@ -22,6 +22,19 @@ RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-receipt/1"
 SCOPE = "tool_and_schema_transport_only"
 from .role_contracts import CANARY_ROLES as _ROLES
 
+# Read-only replay compatibility: these exact historical stage/schema contracts
+# remain valid evidence, but are never accepted by the live canary gate.
+_RECORDED_ROLES = (
+    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher",
+     "ecology-researcher-v15", "generation.search-plan", "ecology-research-search-plan@1"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher",
+     "ecology-researcher-v16", "generation.search-plan", "ecology-research-search-plan@1"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
+     "ecology-sample-planner-v12", "sample.plan", "ecology-sample-predictions@2"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
+     "ecology-sample-planner-v13", "sample.plan", "ecology-sample-predictions@2"),
+)
+
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")
 
@@ -49,10 +62,24 @@ class CanaryBounds:
                 raise ValueError(f"invalid model canary bound: {name}")
 
 
-def required_canary_identities(metadata: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
+def required_canary_identities(metadata: Mapping[str, Any], *, recorded: bool = False) -> tuple[dict[str, str], ...]:
     """Derive the role transport identities from the Host-bound task metadata."""
+    roles = _ROLES
+    frozen = metadata.get("dsh_preset_ids") if recorded else None
+    if frozen is not None:
+        if (not isinstance(frozen, (list, tuple)) or not all(isinstance(p, str) for p in frozen)
+                or len(set(frozen)) != len(frozen)):
+            raise ValueError("invalid recorded canary preset inventory")
+        selected = []
+        for current in _ROLES:
+            matches = [row for row in dict.fromkeys((*_ROLES, *_RECORDED_ROLES))
+                       if row[2] == current[2] and row[3] in frozen]
+            if len(matches) != 1:
+                raise ValueError("recorded canary role requires one supported frozen preset")
+            selected.append(matches[0])
+        roles = tuple(selected)
     result = []
-    for route_key, digest_key, role, preset, stage, schema in _ROLES:
+    for route_key, digest_key, role, preset, stage, schema in roles:
         route = str(metadata.get(route_key) or "")
         provider, separator, model = route.partition("/")
         if not separator or not _ROUTE_PART.fullmatch(provider) or not _ROUTE_PART.fullmatch(model):
@@ -64,12 +91,12 @@ def required_canary_identities(metadata: Mapping[str, Any]) -> tuple[dict[str, s
             "standing_tool_surface_digest": str(metadata.get("standing_tool_surface_digest") or ""),
             "route_config_digest": str(metadata.get(digest_key) or ""),
         }
-        _validate_identity(identity)
+        _validate_identity(identity, recorded=recorded)
         result.append(identity)
     return tuple(result)
 
 
-def _validate_identity(identity: Mapping[str, Any]) -> None:
+def _validate_identity(identity: Mapping[str, Any], *, recorded: bool = False) -> None:
     expected = {"provider_id", "model_id", "role", "preset_id", "stage", "output_schema_id", "preset_content_digest", "standing_tool_surface_digest", "route_config_digest"}
     if set(identity) != expected:
         raise ValueError("invalid model canary identity fields")
@@ -77,7 +104,8 @@ def _validate_identity(identity: Mapping[str, Any]) -> None:
         raise ValueError("invalid model canary provider/model")
     if not all(isinstance(identity[k], str) and _DIGEST.fullmatch(identity[k]) for k in ("preset_content_digest", "standing_tool_surface_digest", "route_config_digest")):
         raise ValueError("model canary requires Host-frozen content and route digests")
-    if (identity["role"], identity["preset_id"], identity["stage"], identity["output_schema_id"]) not in {r[2:] for r in _ROLES}:
+    roles = (*_ROLES, *_RECORDED_ROLES) if recorded else _ROLES
+    if (identity["role"], identity["preset_id"], identity["stage"], identity["output_schema_id"]) not in {r[2:] for r in roles}:
         raise ValueError("model canary stage unsupported")
 
 
@@ -95,8 +123,8 @@ def _timestamp(value: Any) -> datetime:
     return result
 
 
-def validate_canary_receipt(receipt: Mapping[str, Any], identity: Mapping[str, Any], *, now: datetime | None = None, require_passed: bool = False) -> None:
-    _validate_identity(identity)
+def validate_canary_receipt(receipt: Mapping[str, Any], identity: Mapping[str, Any], *, now: datetime | None = None, require_passed: bool = False, recorded: bool = False) -> None:
+    _validate_identity(identity, recorded=recorded)
     if receipt.get("schema_version") != RECEIPT_SCHEMA or receipt.get("scope") != SCOPE:
         raise ValueError("model canary receipt scope/schema mismatch")
     if receipt.get("identity") != dict(identity) or receipt.get("identity_digest") != digest(identity):

@@ -13,6 +13,7 @@ from ..evolution.schedule import ADAPTIVE_PROTOCOLS, QUICK_OPTIMIZATION_PROTOCOL
 from ..core.dsh_usage import active_session_ids, session_usage_projection
 from ..core.model_preflight import model_preflight_projection
 from ..core.prediction_policy import prediction_usage
+from ..core.immutable import thaw_json
 from ..core.state import persisted_genome_from_proposal
 from ..core.artifact_identity import ARTIFACT_EVENT_V2
 
@@ -22,13 +23,13 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from types import SimpleNamespace
-from ..evaluators.agent_stability import REPLICA_COUNT
+from ..evaluators.agent_stability import REPLICA_COUNT, SCHEMA as STABILITY_SCHEMA
 
 from ..core.errors import (
     FROZEN_RUNTIME_BINDING_DRIFT_CODE,
     FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE,
 )
-from ..core.models import Evaluation, HumanIntervention, InterventionKind
+from ..core.models import Evaluation, HumanIntervention, InterventionKind, digest
 from ..core.protocols import supports_two_stage_screening
 from ..core.redaction import (
     public_error_summary,
@@ -81,7 +82,7 @@ from ..execution.sample_admission import (
     HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     MAX_SAMPLE_CONCURRENCY,
 )
-from .run_projection import build_configuration
+from .run_projection import build_configuration, build_frozen_feature_policies
 from .evidence_projection import candidate_score_evidence, evidence_funnel
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
@@ -160,7 +161,7 @@ def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
     except (TypeError, ValueError):
         return None
     if (
-        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1"}
+        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1", "ecologyrsi-dsh.joint-plugin-epoch-schedule/1", "ecologyrsi-dsh.joint-plugin-epoch-schedule/2"}
         or schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE
     ):
         return None
@@ -484,6 +485,108 @@ def _host_activity_projection(state: Any) -> dict[str, Any]:
 
 
 
+def _sealed_holdout_execution_multiplier(state: Any, evaluation: Any) -> int | None:
+    """Count legacy replicas only with matching Host-owned result streams.
+
+    A replica summary is not a second execution receipt. Missing old evidence
+    remains unknown; neither planned capacity nor model-authored metrics can
+    turn one sealed prediction into two. Conditional rechecks have their own
+    replay-validated HoldoutEvaluation and do not use this multiplier.
+    """
+    if _holdout_replica_count(state) == 1:
+        return 1
+    evidence = evaluation.metrics.get("agent_inference_stability")
+    if not isinstance(evidence, Mapping):
+        return None
+    evidence = thaw_json(evidence)
+    if (evidence.get("schema_version") != STABILITY_SCHEMA
+        or evidence.get("kind") != "independent_agent_inference"
+        or type(evidence.get("independent_observation_count_multiplier")) is not int
+        or evidence["independent_observation_count_multiplier"] != 1
+        or evidence.get("evidence_digest") != digest({
+            key: value for key, value in evidence.items() if key != "evidence_digest"})):
+        return None
+    rows = evidence.get("replicas")
+    cells = state.task_manifest.metadata.get("prediction_cells_per_origin")
+    if (not isinstance(rows, list) or len(rows) != REPLICA_COUNT
+        or type(cells) is not int or cells <= 0):
+        return None
+    scope = evaluation.scope.to_dict()
+    if scope.get("inference_replica") != 0:
+        return None
+    events = tuple(getattr(state, "events", ()))
+    seals = [event for event in events if event.kind == "HoldoutEvaluationRecorded"
+        and isinstance(event.payload.get("evaluation"), Mapping)
+        and event.payload["evaluation"].get("evaluation_id") == evaluation.evaluation_id
+        and event.payload["evaluation"].get("scope") == scope]
+    if len(seals) != 1:
+        return None
+    indices, revisions = set(), set()
+    expected_cells = evaluation.scope.origin_count * cells
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return None
+        index = row.get("replica_index")
+        if type(index) is not int or not 0 <= index < REPLICA_COUNT or index in indices:
+            return None
+        indices.add(index)
+        scope_digest = digest({**scope, "inference_replica": index})
+        if (row.get("scope_digest") != scope_digest
+            or row.get("cohort_digest") != scope["cohort_digest"]
+            or row.get("candidate_revision_id") != scope["candidate_revision_id"]
+            or type(row.get("origin_count")) is not int
+            or row["origin_count"] != scope["origin_count"]):
+            return None
+        starts = []
+        for event in events:
+            checkpoint = event.payload.get("checkpoint")
+            if (event.kind == "EvaluationSampleResultsStarted" and event.seq < seals[0].seq
+                and event.payload.get("run_id") == scope["run_id"]
+                and type(event.payload.get("generation")) is int
+                and event.payload["generation"] == scope["generation"]
+                and event.payload.get("candidate_id") == scope["candidate_id"]
+                and isinstance(checkpoint, Mapping)
+                and checkpoint.get("execution_scope_digest") == scope_digest
+                and checkpoint.get("evaluation_phase") == "holdout"
+                and checkpoint.get("candidate_revision_id") == scope["candidate_revision_id"]
+                and checkpoint.get("cohort_digest") == scope["cohort_digest"]
+                and checkpoint.get("holdout_arm") == scope["holdout_arm"]
+                and type(checkpoint.get("inference_replica")) is int
+                and checkpoint["inference_replica"] == index
+                and type(checkpoint.get("sample_count")) is int
+                and checkpoint["sample_count"] == expected_cells):
+                starts.append(event)
+        if len(starts) != 1:
+            return None
+        start = starts[0]
+        revision = start.payload.get("revision")
+        if not isinstance(revision, str) or not revision or revision in revisions:
+            return None
+        revisions.add(revision)
+        seen_samples, seen_batches = set(), {}
+        for event in events:
+            payload = event.payload
+            if (event.kind != "EvaluationSampleResultBatchRecorded"
+                or not start.seq < event.seq < seals[0].seq
+                or payload.get("candidate_id") != scope["candidate_id"]
+                or payload.get("revision") != revision):
+                continue
+            sample_ids, count, batch = payload.get("sample_ids"), payload.get("record_count"), payload.get("batch_index")
+            if (type(count) is not int or count <= 0 or type(batch) is not int or batch < 1
+                or not isinstance(sample_ids, (list, tuple)) or len(sample_ids) != count
+                or any(not isinstance(item, str) or not item for item in sample_ids)
+                or len(set(sample_ids)) != count):
+                return None
+            identity = tuple(sample_ids)
+            if batch in seen_batches and seen_batches[batch] != identity:
+                return None
+            seen_batches[batch] = identity
+            seen_samples.update(sample_ids)
+        if len(seen_samples) != expected_cells:
+            return None
+    return REPLICA_COUNT
+
+
 def _execution_diagnostics(state: Any) -> dict[str, Any]:
     """Summarize what actually ran, including lightweight fits and fallbacks."""
 
@@ -492,6 +595,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     adaptive_evaluations = [
         *state.formal_batch_evaluations,
         *state.holdout_evaluations,
+        *getattr(state, "holdout_rechecks", ()),
     ]
     fallback_reasons: list[str] = []
     fallback_count = 0
@@ -817,14 +921,38 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         else bool(fit_methods)
         and not set(fit_methods).issubset(single_pass_methods)
     )
+    # Race batch 0 is a validated diagnostic view of screening, not another
+    # prediction execution. Keep that record for evidence/counts, but exclude
+    # its explicit zero-cost reuse from physical workload and outcome totals.
+    executed_adaptive_evaluations = [
+        item for item in state.formal_batch_evaluations
+        if not (
+            isinstance(item.metrics, Mapping)
+            and item.metrics.get("reused_screening_evidence") is True
+            and type(item.metrics.get("additional_prediction_executions")) is int
+            and item.metrics["additional_prediction_executions"] == 0
+        )
+    ] + list(state.holdout_evaluations) + list(getattr(state, "holdout_rechecks", ()))
+    holdout_ids = {id(item) for item in state.holdout_evaluations}
+    multipliers = [(_sealed_holdout_execution_multiplier(state, item)
+        if id(item) in holdout_ids else 1) for item in executed_adaptive_evaluations]
+    adaptive_execution_counts_known = all(item is not None for item in multipliers)
     adaptive_settled_origins = sum(
-        int(item.scope.origin_count) for item in adaptive_evaluations
+        int(item.scope.origin_count) * (multiplier or 1)
+        for item, multiplier in zip(executed_adaptive_evaluations, multipliers)
     )
     adaptive_succeeded_origins = 0
     adaptive_failed_origins = 0
     adaptive_failed_scoring_cells = 0
     adaptive_outcome_counts_known = True
-    for evaluation in adaptive_evaluations:
+    adaptive_failed_cells_known = True
+    for evaluation, multiplier in zip(executed_adaptive_evaluations, multipliers):
+        # Legacy replica_summary records scores/coverage but no per-replica
+        # outcome counts. Never copy the first inference's success/failure.
+        if multiplier != 1:
+            adaptive_outcome_counts_known = False
+            adaptive_failed_cells_known = False
+            continue
         sample = (
             evaluation.metrics.get("sample_execution")
             if isinstance(evaluation.metrics, Mapping)
@@ -832,10 +960,13 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         )
         if not isinstance(sample, Mapping):
             adaptive_outcome_counts_known = False
+            adaptive_failed_cells_known = False
             continue
         succeeded = metric_count(sample, "succeeded_origin_samples")
         failed = metric_count(sample, "failed_origin_samples")
         failed_cells = metric_count(sample, "failed_examples")
+        if failed_cells is None:
+            adaptive_failed_cells_known = False
         if succeeded is None or failed is None:
             adaptive_outcome_counts_known = False
         else:
@@ -850,7 +981,8 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     cells_per_origin = state.task_manifest.metadata.get("prediction_cells_per_origin")
     adaptive_scored_cells = (
         adaptive_all_settled_origins * cells_per_origin
-        if isinstance(cells_per_origin, int) and not isinstance(cells_per_origin, bool)
+        if adaptive_execution_counts_known
+        and isinstance(cells_per_origin, int) and not isinstance(cells_per_origin, bool)
         and cells_per_origin > 0 else None
     )
     adaptive_progress = _adaptive_progress_projection(state)
@@ -906,8 +1038,10 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         ),
         "partial_evaluation_sources": sorted(partial_evaluation_sources),
         "execution_evidence_status": execution_evidence_status,
-        "adaptive_settled_origins": adaptive_settled_origins,
-        "adaptive_all_settled_origins": adaptive_all_settled_origins,
+        "adaptive_execution_counts_known": adaptive_execution_counts_known,
+        "adaptive_outcome_counts_known": adaptive_outcome_counts_known,
+        "adaptive_settled_origins": adaptive_settled_origins if adaptive_execution_counts_known else None,
+        "adaptive_all_settled_origins": adaptive_all_settled_origins if adaptive_execution_counts_known else None,
         "adaptive_scored_cells": adaptive_scored_cells,
         "adaptive_live_completed_origins": adaptive_live_completed_origins,
         "adaptive_succeeded_origins": (
@@ -916,9 +1050,10 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         "adaptive_failed_origins": (
             adaptive_failed_origins if adaptive_outcome_counts_known else None
         ),
-        "adaptive_failed_scoring_cells": adaptive_failed_scoring_cells,
+        "adaptive_failed_scoring_cells": adaptive_failed_scoring_cells if adaptive_failed_cells_known else None,
         "adaptive_evaluation_count": len(adaptive_evaluations),
         "candidate_work_items": (
+            None if not adaptive_execution_counts_known else
             training_used_examples + adaptive_scored_cells
             if adaptive_scored_cells is not None and adaptive_all_settled_origins > 0
             else training_used_examples
@@ -1885,7 +2020,7 @@ def _legacy_sample_launch_key(value: Any) -> tuple[str, str] | None:
 
 
 def _screening_candidates(state: Any, generation: int) -> tuple[Any, ...]:
-    if state.task_manifest.metadata.get("optimization_protocol") == "evidence_guided_epoch@1":
+    if state.task_manifest.metadata.get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
         cohort = state.generation_cohort_for(generation)
         bindings = getattr(cohort, "revision_bindings", {}) or {}
         return tuple(candidate for candidate in state.candidates if candidate.candidate_id in bindings)
@@ -2139,7 +2274,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         ):
             prediction_tool_pending_origins.add(member_digests)
 
-    screening_origins = 10 if metadata.get("optimization_protocol") == "evidence_guided_epoch@1" else _TWO_STAGE_SCREENING_ORIGINS
+    screening_origins = 10 if metadata.get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"} else _TWO_STAGE_SCREENING_ORIGINS
     total = len(candidates) * screening_origins
     completed = min(total, len(completed_origins))
     if reflection_enabled:
@@ -3031,7 +3166,7 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
 
 
 def _holdout_replica_count(state: Any) -> int:
-    if state.task_manifest.metadata.get("optimization_protocol") in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1"}:
+    if state.task_manifest.metadata.get("optimization_protocol") in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
         return 1
     return REPLICA_COUNT if state.task_manifest.metadata.get("sample_agent_mode") == "dsh_native_agent" else 1
 
@@ -3044,18 +3179,19 @@ def _holdout_arm_live_projection(state: Any) -> dict[str, Any] | None:
         (
             event
             for event in reversed(tuple(getattr(state, "events", ())))
-            if event.kind == "HoldoutArmStarted"
+            if event.kind in {"HoldoutArmStarted", "HoldoutRecheckStarted"}
             and int(event.payload.get("generation", -1)) == generation
         ),
         None,
     )
     if started is None:
         return None
+    recheck = started.kind == "HoldoutRecheckStarted"
     arm = str(started.payload.get("holdout_arm") or "")
     if any(
         item.scope.generation == generation
         and getattr(item.scope.holdout_arm, "value", None) == arm
-        for item in state.holdout_evaluations
+        for item in (getattr(state, "holdout_rechecks", ()) if recheck else state.holdout_evaluations)
     ):
         return None
     origin_total = max(1, int(started.payload.get("origin_count") or 0))
@@ -3113,7 +3249,7 @@ def _holdout_arm_live_projection(state: Any) -> dict[str, Any] | None:
         candidate_id=str(started.payload.get("candidate_id") or ""),
         evaluation_phase="holdout",
         origin_total=origin_total,
-        outcome_scope="active_holdout_arm",
+        outcome_scope="active_holdout_recheck" if recheck else "active_holdout_arm",
         holdout_arm=arm,
         candidate_revision_id=(
             str(started.payload.get("candidate_revision_id") or "") or None
@@ -3172,7 +3308,7 @@ def _adaptive_progress_projection(
         screening_origin_count = int(schedule["screening_origin_count"])
         screening_total = execution_budget["screening_candidate_origins"]
         formal_total = execution_budget["formal_candidate_origins"]
-        holdout_total = execution_budget["holdout_candidate_origins"]
+        holdout_total = execution_budget["holdout_candidate_origins"] + execution_budget.get("recheck_candidate_origins", 0)
     except (KeyError, TypeError, ValueError):
         return None
     paired_schedule = _paired_optimization_schedule(state)
@@ -3370,6 +3506,8 @@ def _adaptive_progress_projection(
         for item in state.holdout_evaluations
         if item.scope.generation == generation
     )
+    holdout_completed += sum(int(item.scope.origin_count) for item in getattr(state, "holdout_rechecks", ())
+                             if item.scope.generation == generation)
     # A failed candidate can be closed before it reaches every planned origin.
     # Once the next durable phase boundary exists, the unexecuted remainder is
     # terminally skipped rather than work that is still queued.  Keeping this
@@ -3416,7 +3554,7 @@ def _adaptive_progress_projection(
             )
         except (TypeError, ValueError):
             continue
-    for item in (*state.formal_batch_evaluations, *state.holdout_evaluations):
+    for item in (*state.formal_batch_evaluations, *state.holdout_evaluations, *getattr(state, "holdout_rechecks", ())):
         if item.scope.generation != generation:
             continue
         if getattr(item, "metrics", {}).get("reused_screening_evidence") is True:
@@ -3591,8 +3729,13 @@ def _adaptive_progress_projection(
         phase = "holdout"
     if comparison_recorded or holdout_completed >= holdout_total:
         phase = "decision"
-    batch_count = max(1, int(schedule.get("formal_origin_count_per_finalist", 500))) // max(
-        1, int(schedule.get("local_batch_origin_count", 50))
+    # Joint trajectories reuse the 10-origin screening batch before the
+    # 25-origin paired batch; dividing 35 by 25 loses that initial batch.
+    batch_count = (
+        paired_schedule.batch_count
+        if paired_schedule is not None
+        else max(1, int(schedule.get("formal_origin_count_per_finalist", 500)))
+        // max(1, int(schedule.get("local_batch_origin_count", 50)))
     )
     active_batch = None
     active_candidate = None
@@ -4413,6 +4556,7 @@ def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
                     "worst_cell_delta": _finite_number(
                         gate.get("worst_cell_delta")
                     ),
+                    "joint_recheck": thaw_json(gate.get("joint_recheck")),
                     "failures": [str(item) for item in failures[:8]],
                     "search_failures": [
                         str(item)
@@ -6301,6 +6445,7 @@ def _projection_json(
             "research_domain_id": metadata.get("research_domain", task.domain_pack),
         },
         "configuration": configuration,
+        "frozen_feature_policies": build_frozen_feature_policies(task),
         "evolution_funnel": evidence_funnel(state),
         **({"evolution_diversity": diversity_report(state)} if diversity_enabled(metadata) else {}),
         "dataset": {
@@ -6476,6 +6621,7 @@ def _monitor_payload(
         "projection": {
             "id": state.run.run_id,
             "run_id": state.run.run_id,
+            "frozen_feature_policies": build_frozen_feature_policies(task),
             "status": state.run.status.value,
             "outcome": outcome,
             "termination_reason": termination_reason,

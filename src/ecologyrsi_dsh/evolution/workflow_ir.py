@@ -36,7 +36,7 @@ from .genome import (
 )
 
 
-COMPILER_VERSION = "ecology-plugin-behavior-compiler@4"
+COMPILER_VERSION = "ecology-plugin-behavior-compiler@5"
 # Workflow parameters a host component actually reads. ``max_attempts`` reaches
 # ``SampleExecutionRegistry._sample_execution_policy``, which turns it into the
 # per-sample retry depth. ``max_concurrent`` and ``wave_size`` have no consumer
@@ -46,7 +46,7 @@ COMPILER_VERSION = "ecology-plugin-behavior-compiler@4"
 # edit as a real behaviour change while nothing at run time differs.
 EXECUTABLE_WORKFLOW_PARAMETERS = frozenset({"max_attempts"})
 DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
-    "ecologyrsi-dsh/plugin-compiler-semantics/4",
+    "ecologyrsi-dsh/plugin-compiler-semantics/5",
     {
         "compiler_version": COMPILER_VERSION,
         "algorithm_behavior_projection": "algorithm_behavior_projection@1",
@@ -64,6 +64,7 @@ DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
         # one compiled after.
         "authored_directive": "ecologyrsi-dsh.authored-directive/1",
         "skill_program": "ecologyrsi-dsh.skill-program/1",
+        "strategy_program": "ecologyrsi-dsh.strategy-program/1",
     },
 )
 SECURITY_SEMANTIC_DIGEST = _domain_digest(
@@ -90,6 +91,7 @@ _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 _EVALUATOR_VERSIONS = {
     "greenhouse_multihorizon_time_forward@4": "greenhouse-runtime-model-selection-forward/1",
+    "greenhouse_multihorizon_time_forward@5": "greenhouse-cellwise-aligned-forward/1",
     "toy_time_forward@1": "toy-time-forward/3",
     "greenhouse_time_forward@1": "greenhouse-time-forward/5",
     "greenhouse_multihorizon_time_forward@1": (
@@ -238,7 +240,7 @@ def compile_dsh_workflow_spec(
         # Both authoring fields are optional and appear together; the genome
         # validator enforces the pairing. Kept out of `required` so a genome
         # archived before directive authoring existed still compiles.
-        optional = {"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref"}
+        optional = {"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref", "strategy_program"}
         if not required <= set(raw_profile) <= required | optional:
             raise ValueError("role profile has unsupported or missing fields")
         if ("directive_policy_ref" in raw_profile) != (
@@ -328,6 +330,11 @@ def compile_dsh_workflow_spec(
             compiled_profile["skill_program"] = program
             compiled_profile["skill_program_digest"] = digest(program)
             compiled_profile["skill_policy_ref"] = dict(raw_profile["skill_policy_ref"])
+        if "strategy_program" in raw_profile:
+            from ..evaluators.strategy_program import validate_strategy_program
+            program = validate_strategy_program(deep_thaw_json(raw_profile["strategy_program"]))
+            compiled_profile["strategy_program"] = program
+            compiled_profile["strategy_program_digest"] = digest(program)
         compiled_profiles.append(compiled_profile)
     if seen_roles != allowed_roles:
         raise ValueError("role profiles do not cover the registered workflow roles")
@@ -680,8 +687,8 @@ def compile_plugin_behavior(
     )
     genome_data = genome.to_dict()
     runtime_binding = genome_data["runtime_binding"]
-    if runtime_binding["registry_catalog_digest"] != registry.catalog_digest:
-        raise ValueError("genome registry catalog binding mismatch")
+    from ..knowledge.program_registry import registry_for_frozen_catalog
+    registry = registry_for_frozen_catalog(registry, runtime_binding["registry_catalog_digest"])
     expected_binding = _expected_task_binding(task)
     if genome_data["frozen_contract_refs"] != expected_binding:
         raise ValueError("genome task/data/stage/security binding mismatch")
@@ -757,6 +764,15 @@ def compile_plugin_behavior(
         execution["role_profiles"],
         registry,
     )
+    from .program_preflight import validate_program_inputs
+    input_receipt = validate_program_inputs(
+        task, predictor_id=predictor_id,
+        parameters=({"feature_recipe": scientific["feature_recipe"]}
+                    if "feature_recipe" in scientific else parameters),
+        role_profiles=candidate_workflow.to_dict()["role_profiles"],
+    )
+    if input_receipt is not None:
+        feature_training["candidate_executability"] = input_receipt
     reproduction = _compile_reproduction_program(
         agent["reproduction_program"], registry
     )
@@ -883,6 +899,9 @@ def resolve_candidate_agent_profile(
         resolved["skill_program"] = deep_thaw_json(profile["skill_program"])
         resolved["skill_program_digest"] = profile["skill_program_digest"]
         resolved["skill_policy_ref"] = dict(profile["skill_policy_ref"])
+    if "strategy_program" in profile:
+        resolved["strategy_program"] = deep_thaw_json(profile["strategy_program"])
+        resolved["strategy_program_digest"] = profile["strategy_program_digest"]
     return resolved
 
 

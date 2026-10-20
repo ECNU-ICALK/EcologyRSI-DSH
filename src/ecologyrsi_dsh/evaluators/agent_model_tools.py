@@ -20,6 +20,7 @@ from .sample_execution import SampleExecutionCancelledError, SampleExecutionPaus
 _CONFIGS = {
     'greenhouse-exogenous-ridge@1': ridge.ExogenousRidgeConfig,
     'greenhouse-baseline-aligned-ridge@1': ridge.BaselineAlignedRidgeConfig,
+    'greenhouse-baseline-aligned-ridge@2': ridge.BaselineAlignedCellwiseRidgeConfig,
     'greenhouse-targetwise-ridge@1': ridge.TargetwiseExogenousRidgeConfig,
     'greenhouse-horizon-targetwise-ridge@1': ridge.HorizonTargetwiseExogenousRidgeConfig,
     'greenhouse-recipe-ridge@1': ridge.RecipeRidgeConfig,
@@ -120,6 +121,8 @@ class AgentModelTools:
     def catalog(self):
         entries = []
         for name, config in _CONFIGS.items():
+            if name == ridge.BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID and name != self._default_tool_id:
+                continue
             candidate_default = name == self._default_tool_id
             purpose_suffix = (
                 '; these defaults are this candidate\'s own evolved model'

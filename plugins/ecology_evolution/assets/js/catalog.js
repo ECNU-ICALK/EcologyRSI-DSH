@@ -225,9 +225,7 @@
     if (previousRunId !== runId) { state.candidateSelectionPinned = false; }
     if (state.createStatus && state.createStatus.runId !== runId) { state.createStatus = null; }
     if (previousRunId !== runId) {
-      state.candidateSampleRequest += 1;
-      state.candidateSampleLoading = false;
-      state.candidateSampleRefreshing = false;
+      invalidateCandidateSampleRequest();
     }
     if (state.runMonitorRunId && String(state.runMonitorRunId) !== String(runId) && typeof stopRunMonitor === "function") {
       stopRunMonitor(state.runMonitorRunId);
@@ -506,12 +504,12 @@
     var hostPolicyPreference = EcologyDSHHost.preferredModelId("propose", policyCompatibleItems.map(itemId), "");
     var policyPreference = preferredCatalogModelId(policyCompatibleItems, [currentPolicyId, hostPolicyPreference], "") || (policyCompatibleItems.find(modelCredentialReady) || policyCompatibleItems[0] || {}).id;
     populateSelect("#policy-model-id", policyItems, "没有可用的策略 API 模型", policyPreference, "propose");
-    var policyModelId = $("#policy-model-id").value;
     var selectedJudgeId = $("#judge-model-id").value;
     var judgeCompatibleItems = judgeItems.filter(function (item) { return modelSupportsRole(item, "judge") && item.directory_available !== false && item.configured !== false && item.credential_configured !== false; });
-    var hostJudgePreference = EcologyDSHHost.preferredModelId("judge", judgeCompatibleItems.map(itemId), policyModelId);
-    var preferredJudgeId = preferredCatalogModelId(judgeCompatibleItems, [selectedJudgeId, hostJudgePreference], policyModelId);
-    var preferredJudgeItem = judgeCompatibleItems.find(function (item) { return itemId(item) === preferredJudgeId; }) || judgeCompatibleItems.find(function (item) { return itemId(item) !== policyModelId; }) || judgeCompatibleItems[0] || judgeItems[0];
+    // Model routes may be shared; the runtime keeps role contracts and sessions separate.
+    var hostJudgePreference = EcologyDSHHost.preferredModelId("judge", judgeCompatibleItems.map(itemId), "");
+    var preferredJudgeId = preferredCatalogModelId(judgeCompatibleItems, [selectedJudgeId, hostJudgePreference], "");
+    var preferredJudgeItem = judgeCompatibleItems.find(function (item) { return itemId(item) === preferredJudgeId; }) || judgeCompatibleItems.find(modelCredentialReady) || judgeCompatibleItems[0] || judgeItems[0];
     populateSelect("#judge-model-id", judgeItems, "没有可用的独立评审 API 模型", preferredJudgeItem ? itemId(preferredJudgeItem) : "", "judge");
     alignDomainDatasetBinding();
     populateEpisodeControl($("#episode-id").value);
@@ -606,6 +604,8 @@
       input.min = String(rule.minimum);
       input.max = rule.maximum == null ? "" : String(rule.maximum);
       if (name === "sample_agent_batch_size") { input.value = String(rule.default); }
+      var fixed = {formal_origin_count: 35, local_batch_origin_count: 25, max_local_edits_per_batch: 2, selection_holdout_origin_count: 50};
+      if (Object.prototype.hasOwnProperty.call(fixed, name)) { input.value = String(fixed[name]); input.readOnly = true; }
     });
     state.runParameterDefaultsApplied = true;
   }
@@ -630,7 +630,7 @@
     setHelp("#strategy-help", selectedCatalogItem("strategies", "#strategy-id"), "策略模型只能在宿主注册表提供的有界策略和参数空间内提出方案。");
     setHelp("#evaluator-help", selectedCatalogItem("evaluators", "#evaluator-id"), "由系统依据数据和候选产物自动绑定。");
     setModelHelp("#policy-model-help", selectedModelCatalogItem("#policy-model-id"), "负责查找资料、制定研究计划并提出允许范围内的修改。");
-    setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和版本选择结果。");
+    setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和版本选择结果。可与策略使用同一模型，职责和会话分别执行。");
     alignDomainDatasetBinding();
     updateOptimizationScheduleBoundary();
     renderReadiness();
@@ -662,9 +662,9 @@
     try { schedule = optimizationScheduleFromControls(); } catch (_error) { scheduleReady = false; }
     var executionParametersReady = Number($("#candidates-per-generation").value) === 4
       && Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
-      && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize === 9
+      && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize === predictionCellsPerOrigin()
       && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= sampleConcurrencyMaximum;
-    var separated = $("#policy-model-id").value && $("#judge-model-id").value && $("#policy-model-id").value !== $("#judge-model-id").value;
+    var rolesSelected = Boolean($("#policy-model-id").value && $("#judge-model-id").value);
     var dshReady = (state.connection === "online" || state.usingDemo) && hasCapability("evolution.projection.read");
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");
     var selectedDatasetId = selectedDataset && itemId(selectedDataset);
@@ -698,7 +698,7 @@
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
-      { label: "入围候选 " + formatNumber(schedule && schedule.formal_origin_count_per_finalist || Number($("#formal-origin-count").value)) + " 个优化时点、每批时点数及轮末比较参数有效", ready: scheduleReady },
+      { label: "联合策略的 10／25／50 时点流程和复核预算已固定", ready: scheduleReady },
       { label: "方案数量、预测内容和并发设置有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: capacityLabel, ready: capacityReady },
@@ -710,7 +710,7 @@
       { label: "独立评审职责已在 DSH 目录登记", ready: reviewRoleCatalogReady },
       { label: "策略模型 API 已安全配置", ready: policyConnectionReady },
       { label: "独立评审模型 API 已安全配置", ready: judgeConnectionReady },
-      { label: "策略与独立评审职责已分离", ready: separated },
+      { label: "策略与评审模型已分别选择（可使用同一模型）", ready: rolesSelected },
       { label: "具备创建进化运行的授权能力", ready: hasCapability("evolution.run.create") },
       { label: "运行服务与脱敏状态读取能力可用", ready: dshReady }
     ];
@@ -722,6 +722,15 @@
     var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
     var maximum = formatNumber(capacity.max_feasible_generations);
     if (capacity.sufficient !== true && capacity.rejection_reason) { return String(capacity.rejection_reason); }
+    if (capacity.cohort_reuse_policy === "fresh_training_race_and_confirmation@1") {
+      if (capacity.sufficient !== true) {
+        return "训练数据时间窗口不足：计划 " + formatNumber(capacity.planned_generations)
+          + " 轮，按历史窗口、目标成熟和阶段隔离后最多支持 " + maximum
+          + " 轮。请减少进化轮数或选择覆盖时间更长的数据。";
+      }
+      return "数据量可满足运行（需要 " + formatNumber(capacity.required_unique_origins)
+        + " 个不同起点；各阶段与各轮使用新时点，保留时间隔离；最多 " + maximum + " 轮）";
+    }
     if (capacity.cohort_reuse_policy === "training_replay_fresh_epoch_holdouts@1") {
       if (capacity.sufficient !== true) {
         return "训练数据时间窗口不足：计划 " + formatNumber(capacity.planned_generations)
@@ -778,7 +787,7 @@
     // Only untouched defaults may follow the current data boundary. An
     // explicitly entered round count remains visible and is never clamped.
     if (state.roundsManuallyEdited || state.busy || !report || report.rejection_reason
-      || report.cohort_reuse_policy !== "training_replay_fresh_epoch_holdouts@1") { return false; }
+      || !["training_replay_fresh_epoch_holdouts@1", "fresh_training_race_and_confirmation@1"].includes(report.cohort_reuse_policy)) { return false; }
     var maximum = report.max_feasible_generations;
     var recommended = runParameterRule("rounds").default;
     var field = $("#max-generations");
@@ -808,7 +817,7 @@
     if (state.usingDemo) {
       state.cohortCapacityReport = {
         sufficient: true,
-        required_unique_origins: body.optimization_schedule.formal_origin_count_per_finalist + body.optimization_schedule.screening_origin_count + body.optimization_schedule.selection_holdout_origin_count,
+        required_unique_origins: 85 * body.planned_generations,
         planned_generations: body.planned_generations,
         available_eligible_origins: 999999,
         max_feasible_generations: body.planned_generations,

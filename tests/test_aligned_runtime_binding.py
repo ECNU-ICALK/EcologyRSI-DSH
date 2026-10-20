@@ -92,8 +92,8 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
-                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -118,7 +118,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                     run_id = created["projection"]["run_id"]
                     state = self.server.director.state(run_id)
                     metadata = state.task_manifest.metadata
-                    self.assertEqual(metadata["evolution_diversity_policy"], "executed_family_rotation@1")
+                    self.assertEqual(metadata["evolution_diversity_policy"], "joint_behavior_search@1")
                     self.assertEqual(created["projection"]["evolution_diversity"]["proposed_by_family"], {})
                     from ecologyrsi_dsh.core.model_execution_policy import (
                         RESEARCH_EXECUTION_POLICY,
@@ -179,8 +179,8 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
-                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -232,7 +232,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
         # A toy run is the other half of the rule: it keeps 12, and its frozen
         # report omits the key entirely so archived reports stay byte-identical.
         status, created = self.request("/runs", "POST", {
-            "dataset_id": "generated-toy-series@1", "optimization_protocol": OPTIMIZATION_PROTOCOL,
+            "dataset_id": "generated-toy-series@1", "optimization_protocol": "joint_plugin_epoch@2",
             "rounds": 1, "candidates_per_generation": 4, "max_candidates": 4,
             "auto_advance": 0, "idempotency_key": "alignment-freeze-toy",
         })

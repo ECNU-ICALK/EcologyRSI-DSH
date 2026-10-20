@@ -172,7 +172,7 @@ class HTTPContractTests(unittest.TestCase):
 
     def test_independent_evaluation_routes_are_separate_from_training(self) -> None:
         status, created = self.request("/api/runs", method="POST", body={
-            "dataset_id": "generated-toy-series@1", "optimization_protocol": OPTIMIZATION_PROTOCOL,
+            "dataset_id": "generated-toy-series@1", "optimization_protocol": "joint_plugin_epoch@2",
             "rounds": 1, "candidates_per_generation": 4, "max_candidates": 4,
             "auto_advance": 0, "idempotency_key": "independent-http"})
         self.assertEqual(status, 201, created)
@@ -185,10 +185,10 @@ class HTTPContractTests(unittest.TestCase):
             status, _ = self.request(path, method="POST", body=body)
             self.assertEqual(status, 400)
 
-    def test_create_defaults_to_training_epochs_and_explicit_legacy_schedule_round_trips(self) -> None:
+    def test_create_unified_epochs_and_reject_explicit_legacy_schedule(self) -> None:
         base = {
             "dataset_id": "generated-toy-series@1",
-            "optimization_protocol": OPTIMIZATION_PROTOCOL,
+            "optimization_protocol": "joint_plugin_epoch@2",
             "rounds": 1,
             "candidates_per_generation": 4,
             "max_candidates": 4,
@@ -204,7 +204,7 @@ class HTTPContractTests(unittest.TestCase):
         default_schedule = created["projection"]["configuration"][
             "optimization_schedule"
         ]
-        self.assertEqual(default_schedule["schema_version"], TRAINING_SCHEDULE_SCHEMA_VERSION)
+        self.assertEqual(default_schedule["schema_version"], "ecologyrsi-dsh.joint-plugin-epoch-schedule/2")
         self.assertEqual(
             default_schedule["local_evaluation_mode"],
             PAIRED_LOCAL_EVALUATION_MODE,
@@ -225,11 +225,8 @@ class HTTPContractTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(status, 201, created)
-        self.assertEqual(
-            created["projection"]["configuration"]["optimization_schedule"],
-            legacy_schedule,
-        )
+        self.assertEqual(status, 400, created)
+        self.assertIn("legacy schedules are replay-only", created["error"])
 
     def _seed_test_partition_run(self, *, manifest_partition: str = "validation") -> str:
         """Write a deliberately out-of-scope run directly to the local ledger."""
@@ -697,6 +694,12 @@ class HTTPContractTests(unittest.TestCase):
         )
         projection = monitor["projection"]
         self.assertEqual(projection["run_id"], run_id)
+        policies = projection["frozen_feature_policies"]
+        self.assertEqual(policies, detail["projection"]["frozen_feature_policies"])
+        self.assertEqual(policies, {key: detail["projection"]["configuration"][key] for key in (
+            "targeted_search_policy", "behavior_diagnostics_policy", "candidate_novelty_policy",
+            "candidate_executability_policy")})
+        self.assertNotIn("configuration", projection, "compact policies must not overwrite hydrated configuration")
         for required in (
             "projection_revision",
             "updated_at",

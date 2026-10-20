@@ -18,6 +18,7 @@ from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from ecologyrsi_dsh.integrations.prediction_binding import DshPredictionToolBinding
 from tests.test_dsh_sample_execution import _request, _constant_forecast_bundle, _skill_evidence
+from tests.agent_prediction_fixtures import TestActivationAuthority
 
 
 def result(context, value=23.25, *, method='direct', refs=()):
@@ -33,6 +34,7 @@ class AdmittedAgent:
         self.service, self.ledger, self.policy = service, ledger, policy
         self.requests = []
         self._request_lock = Lock()
+        self.activation_authority = TestActivationAuthority()
 
     def run_stage(self, request):
         with self._request_lock:
@@ -54,6 +56,8 @@ class AdmittedAgent:
             'idempotency_key': request['idempotency_key'], 'child_reservation_id': reservation['launch']['reservation_id'],
             'activation_lease_id': 'lease-'+str(request_number), **request['request']['identity_digests'],
         }
+        self.activation_authority.register(identity, "test-host")
+        self.service._activation_attestor = self.activation_authority
         def call(tool_id, call_id, parameters=None):
             return self.service.execute('ecology_execute_prediction_tool', {'identity': identity, 'arguments': {
                 'tool_id': tool_id, 'call_id': call_id, 'parameters': parameters or {}, 'wave_digest': context['wave_digest'],
@@ -211,7 +215,7 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         self.assertIs(caught.exception, fatal)
         self.assertEqual(publications, [])
 
-    def test_output_budget_failure_stops_without_scoring_or_repeating_tools(self):
+    def test_second_output_budget_failure_stops_without_scoring(self):
         from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
         def policy(c, call):
             call('candidate-model', 'fit')
@@ -231,9 +235,41 @@ class AgentOwnedPredictionTests(unittest.TestCase):
                 algorithm_id='registered-predictor', algorithm_version='1',
                 result_callback=publications.extend)
         self.assertEqual(publications, [])
-        self.assertEqual(len(native.requests), 1)
-        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 1)
+        self.assertEqual(len(native.requests), 2)
+        calls = ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[0].payload['wave_digest'], calls[1].payload['wave_digest'])
         self.assertFalse(ledger.events_by_kind('run-agent', 'DshStructuredResultAccepted'))
+
+    def test_output_repair_accepts_only_fresh_wave_evidence(self):
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        def policy(context, call):
+            call('candidate-model', 'fit')
+            if not context['context'].get('output_repair_contract'):
+                raise DshNativeRuntimeUnavailableError(
+                    error_code='structured_child_output_budget_exhausted', status_code=422)
+            return result(context, 21.5, method='model', refs=['fit'])
+        adapter, _, native, ledger = self.setup_agent(policy)
+        row = {**_request('sample-output-repair').to_dict(), 'observed': 21.0}
+        publications = []
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            (row,), context={'run_id': 'run-agent', 'candidate_id': 'candidate-1',
+                'dataset_digest': 'd'*64, 'partition': 'training_feedback',
+                'algorithm_id': 'registered-predictor', 'algorithm_version': '1'},
+            target_bounds={'air_temperature': {'minimum': -20.0, 'maximum': 80.0}},
+            algorithm_id='registered-predictor', algorithm_version='1',
+            policy=SampleExecutionPolicy(max_attempts=2), result_callback=publications.extend)
+        self.assertEqual(len(native.requests), 2)
+        calls = ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')
+        accepted = ledger.events_by_kind('run-agent', 'DshStructuredResultAccepted')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(accepted), 1)
+        receipt = accepted[0].payload['required_tool_receipt']
+        self.assertEqual(receipt['wave_digest'], calls[1].payload['wave_digest'])
+        self.assertEqual([c['event_id'] for c in receipt['calls']], [calls[1].event_id])
+        self.assertEqual(len(publications), 1)
+        self.assertEqual(batch.records[0]['attempts'], 2)
+        self.assertEqual(batch.records[0]['status'], 'succeeded')
 
     def setup_agent(self, policy, *, tool=None):
         ledger = EventLedger(); self.addCleanup(ledger.close)

@@ -1,6 +1,35 @@
 // Bind the model's output vocabulary to the same immutable catalog the Host
 // validates. Use only schema primitives supported by the DSH output compiler.
 import { researchExecutionPolicy } from "./research-execution-policy.js";
+import { structuredPhaseError } from "./structured-stage-errors.js";
+
+// Only the transport version is Host-owned. Keep it constrained if supplied,
+// but do not spend model output/correction attempts regenerating a constant.
+// Every scientific field remains required by the unchanged domain schema.
+export function researchOutputTransport(stage, schema) {
+  if (stage !== "generation.research-synthesis") {
+    return { schema, hostFields: {}, bind: value => value };
+  }
+  const version = schema.properties?.schema_version?.const;
+  if (typeof version !== "string" || !schema.required?.includes("schema_version")) {
+    throw new Error("research synthesis requires a fixed protocol version");
+  }
+  const wire = structuredClone(schema);
+  wire.required = wire.required.filter(name => name !== "schema_version");
+  wire.properties.schema_version.description = "Optional protocol metadata; the Host binds this exact version. Do not invent or change it.";
+  const hostFields = Object.freeze({ schema_version: version });
+  return {
+    schema: wire,
+    hostFields,
+    bind(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || (Object.hasOwn(value, "schema_version") && value.schema_version !== version)) {
+        throw structuredPhaseError("output_schema");
+      }
+      return { ...value, schema_version: version };
+    },
+  };
+}
 
 function boundText(field, maximum) {
   field.description = `Aim for at most ${maximum} characters; this is a concise writing target. ${field.description || ""}`.trim();

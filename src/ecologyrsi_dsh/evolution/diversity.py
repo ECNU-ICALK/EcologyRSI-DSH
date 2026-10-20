@@ -6,8 +6,10 @@ old manifests keep their original first-slot selection and replay semantics.
 from __future__ import annotations
 
 from collections import Counter
+from . import joint_policy
 from collections.abc import Mapping, Sequence
 import math
+from ..core.immutable import thaw_json
 from ..core.models import canonical_json, digest
 
 DIVERSITY_POLICY = "executed_family_rotation@1"
@@ -21,19 +23,25 @@ FAMILY_AXES = {
 
 def enabled(metadata: Mapping) -> bool:
     policy = metadata.get("evolution_diversity_policy")
-    if policy not in (None, DIVERSITY_POLICY):
+    if policy not in (None, DIVERSITY_POLICY, joint_policy.DIVERSITY_POLICY):
         raise ValueError("unsupported evolution_diversity_policy")
-    return policy == DIVERSITY_POLICY
+    return policy in {DIVERSITY_POLICY, joint_policy.DIVERSITY_POLICY}
 
 
 def family_for_axis(axis: str) -> str:
+    if axis == "strategy_program":
+        return "joint"
     return next((family for family, axes in FAMILY_AXES.items() if axis in axes), "unknown")
 
 
 def direction_schedule(metadata: Mapping, targets: Mapping, generation: int, count: int) -> dict:
+    if joint_policy.enabled(metadata):
+        return {"policy": joint_policy.DIVERSITY_POLICY, "required_family_by_slot": [],
+                "selection": "evaluate all four candidates and incumbent on the same frozen cohort",
+                "composition": "primary hypothesis plus bounded related cross-component edits"}
     if not enabled(metadata):
         return {}
-    families = [name for name, axes in FAMILY_AXES.items() if any(targets.get(axis) for axis in axes)]
+    families = [name for name, axes in FAMILY_AXES.items() if name != "joint" and any(targets.get(axis) for axis in axes)]
     if not families:
         raise ValueError("diversity policy has no executable mutation families")
     return {"policy": DIVERSITY_POLICY,
@@ -85,6 +93,7 @@ def summarize_behavior(records: Sequence[Mapping], scoring_rows: Sequence[Mappin
     """
     methods, tool_paths, skill_paths = Counter(), Counter(), Counter()
     vector = []
+    calculation_paths = Counter()
     for row in scoring_rows:
         prediction = row.get("agent_prediction")
         if isinstance(prediction, Mapping):
@@ -97,6 +106,9 @@ def summarize_behavior(records: Sequence[Mapping], scoring_rows: Sequence[Mappin
             if not isinstance(attempt, Mapping):
                 continue
             path = [str(tool.get("tool_id")) for tool in attempt.get("model_evidence", ()) if isinstance(tool, Mapping)]
+            for tool in attempt.get("model_evidence", ()):
+                if isinstance(tool, Mapping) and tool.get("calculation_digest") and tool.get("used_as_evidence") is True:
+                    calculation_paths[tool["calculation_digest"]] += 1
             if path:
                 tool_paths[">".join(path)] += 1
             for tool in attempt.get("skill_evidence", ()):
@@ -104,6 +116,8 @@ def summarize_behavior(records: Sequence[Mapping], scoring_rows: Sequence[Mappin
                     skill_paths[str(tool.get("behavior_signature"))] += 1
     body = {"method_counts": dict(sorted(methods.items())), "tool_path_counts": dict(sorted(tool_paths.items())),
             "skill_path_counts": dict(sorted(skill_paths.items()))}
+    if calculation_paths:
+        body["calculation_path_counts"] = dict(sorted(calculation_paths.items()))
     return {"schema_version": "ecologyrsi-dsh.observed-behavior/1", **body,
             "signature": digest(body), "prediction_vector_digest": digest(sorted(vector)),
             "scored_cells": len(scoring_rows), "trace_cells": len(records),
@@ -142,11 +156,11 @@ def exploration_archive(state, generation: int) -> dict:
         revision = state.revision(batch.scope.candidate_revision_id)
         genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)).to_dict()
         planner = next(p for p in genome["agent_program"]["candidate_execution_program"]["role_profiles"] if p["role"] == "sample-planner")
-        components = {key: planner[key] for key in ("authored_directive", "skill_program") if key in planner}
+        components = {key: planner[key] for key in ("authored_directive", "skill_program", "strategy_program") if key in planner}
         components["instruction_template_id"] = planner["instruction_template_ref"]["id"]
-        if family == "scientific":
+        if family == "scientific" or joint_policy.enabled(state.task_manifest.metadata):
             components["scientific_program"] = genome["scientific_program"]
-        if family == "execution":
+        if family == "execution" or joint_policy.enabled(state.task_manifest.metadata):
             components["workflow_overrides"] = genome["agent_program"]["candidate_execution_program"]["workflow_overrides"]
             components["instruction_parameters"] = planner["instruction_parameters"]
         identity = digest(components)
@@ -166,7 +180,10 @@ def exploration_archive(state, generation: int) -> dict:
         effect_receipt = summary.get("mutation_effect_receipt")
         observed = (isinstance(effect_receipt, Mapping)
                     and effect_receipt.get("status") in {"passed", "failed", "inconclusive", "not_exercised"}
-                    and effect_receipt.get("receipt_digest") == digest({key: value for key, value in effect_receipt.items() if key != "receipt_digest"}))
+                    # Durable trajectory metrics recursively freeze nested
+                    # receipts. Verify their original JSON, not mapping proxies.
+                    and effect_receipt.get("receipt_digest") == digest(thaw_json(
+                        {key: value for key, value in effect_receipt.items() if key != "receipt_digest"})))
         entry.update(
             score_vs_baseline=batch.score,
             effect_evidence={"executed_revision": True,

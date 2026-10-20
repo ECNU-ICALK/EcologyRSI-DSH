@@ -3,11 +3,17 @@ import test from "node:test";
 
 import { SidecarError } from "../lib/sidecar/client.js";
 import { RESEARCH_EXECUTION_POLICY } from "../lib/runtime/research-execution-policy.js";
+import { researchOutputTransport } from "../lib/runtime/research-contract.js";
+import { sampleOutputTransport } from "../lib/runtime/sample-output-transport.js";
+import { expandSampleContext } from "../lib/runtime/display-projection.js";
+import { sampleContextFixture } from "./fixtures/display_projection.mjs";
+import { readFile } from "node:fs/promises";
 import {
   NativeStageRunner,
   STAGES,
   dshCompatibleSchema,
   jsonDigest,
+  prepareStageOutputSchema,
   skillInvocationEvidence,
 } from "../lib/runtime/stage-runner.js";
 
@@ -302,6 +308,7 @@ function directSampleHarness({
   persistenceError = null,
   timing = {},
   startDelayMs = 0,
+  reportedOutputTokens = null,
 }) {
   const starts = [];
   const reservations = [];
@@ -316,7 +323,13 @@ function directSampleHarness({
     binding: { model: "pjlab/deepseek-v4-flash-0731" },
   };
   const runner = new NativeStageRunner({
+    on: () => () => {},
     sessions: { get: (id) => sessions.get(id) },
+    ...(reportedOutputTokens === null ? {} : {
+      sessionProjections: { snapshot: () => ({ values: {
+        tokenUsage: { outputTokens: reportedOutputTokens },
+      } }) },
+    }),
     subagents: {
       start: async (_provider, request) => {
         const attempt = starts.length + 1;
@@ -436,6 +449,11 @@ test("candidate local edit must avoid same-revision rejected bundles", () => {
   assert.match(localEdit.instruction, /recent_edit_history/i);
   assert.match(localEdit.instruction, /same candidate revision/i);
   assert.match(localEdit.instruction, /no distinct registered local change.*return keep/i);
+  assert.match(localEdit.instruction, /revisit.justification.*within 400 characters/i);
+  assert.match(localEdit.instruction, /host_validation_feedback.*fresh complete response/i);
+  assert.match(localEdit.instruction, /output_budget_exhausted_before_structured_output/i);
+  assert.match(localEdit.instruction, /shortest complete local-edit object.*after loading the required Skill/i);
+  assert.match(localEdit.instruction, /same operation, evidence, and scientific constraints/i);
 });
 
 test("pre-score sample critic has a bounded schema-recovery protocol", () => {
@@ -1006,9 +1024,9 @@ test("native stage runner rejects invalid or missing sample planner max_tokens l
       },
     },
   });
-  // sample.plan carries the raised nine-cell ceiling, so 16385 is the first
+  // sample.plan carries the raised nine-cell ceiling, so 32769 is the first
   // rejected integer here while 8193 is a valid planner budget.
-  for (const maxTokens of [511, 16385, 2048.5, "2048"]) {
+  for (const maxTokens of [511, 32769, 2048.5, "2048"]) {
     const binding = samplePlanBinding();
     binding.request.max_tokens = maxTokens;
     await assert.rejects(
@@ -1090,6 +1108,64 @@ test("synthesis budget drift is rejected before reservation or model launch", as
   await assert.rejects(harness.runner.run(wrongStage), /max_tokens is invalid/);
   assert.equal(harness.reservationRequests.length, 0);
   assert.equal(harness.starts.length, 0);
+});
+
+test("synthesis binds only the fixed protocol version without changing scientific output or budgets", async () => {
+  const binding = boundedSynthesisBinding();
+  const structured = { summary: "Use frozen evidence.", evidence: [{ evidence_ref: "paper:one", finding: "Evidence", relevance: "Relevant" }], candidate_directions: [{ direction_id: "one", hypothesis: "Test one axis" }] };
+  const before = structuredClone(structured);
+  const harness = directSampleHarness({ stage: binding.stage,
+    results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => skillFirstEvents("autonomous-ecology-research"),
+  });
+  const result = await harness.runner.run(binding);
+  const expected = { ...structured, schema_version: "ecologyrsi-dsh.research-synthesis/1" };
+  assert.deepEqual(structured, before);
+  assert.deepEqual(result.structured, expected);
+  assert.deepEqual(harness.persisted[0].structured, expected);
+  assert.equal(result.result_digest, jsonDigest(expected));
+  assert.equal(harness.persisted[0].result_digest, result.result_digest);
+  assert.equal(harness.starts.length, 1);
+  assert.deepEqual(harness.starts[0].request.agentOptions, { maxTokens: 16384 });
+  const schema = harness.starts[0].request.outputSchema;
+  assert.deepEqual(schema.required, ["summary", "evidence", "candidate_directions"]);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.schema_version.const, expected.schema_version);
+  assert.ok(schema.properties.candidate_directions.items.required.includes("hypothesis"));
+  const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+  assert.deepEqual(prompt.output_contract.host_bound_fields, { schema_version: expected.schema_version });
+  assert.deepEqual(prompt.output_contract.fixed_fields, {});
+  assert.match(prompt.instruction, /more than two output attempts/);
+});
+
+test("synthesis transport cannot replace a supplied version or fabricate scientific fields", async () => {
+  const binding = boundedSynthesisBinding();
+  const harness = directSampleHarness({ stage: binding.stage,
+    results: [{ stopReason: "completed", structured: { schema_version: "wrong" } }],
+    sessionEvents: () => skillFirstEvents("autonomous-ecology-research"),
+  });
+  const schema = await harness.runner.schema(STAGES[binding.stage].file);
+  const original = structuredClone(schema);
+  const transport = researchOutputTransport(binding.stage, schema);
+  assert.deepEqual(schema, original);
+  assert.deepEqual(transport.bind({}), { schema_version: schema.properties.schema_version.const });
+  assert.deepEqual(researchOutputTransport("sample.plan", schema).bind({}), {});
+  await assert.rejects(harness.runner.run(binding), e => e.code === "structured_child_output_schema_invalid");
+  assert.equal(harness.persisted.length, 0);
+  assert.equal(harness.starts.length, 1);
+});
+
+test("synthesis refuses a third submission with the exact attempt-limit error and no retry or persistence", async () => {
+  const binding = boundedSynthesisBinding();
+  const events = twiceCorrectedReflectionEvents();
+  events.find(e => e.type === "tool/call" && e.data.name === "skill").data.arguments = JSON.stringify({ name: "autonomous-ecology-research" });
+  const harness = directSampleHarness({ stage: binding.stage, maxAttempts: 4,
+    results: [{ stopReason: "completed", structured: { summary: "Must not be accepted" } }], sessionEvents: () => events });
+  await assert.rejects(harness.runner.run(binding), e => e.code === "structured_output_attempt_limit_exceeded");
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 0);
+  assert.equal(harness.failures[0].runtime_failure.retryable, false);
+  assert.equal(harness.failures[0].runtime_failure.failure_domain, "execution_contract");
 });
 
 test("16k synthesis exhaustion is terminal without repeating the frozen request", async () => {
@@ -1452,6 +1528,19 @@ test("output budget exhaustion never repeats the identical capped model call", a
   }
 });
 
+test("planner transmits the frozen old or new response ceiling without extra retries", async () => {
+  for (const maxTokens of [16384, 32768]) {
+    const binding = samplePlanBinding();
+    binding.request.max_tokens = maxTokens;
+    const harness = directSampleHarness({stage: "sample.plan", results: [{stopReason: "max-tokens"}],
+      sessionEvents: () => rc6ConsumedEvents("origin-vector-forecasting", {terminalKind: "max-tokens"})});
+    await assert.rejects(harness.runner.run(binding), e => e.code === "structured_child_output_budget_exhausted");
+    assert.equal(harness.starts.length, 1);
+    assert.equal(harness.starts[0].request.agentOptions.maxTokens, maxTokens);
+    assert.equal(harness.persisted.length, 0);
+  }
+});
+
 test("sample reflection stops after two missing structured outputs without persistence", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
@@ -1573,6 +1662,31 @@ test("sample planner retries a zero-turn child after provider backpressure", asy
     options: { reduceConcurrency: true },
   }]);
   assert.equal(harness.persisted.length, 1);
+});
+
+test("account quota exhaustion stops sample planning without retry or scored output", async () => {
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [{ stopReason: "error" }],
+    sessionEvents: () => rc6ConsumedEvents("origin-vector-forecasting", {
+      prediction: true, terminalKind: "error",
+      terminalError: { code: "QUOTA", message: '429: {"code":"quota_exceeded","secret":"private"}' },
+    }),
+  });
+  await assert.rejects(harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  ), { code: "model_provider_quota_exhausted" });
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.reservations.length, 1);
+  assert.equal(harness.persisted.length, 0);
+  assert.equal(harness.failures.length, 1);
+  assert.deepEqual(harness.failures[0].runtime_failure, {
+    schema_version: "ecology-runtime-failure/1", error_code: "model_provider_quota_exhausted",
+    failure_domain: "provider", retryable: false, provider_status: 429,
+    retry_after_ms: null, affected_scope: "model_route",
+  });
+  assert.doesNotMatch(JSON.stringify(harness.failures), /private|secret/);
+  assert.equal(harness.penalties.length, 0);
 });
 
 test("sample planner honors provider retry_after after a consumed RATE_LIMIT turn", async () => {
@@ -2004,7 +2118,8 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     assert.deepEqual(request.parent, { id: "sample.plan-role-host" });
     assert.deepEqual(request.agentOptions, { maxTokens: 2048 });
     assert.equal("maxTokens" in request, false);
-    assert.deepEqual(request.outputSchema.properties.wave_digest, { type: "string", const: samplePlanContext().wave_digest });
+    assert.equal(request.outputSchema.properties.wave_digest.const, samplePlanContext().wave_digest);
+    assert.equal(request.outputSchema.properties.wave_digest.type, 'string');
     assert.deepEqual(
       request.outputSchema.properties.decisions.items.properties.sample_id,
       { type: "string", enum: samplePlanContext().samples.map(item => item.sample_id) },
@@ -2016,7 +2131,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     );
     assert.match(
       plannerPrompt.instruction,
-      /call ecology_execute_prediction_tool zero to two times/i,
+      /prediction_contract.max_prediction_tool_calls/i,
     );
     assert.match(
       plannerPrompt.instruction,
@@ -2220,7 +2335,7 @@ test("persistence preserves only the Sidecar safe public diagnostic", async () =
 });
 
 test("sample persistence retry reuses one child and one frozen sidecar envelope", async () => {
-  const waveDigest = "a".repeat(64);
+  const waveDigest = samplePlanContext().wave_digest;
   const structured = {
     schema_version: "ecology-sample-predictions@2",
     wave_digest: waveDigest,
@@ -2346,6 +2461,55 @@ function correctedOutputEvents() {
   return events;
 }
 
+test('planner Host binds only frozen metadata before acceptance and digesting', async () => {
+  const decisions = [{ sample_id: 'x', predicted: 21, confidence: 0.8,
+    method: 'direct', reason_code: 'agent_direct', evidence_call_ids: [] }];
+  const harness = directSampleHarness({ stage: 'sample.plan', maxAttempts: 1,
+    results: [{ stopReason: 'completed', structured: { decisions } }],
+    sessionEvents: () => skillFirstEvents('origin-vector-forecasting', { prediction: true }) });
+  const result = await harness.runner.run(directSampleBinding('sample.plan', samplePlanContext()));
+  const bound = { decisions, schema_version: 'ecology-sample-predictions@2', wave_digest: 'f'.repeat(64) };
+  assert.deepEqual(result.structured, bound);
+  assert.deepEqual(harness.persisted[0].structured, bound);
+  assert.equal(harness.persisted[0].result_digest, jsonDigest(bound));
+  const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+  assert.deepEqual(prompt.output_contract.required_fields, ['decisions']);
+  assert.deepEqual(prompt.output_contract.host_bound_fields,
+    { schema_version: bound.schema_version, wave_digest: bound.wave_digest });
+  assert.equal(harness.starts.length, 1);
+});
+
+test('real failed planner first submission binds without changing scientific decisions', async () => {
+  const fixture = JSON.parse(await readFile(new URL('../../../tests/fixtures/native-planner-output-20261006.json', import.meta.url)));
+  const rawSchema = JSON.parse(await readFile(new URL('../schemas/sample-decisions.schema.json', import.meta.url)));
+  const schema = prepareStageOutputSchema('sample.plan', rawSchema, {
+    wave_digest: fixture.wave_digest, samples: fixture.sample_ids.map(sample_id => ({ sample_id })),
+  });
+  const original = structuredClone(schema);
+  const transport = sampleOutputTransport('sample.plan', schema);
+  assert.deepEqual(schema, original);
+  assert.deepEqual(transport.schema.required, ['decisions']);
+  assert.deepEqual(transport.schema.properties.decisions, schema.properties.decisions);
+  assert.deepEqual(transport.bind(fixture.submissions[0]), fixture.submissions[2]);
+  assert.deepEqual(transport.bind(fixture.submissions[1]).decisions, fixture.submissions[1].decisions);
+  assert.equal(transport.bind(fixture.submissions[1]).decisions.length, 7); // No synthetic coverage.
+  for (const field of ['wave_digest', 'schema_version']) {
+    assert.throws(() => transport.bind({ ...fixture.submissions[0], [field]: 'wrong' }),
+      e => e.code === 'structured_child_output_schema_invalid');
+  }
+  assert.equal(Object.hasOwn(transport.bind({}), 'decisions'), false);
+  assert.deepEqual(sampleOutputTransport('sample.critic', schema).schema, schema);
+});
+
+test('planner supplied wrong metadata is rejected before persistence', async () => {
+  const harness = directSampleHarness({ stage: 'sample.plan', maxAttempts: 1,
+    results: [{ stopReason: 'completed', structured: { wave_digest: 'a'.repeat(64), decisions: [] } }] });
+  await assert.rejects(harness.runner.run(directSampleBinding('sample.plan', samplePlanContext())),
+    e => e.code === 'structured_child_output_schema_invalid');
+  assert.equal(harness.persisted.length, 0);
+  assert.equal(harness.starts.length, 1);
+});
+
 test('one rejected output followed by a captured correction persists without repeating the Agent', async () => {
   const structured = { schema_version: 'ecology-sample-predictions@2', wave_digest: 'f'.repeat(64), decisions: [] };
   const harness = directSampleHarness({ stage: 'sample.plan', maxAttempts: 1,
@@ -2418,6 +2582,22 @@ test("SERVER 503 is recoverable and its bounded contract reaches failure account
   assert.equal(harness.failures[0].runtime_failure.failure_domain, "provider");
   assert.doesNotMatch(JSON.stringify(harness.failures), /private provider/);
   assert.equal(harness.persisted.length, 0);
+});
+
+test("completed sample output is not rejected by an unconfigured cumulative Token quota", async () => {
+  const structured = {
+    schema_version: "ecology-sample-predictions@2", wave_digest: "f".repeat(64), decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan", reportedOutputTokens: 35256,
+    results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => skillFirstEvents("origin-vector-forecasting", { prediction: true }),
+  });
+  const result = await harness.runner.run(directSampleBinding("sample.plan", samplePlanContext()));
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 0);
 });
 
 test("sample step exhaustion stops before structured acceptance without identical retry", async () => {
@@ -2561,4 +2741,28 @@ test('planner retry shares the first attempt deadline instead of receiving anoth
   assert.equal(harness.starts.length, 2);
   assert.deepEqual(harness.reservationRequests.map(r => r.timeout_ms), [100, 100]);
   assert.equal(harness.persisted.length, 0);
+});
+
+test("planner compresses only its model view while binding the complete original context and scientific output", async () => {
+  const context = sampleContextFixture(), original = structuredClone(context);
+  const structured = { schema_version: "ecology-sample-predictions@2", wave_digest: context.wave_digest,
+    decisions: context.samples.map((sample, index) => ({ sample_id: sample.sample_id, predicted: 10 + index,
+      confidence: 0.8, method: "model", reason_code: "model_evidence_consistent", evidence_call_ids: ["candidate-evidence"] })) };
+  const binding = directSampleBinding("sample.plan", context);
+  const sourceDigest = binding.request.context_digest, sourceCanonical = binding.request.context_canonical_json;
+  const harness = directSampleHarness({ stage: "sample.plan", results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => skillFirstEvents("origin-vector-forecasting", { prediction: true }) });
+  const result = await harness.runner.run(binding);
+  const view = JSON.parse(harness.starts[0].request.prompt[0].text).context;
+  assert.ok(view._display_projection);
+  assert.deepEqual(expandSampleContext(view), original);
+  assert.deepEqual(binding.request.context, original);
+  assert.equal(binding.request.context_digest, sourceDigest);
+  assert.equal(binding.request.context_canonical_json, sourceCanonical);
+  assert.equal(harness.reservationRequests[0].item_digest, sourceDigest);
+  assert.deepEqual(harness.starts[0].request.outputSchema.properties.decisions.items.properties.sample_id.enum,
+    original.samples.map(sample => sample.sample_id));
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(harness.persisted[0].structured, structured);
+  assert.equal(harness.persisted[0].result_digest, jsonDigest(structured));
 });

@@ -197,6 +197,29 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         self.assertEqual(old.decision.value, "challenger_promoted")
         validate_formal_batch_comparison(old, champion, challenger, **local_challenger_policy(GUARD_METADATA))
 
+    def test_durable_local_evidence_preserves_real_dataset_contract_and_gates(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                champion = with_dataset_task(evaluation(FormalBatchArm.CHAMPION))
+                challenger = with_dataset_task(evaluation(
+                    FormalBatchArm.CHALLENGER, skill=.2, failed=failed))
+                originals = (champion, challenger)
+                durable = tuple(replace(item, metrics=_durable_batch_metrics(item.metrics))
+                                for item in originals)
+                self.assertEqual(paired_scoring_evidence_complete(*durable), not failed)
+                self.assertEqual(paired_scoring_evidence_complete(*durable),
+                                 paired_scoring_evidence_complete(*originals))
+                for before, after in zip(originals, durable):
+                    self.assertEqual(after.metrics["dataset_task"], before.metrics["dataset_task"])
+                    self.assertEqual(after.metrics["promotion_block_evidence"],
+                                     before.metrics["promotion_block_evidence"])
+                expected = local_comparison(*originals, marked=True)
+                actual = local_comparison(*durable, marked=True)
+                self.assertEqual(actual.decision, expected.decision)
+                self.assertEqual(actual.reason, expected.reason)
+                validate_formal_batch_comparison(actual, *durable,
+                                                **local_challenger_policy(GUARD_METADATA))
+
     def test_unmarked_guard_local_history_replays_original_rule_and_bytes(self):
         champion, challenger = evaluation(FormalBatchArm.CHAMPION, failed=True), evaluation(FormalBatchArm.CHALLENGER)
         old = local_comparison(champion, challenger, marked=False)

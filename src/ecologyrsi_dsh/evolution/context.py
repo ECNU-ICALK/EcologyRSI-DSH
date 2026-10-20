@@ -9,7 +9,7 @@ from typing import Any
 
 from ..core.models import Run, digest
 from ..knowledge.models import validate_knowledge_context
-from ..knowledge.research_iteration import ResearchIteration
+from ..knowledge.research_iteration import ResearchIteration, project_exploration_archive
 
 _BLOCKED_FIELDS = frozenset(
     {
@@ -74,6 +74,12 @@ _PARAMETER_SEMANTICS: dict[str, dict[str, str]] = {
             "bias_scale, and learned_bias is added to each prediction. Zero disables "
             "the learned bias correction."
         ),
+    },
+    "greenhouse_baseline_aligned_cellwise_ridge": {
+        "history_steps": "Prior hourly feature steps; shared across cells.",
+        "ridge_alpha": "L2 regularization fitted using training_fit only.",
+        **{f"{t}_{h}h_residual_scale": f"Residual correction for {t} at {h}h only; zero selects the training-fit-selected persistence or seasonal baseline."
+           for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)},
     },
     "greenhouse_baseline_aligned_ridge": {
         "history_steps": "Number of prior hourly feature steps supplied to the causal ridge model.",
@@ -385,6 +391,30 @@ def safe_aggregate_feedback(
 
     if value is None:
         return None
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be an object or null")
+    # Only the two known feedback envelopes can carry this independently
+    # bounded archive: cross-generation experience/plan, or ResearchIteration.
+    # Do not reset depth for an arbitrary nested field with the same name.
+    archives = {}
+    value = dict(value)
+    if "exploration_archive" in value:
+        archives["root"] = value.pop("exploration_archive")
+    if isinstance(value.get("plan"), Mapping) and "exploration_archive" in value["plan"]:
+        value["plan"] = dict(value["plan"])
+        archives["plan"] = value["plan"].pop("exploration_archive")
+    # Candidate outcomes are independently bounded feedback records. Their
+    # reflection/list envelopes must not consume the Skill program's depth
+    # allowance. Only split this top-level envelope: nested payloads still go
+    # through the ordinary depth, size and sensitive-field checks.
+    outcomes = None
+    if "canonical_candidate_outcomes" in value:
+        value = dict(value)
+        outcomes = value.pop("canonical_candidate_outcomes")
+        if not isinstance(outcomes, (list, tuple)) or len(outcomes) > 8:
+            raise ValueError(f"{name}.canonical_candidate_outcomes must contain at most 8 objects")
+        if any(not isinstance(item, Mapping) for item in outcomes):
+            raise TypeError(f"{name}.canonical_candidate_outcomes must contain objects")
     # The supplied mapping is the envelope, not one level of user-controlled
     # nesting.  Starting below zero keeps the effective depth budget aligned
     # with ResearchIteration's validated plan contract when that plan is
@@ -392,7 +422,18 @@ def safe_aggregate_feedback(
     result = _aggregate_value(value, name, depth=-1)
     if not isinstance(result, Mapping):  # pragma: no cover - input contract above
         raise TypeError(f"{name} must be an object or null")
-    return dict(result)
+    result = dict(result)
+    if outcomes is not None:
+        result["canonical_candidate_outcomes"] = [
+            _aggregate_value(item, f"{name}.canonical_candidate_outcomes[{index}]", depth=-1)
+            for index, item in enumerate(outcomes)
+        ]
+    for envelope, archive in archives.items():
+        target = result if envelope == "root" else result["plan"]
+        target["exploration_archive"] = project_exploration_archive(
+            archive, name=f"{name}.{envelope}.exploration_archive", project=_aggregate_value,
+        )
+    return result
 
 
 def analysis_focus_parameter(

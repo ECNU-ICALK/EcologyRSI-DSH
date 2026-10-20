@@ -67,6 +67,27 @@ class ModelPreflightAuditTests(unittest.TestCase):
         for projection in (_state_payload(state)["projection"], _monitor_payload(state)["projection"]):
             self.assertEqual(projection["model_contract_preflight"], evidence)
 
+    def test_same_model_keeps_distinct_role_bindings_and_preflight_evidence(self):
+        body = self.body(start=True)
+        body["strategy_model_id"] = body["review_model_id"] = "pjlab/deepseek-v4.1-flash-1017"
+        with patch.object(handler_module, "require_model_preflight", side_effect=receipts_for):
+            status, payload = self._post(body)
+        self.assertEqual(status, 201, payload)
+        state = self.server.director.state(body["run_id"])
+        metadata = state.task_manifest.metadata
+        self.assertEqual(metadata["policy_model_id"], metadata["judge_model_id"])
+        self.assertNotEqual(metadata["policy_model_digest"], metadata["judge_model_digest"])
+        evidence = model_preflight_projection(state)
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual(len(evidence["roles"]), 4)
+        self.assertTrue(all(role["model_id"] == body["strategy_model_id"]
+                            for role in evidence["roles"]))
+        identities = required_canary_identities(metadata)
+        self.assertEqual(len({identity["preset_id"] for identity in identities}), 4)
+        audit = next(event for event in state.events if event.kind == AUDIT_EVENT)
+        self.assertEqual(len({entry["receipt"]["identity_digest"]
+                              for entry in audit.payload["receipts"]}), 4)
+
     def test_historical_audit_replays_only_its_original_two_role_evidence(self):
         from ecologyrsi_dsh.core.model_preflight import LEGACY_AUDIT_SCHEMA
         _body, state = self.create()
@@ -79,6 +100,76 @@ class ModelPreflightAuditTests(unittest.TestCase):
         validate_preflight_audit(audit, task, state.run.run_id,
             recorded_at=audit["checked_at"], created_at=state.run.created_at)
         with self.assertRaises(ValueError):
+            validate_preflight_audit(audit, state.task_manifest, state.run.run_id,
+                recorded_at=audit["checked_at"], created_at=state.run.created_at)
+
+    def test_historical_planner_audit_uses_frozen_preset_without_changing_live_gate(self):
+        from ecologyrsi_dsh.integrations import model_canary
+        _body, state = self.create()
+        task = replace(state.task_manifest, metadata={**state.task_manifest.metadata,
+            "dsh_preset_ids": [p.replace("ecology-sample-planner-v14", "ecology-sample-planner-v12")
+                               for p in state.task_manifest.metadata["dsh_preset_ids"]]})
+        # Produce the audit exactly as the previous release did, then replay
+        # under the current role inventory. No receipt is rewritten at replay.
+        previous_roles = tuple(tuple("ecology-sample-planner-v12" if v == "ecology-sample-planner-v14" else v
+                                     for v in row) for row in model_canary._ROLES)
+        with patch.object(model_canary, "_ROLES", previous_roles):
+            receipts = receipts_for(task.metadata)
+            audit = build_preflight_audit(task, state.run.run_id, receipts)
+        before = deepcopy(audit)
+        validate_preflight_audit(audit, task, state.run.run_id,
+            recorded_at=audit["checked_at"], created_at=state.run.created_at)
+        self.assertEqual(audit, before)
+        self.assertEqual(required_canary_identities(task.metadata)[-1]["preset_id"], "ecology-sample-planner-v14")
+        with self.assertRaises(ValueError):
+            canary_request(receipts[-1]["identity"])
+        with self.assertRaises(ValueError):
+            build_preflight_audit(task, state.run.run_id, receipts)
+        for preset_ids in (
+            [p.replace("planner-v12", "planner-v999") for p in task.metadata["dsh_preset_ids"]],
+            [*task.metadata["dsh_preset_ids"], "ecology-sample-planner-v14"],
+            [p for p in task.metadata["dsh_preset_ids"] if "sample-planner" not in p],
+        ):
+            with self.subTest(preset_ids=preset_ids), self.assertRaises(ValueError):
+                changed = replace(task, metadata={**task.metadata, "dsh_preset_ids": preset_ids})
+                validate_preflight_audit(audit, changed, state.run.run_id,
+                    recorded_at=audit["checked_at"], created_at=state.run.created_at)
+
+    def test_pre_joint_researcher_and_planner_audits_remain_readable_only(self):
+        from ecologyrsi_dsh.integrations import model_canary
+        _body, state = self.create()
+        for researcher in ('ecology-researcher-v15', 'ecology-researcher-v16'):
+            for planner in ('ecology-sample-planner-v12', 'ecology-sample-planner-v13'):
+                with self.subTest(researcher=researcher, planner=planner):
+                    replacements={'ecology-researcher-v17': researcher,
+                                  'ecology-sample-planner-v14': planner}
+                    task=replace(state.task_manifest, metadata={**state.task_manifest.metadata,
+                        'dsh_preset_ids': [replacements.get(p,p)
+                                          for p in state.task_manifest.metadata['dsh_preset_ids']]})
+                    previous_roles=tuple(tuple(replacements.get(v,v) for v in row)
+                                         for row in model_canary._ROLES)
+                    with patch.object(model_canary,'_ROLES',previous_roles):
+                        receipts=receipts_for(task.metadata)
+                        audit=build_preflight_audit(task,state.run.run_id,receipts)
+                    before=deepcopy(audit)
+                    validate_preflight_audit(audit,task,state.run.run_id,
+                        recorded_at=audit['checked_at'],created_at=state.run.created_at)
+                    self.assertEqual(audit,before)
+                    for index in (0,-1):
+                        with self.assertRaises(ValueError):canary_request(receipts[index]['identity'])
+                    with self.assertRaises(ValueError):build_preflight_audit(task,state.run.run_id,receipts)
+
+    def test_historical_audit_rejects_rehashed_receipt_with_unfrozen_preset(self):
+        from ecologyrsi_dsh.core.immutable import thaw_json
+        from ecologyrsi_dsh.core.models import digest
+        _body, state = self.create()
+        audit = thaw_json(next(event.payload for event in state.events if event.kind == AUDIT_EVENT))
+        entry = audit["receipts"][-1]
+        entry["receipt"]["identity"]["preset_id"] = "ecology-sample-planner-v12"
+        entry["receipt"]["identity_digest"] = digest(entry["receipt"]["identity"])
+        entry["receipt_digest"] = digest(entry["receipt"])
+        audit["audit_digest"] = digest({key: value for key, value in audit.items() if key != "audit_digest"})
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
             validate_preflight_audit(audit, state.task_manifest, state.run.run_id,
                 recorded_at=audit["checked_at"], created_at=state.run.created_at)
 

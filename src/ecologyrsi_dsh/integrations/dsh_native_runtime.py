@@ -138,6 +138,21 @@ class DshNativeAgentRuntimeClient:
         self.stage_timeout = float(stage_timeout)
         self.max_response_bytes = int(max_response_bytes)
 
+    def attest_child_activation(self, identity: Mapping[str, Any], *, parent_session_id: str,
+                                timeout: float) -> bool:
+        """Read one actual native activation; never create or refresh a lease."""
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("activation attestation requires a positive remaining timeout")
+        payload = self._request("POST", "/api/ecology-agent-runtime/v1/child-activations/attest",
+            body={"identity": dict(identity), "parent_session_id": parent_session_id},
+            timeout=min(self.timeout, timeout))
+        self._exact_keys(payload, frozenset({"schema_version", "valid"}), "activation attestation")
+        if (payload.get("schema_version") != "ecologyrsi-dsh.child-activation-attestation/1"
+            or type(payload.get("valid")) is not bool):
+            raise DshNativeRuntimeUnavailableError("Invalid native activation attestation.",
+                error_code="dsh_native_runtime_contract_error")
+        return payload["valid"]
+
     def capabilities(self, *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         payload = self._request("GET", "/api/ecology-agent-runtime/v1/capabilities", cancelled=cancelled)
         self._exact_keys(payload, _CAPABILITY_KEYS, "capabilities")

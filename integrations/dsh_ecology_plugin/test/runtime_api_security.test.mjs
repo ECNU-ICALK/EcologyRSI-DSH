@@ -192,6 +192,20 @@ test("trusted provider failures cross HTTP with status and bounded recovery meta
   }
 });
 
+test("quota exhaustion crosses HTTP as a non-retryable provider 429", async () => {
+  const body = { run_id: "run:1", run_state_revision: 2, stage_attempt: 1,
+    ledger_expected_revision: 3, idempotency_key: "idem:1" };
+  const res = new Response();
+  await route({ async startRun() {
+    throw structuredPhaseError("provider_quota", new Error("private credential"));
+  } }).handler(request("/api/ecology-agent-runtime/v1/runs/start", { body }), res);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.json().error_code, "model_provider_quota_exhausted");
+  assert.equal(res.json().failure_domain, "provider");
+  assert.equal(res.json().retryable, false);
+  assert.doesNotMatch(JSON.stringify(res.json()), /private|credential/);
+});
+
 test("model canary route reuses loopback browser and bearer boundaries", async () => {
   let called = 0;
   const controller = { async runCanary(body) { called += 1; return { passed: true, scope: "tool_and_schema_transport_only", identity: body.identity }; } };
@@ -209,4 +223,17 @@ test("canary API failures never echo arbitrary runtime diagnostics",async()=>{
     .handler(request("/api/ecology-agent-runtime/v1/canaries"),res);
   assert.equal(res.statusCode,422);assert.equal(res.json().error_code,"model_canary_failed");
   assert.doesNotMatch(JSON.stringify(res.json()),/secret/);
+});
+
+test("activation attestation uses authenticated bounded read-only route without mutations", async () => {
+  const calls=[],endpoint="/api/ecology-agent-runtime/v1/child-activations/attest";
+  const body={identity:{session_id:"synthetic-child"},parent_session_id:"synthetic-parent"};
+  const handler=route({attestChildActivation(input){calls.push(input);return{schema_version:"ecologyrsi-dsh.child-activation-attestation/1",valid:false};},startRun(){throw Error("must never mutate");}},16384);
+  for(const options of [{token:"wrong"},{address:"192.0.2.1"},{headers:{origin:"https://example.invalid"}}]){
+    const res=new Response();await handler.handler(request(endpoint,{...options,body}),res);assert.ok([401,403].includes(res.statusCode));assert.equal(calls.length,0);
+  }
+  for(const bad of [{...body,extra:true},{identity:[]},null,[],{...body,parent_session_id:""}]){
+    const res=new Response();await handler.handler(request(endpoint,{body:bad}),res);assert.equal(res.statusCode,400);assert.equal(calls.length,0);
+  }
+  const res=new Response();await handler.handler(request(endpoint,{body}),res);assert.equal(res.statusCode,200);assert.equal(res.json().valid,false);assert.deepEqual(calls,[body]);
 });

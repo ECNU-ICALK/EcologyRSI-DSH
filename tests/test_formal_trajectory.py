@@ -62,6 +62,7 @@ from ecologyrsi_dsh.evolution.local_edits import (
     LocalEditResult,
 )
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evolution.effect_contracts import hard_effect_failure
 
 
 class _NoopScopedCallbacks:
@@ -603,6 +604,74 @@ class FormalTrajectoryTests(unittest.TestCase):
         self.assertEqual(proposal.operations, ())
         state.candidate_identity_binding.assert_not_called()
 
+    def test_large_effect_receipt_is_preserved_for_gates_but_summarized_for_editor(self) -> None:
+        for semantics, status in (("soft", "inconclusive"), ("hard", "failed")):
+            with self.subTest(semantics=semantics, status=status):
+                checks = [
+                    {
+                        "predicate_id": predicate,
+                        "semantics": semantics,
+                        "status": status,
+                        "eligible": 225,
+                        "matched": 0,
+                        "evidence_refs": [
+                            f"sample:{index}:evidence:{digest({'cell': index})}"
+                            for index in range(225)
+                        ],
+                    }
+                    for predicate in ("guidance_behavior_changed", "skill_triggered")
+                ]
+                body = {
+                    "schema_version": "ecologyrsi-dsh.edit-effect-receipt/1",
+                    "contract_id": "contract:child",
+                    "scope_digest": "a" * 64,
+                    "child_genome_digest": "b" * 64,
+                    "status": status,
+                    "qualification": "behavior_only",
+                    "checks": checks,
+                }
+                receipt = {**body, "receipt_digest": digest(body)}
+                metrics = {
+                    "objective_score": 0.25,
+                    "sample_execution": {
+                        "coverage": 1.0,
+                        "mutation_effect_receipt": receipt,
+                    },
+                    "targets": [{"target": "air_temperature", "horizons": [
+                        {"hours": 1, "skill_score": 0.1}
+                    ]}],
+                    "sample_execution_trace_archive": encode_sample_execution_trace([
+                        {"sample_id": "sample:1", "status": "succeeded"}
+                    ]),
+                }
+                original = json.dumps(metrics, sort_keys=True)
+                self.assertGreater(len(json.dumps(receipt).encode()), 16 * 1024)
+
+                editor = _local_edit_evidence_metrics(metrics)
+                durable = _durable_batch_metrics(metrics)
+
+                self.assertLess(len(json.dumps(editor).encode()), 16 * 1024)
+                self.assertNotIn("mutation_effect_receipt", editor["sample_execution"])
+                summary = editor["sample_execution"]["mutation_effect_summary"]
+                self.assertEqual(summary["source_receipt_digest"], receipt["receipt_digest"])
+                self.assertEqual(summary["status"], status)
+                for check in summary["checks"]:
+                    self.assertEqual(check["semantics"], semantics)
+                    self.assertEqual(check["status"], status)
+                    self.assertEqual(check["eligible"], 225)
+                    self.assertEqual(check["matched"], 0)
+                    self.assertEqual(check["evidence_ref_count"], 225)
+                    self.assertEqual(check["evidence_refs_digest"], digest(checks[0]["evidence_refs"]))
+                    self.assertNotIn("evidence_refs", check)
+                self.assertEqual(durable["sample_execution"]["mutation_effect_receipt"], receipt)
+                self.assertNotIn("mutation_effect_summary", durable["sample_execution"])
+                self.assertEqual(durable["targets"], metrics["targets"])
+                self.assertEqual(durable["sample_execution_trace_archive"], metrics["sample_execution_trace_archive"])
+                self.assertEqual(hard_effect_failure(durable), hard_effect_failure(metrics))
+                self.assertEqual(hard_effect_failure(durable),
+                                 "hard_mutation_effect_failed" if semantics == "hard" else None)
+                self.assertEqual(json.dumps(metrics, sort_keys=True), original)
+
     def test_local_edit_evidence_is_deeply_json_safe_and_aggregate_only(self) -> None:
         metrics = MappingProxyType(
             {
@@ -779,6 +848,7 @@ class FormalTrajectoryTests(unittest.TestCase):
         }
         state = SimpleNamespace(
             run=SimpleNamespace(run_id="run:replay"),
+            task_manifest=SimpleNamespace(metadata={}),
             candidate=lambda _id: candidate,
             trajectory_for=lambda _id: SimpleNamespace(batch_count=2),
             formal_batches=(batch,),
@@ -1050,6 +1120,7 @@ class FormalTrajectoryTests(unittest.TestCase):
             candidate_id=candidate.candidate_id,
             formal_batches=(batch,),
             run=SimpleNamespace(run_id="run:final"),
+            task_manifest=SimpleNamespace(metadata={}),
             candidate=lambda _id: candidate,
             trajectory_for=lambda _id: SimpleNamespace(batch_count=2),
             revision_activation_for=lambda *_args: None,
@@ -1295,7 +1366,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
         )
         self.schedule = OptimizationSchedule.from_dict(
             {
-                **(OptimizationSchedule.for_new_run() if getattr(self, "quick_protocol", False) else OptimizationSchedule.default()).to_dict(),
+                **(OptimizationSchedule.for_quick_run() if getattr(self, "quick_protocol", False) else OptimizationSchedule.default()).to_dict(),
                 "formal_origin_count_per_finalist": 30,
                 "local_batch_origin_count": 10,
             }

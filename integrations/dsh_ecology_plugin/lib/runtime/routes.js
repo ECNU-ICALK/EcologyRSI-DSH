@@ -4,7 +4,11 @@ import {
   readBoundedJson,
   safeJsonError,
 } from "../security.js";
-import { structuredFailureContract } from "./structured-stage-errors.js";
+import {
+  isTrustedStructuredPhase,
+  structuredFailureCode,
+  structuredFailureContract,
+} from "./structured-stage-errors.js";
 
 export const RUNTIME_API_BASE = "/api/ecology-agent-runtime/v1";
 
@@ -27,6 +31,7 @@ const PUBLIC_STAGE_FAILURE_CODES = new Set([
   "structured_child_output_budget_exhausted",
   "structured_child_output_schema_invalid",
   "structured_result_missing",
+  "structured_output_attempt_limit_exceeded",
 ]);
 
 function validIdentityBody(body, extraFields = new Set()) {
@@ -55,6 +60,22 @@ function sendControllerError(res, error) {
   if (contract) {
     const { http_status, ...failure } = contract;
     sendJson(res, http_status, { error: "runtime_stage_failed", ...failure });
+    return;
+  }
+  // Recoverable persistence faults belong to the Host, not model capacity.
+  // Keep their trusted boundary code without inventing a provider failure
+  // contract. Python retains bounded retries and excludes them from congestion.
+  const persistenceCode = structuredFailureCode(error);
+  if (isTrustedStructuredPhase(error, "persistence") && new Set([
+    "structured_result_persist_projection_lag",
+    "structured_result_persist_host_unavailable",
+    "structured_result_persist_transport",
+    "structured_result_persist_timeout",
+  ]).has(persistenceCode)) {
+    sendJson(res, 502, {
+      error: "runtime_stage_failed",
+      error_code: persistenceCode,
+    });
     return;
   }
   const supplied = typeof error?.code === "string" ? error.code : "";
@@ -105,6 +126,20 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       const relative = parsed.pathname.slice(RUNTIME_API_BASE.length);
       if (req.method === "GET" && relative === "/capabilities") {
         try { sendJson(res, 200, await controller.capabilities()); }
+        catch { safeJsonError(res, 502, "runtime_controller_failed"); }
+        return;
+      }
+      if (req.method === "POST" && relative === "/child-activations/attest") {
+        let body;
+        try { body = await readBoundedJson(req, Math.min(maxBodyBytes, 16384)); }
+        catch { safeJsonError(res, 400, "invalid_request_body"); return; }
+        if (!body || Array.isArray(body)
+          || Object.keys(body).sort().join(",") !== "identity,parent_session_id"
+          || !body.identity || typeof body.identity !== "object" || Array.isArray(body.identity)
+          || typeof body.parent_session_id !== "string" || !body.parent_session_id) {
+          safeJsonError(res, 400, "invalid_activation_attestation_request"); return;
+        }
+        try { sendJson(res, 200, await controller.attestChildActivation(body)); }
         catch { safeJsonError(res, 502, "runtime_controller_failed"); }
         return;
       }

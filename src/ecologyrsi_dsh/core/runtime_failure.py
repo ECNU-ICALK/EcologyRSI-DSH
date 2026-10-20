@@ -14,6 +14,14 @@ def validate_runtime_failure(value, *, error_code):
             or value["affected_scope"] not in {"model_route", "stage"}):
         raise ValueError("runtime failure contract is invalid")
     retryable = value["retryable"]
+    if error_code == "model_provider_quota_exhausted":
+        if (retryable or value["failure_domain"] != "provider"
+                or value["affected_scope"] != "model_route"
+                or type(value["provider_status"]) is not int
+                or value["provider_status"] != 429
+                or value["retry_after_ms"] is not None):
+            raise ValueError("provider quota recovery semantics are inconsistent")
+        return dict(value)
     if ((value["failure_domain"] == "provider") != retryable
             or (value["affected_scope"] == "model_route") != retryable):
         raise ValueError("runtime failure recovery semantics are inconsistent")

@@ -48,18 +48,59 @@ test("sample reasoning uses declared off support and research keeps deep thinkin
   }
 });
 
+test("optional metadata failure preserves the resolved generation request", async () => {
+  let listener;
+  installRoleReasoning({
+    on: (_event, callback) => { listener = callback; },
+    llm: { resolveModelInfo: async () => { throw new Error("private catalog error"); } },
+  }, "sample-planner");
+  const config = {provider:"p",model:"m",maxTokens:32768,reasoningEffort:"high",custom:"preserved"};
+  assert.equal(await listener({}, async () => config), config);
+  const generationError = new Error("generation failed");
+  await assert.rejects(listener({}, async () => { throw generationError; }), error => error === generationError);
+});
+
+test("metadata timeout bounds providers that ignore abort and drains late failures", async t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  let signal, rejectLate, settled = false;
+  const options = roleRequestOptions({llm:{resolveModelInfo: (_provider, _model, abort) => {
+    signal = abort;
+    return new Promise((_resolve, reject) => { rejectLate = reject; });
+  }}}, {model:"p/m",role:"sample-planner"}).then(value => { settled = true; return value; });
+  await Promise.resolve();
+  t.mock.timers.tick(9999);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await options, {provider:"p",model:"m"});
+  assert.equal(signal.aborted, true);
+  rejectLate(new Error("late private catalog failure"));
+  await Promise.resolve();
+});
+
+test("absent or malformed capability metadata never invents an effort override", async () => {
+  for (const reasoning of [undefined, {efforts:null,defaultEffort:"off"},
+    {efforts:[null, {id:42}],defaultEffort:"off"},
+    {efforts:[{id:"medium"}],defaultEffort:"off"}]) {
+    const options = await roleRequestOptions({llm:{resolveModelInfo:async () => ({reasoning})}},
+      {model:"p/m",role:"sample-planner"});
+    assert.deepEqual(options, {provider:"p",model:"m"});
+  }
+});
+
 test("GLM instance settings declare its actual thinking wire format without mutating other routes", () => {
   const settings = { "llm-pi-ai": { providers: {
-    p: { api: "openai-completions", apiKeyEnv: "TEST_KEY", models: [{ id: "glm-5.2" }, { id: "another" }] },
+    p: { api: "openai-completions", apiKeyEnv: "TEST_KEY", reasoning: "high", models: [{ id: "glm-5.2" }, { id: "another" }] },
   } } };
   const configured = withThinkingCapabilities(settings, "p/glm-5.2");
   assert.deepEqual(settings["llm-pi-ai"].providers.p.models[0], { id: "glm-5.2" });
   const provider = configured["llm-pi-ai"].providers.p;
   assert.equal(provider.apiKeyEnv, "TEST_KEY");
   assert.deepEqual(provider.models[1], { id: "another" });
-  assert.deepEqual(provider.models[0].reasoningEfforts, { off: null, high: "high" });
+  assert.deepEqual(provider.models[0].reasoningEfforts, { off: null, minimal: "minimal", low: "high",
+    medium: "high", high: "high", xhigh: "max", max: "max" });
   assert.equal(provider.models[0].compat.thinkingFormat, "zai");
-  assert.equal(provider.models[0].compat.supportsReasoningEffort, false);
+  assert.equal(provider.models[0].compat.supportsReasoningEffort, true);
   assert.equal(provider.models[0].compat.supportsStrictMode, false);
   assert.equal(provider.models[0].compat.supportsDeveloperRole, false);
   assert.equal(provider.models[0].compat.maxTokensField, "max_tokens");
@@ -174,12 +215,12 @@ test("run quiescence waits pending creations and disposes every published host",
   const researcherBinding = {
     ...common,
     role: "researcher",
-    preset_id: "ecology-researcher-v15",
+    preset_id: "ecology-researcher-v17",
   };
   const proposerBinding = {
     ...common,
     role: "candidate-proposer",
-    preset_id: "ecology-candidate-proposer-v6",
+    preset_id: "ecology-candidate-proposer-v9",
   };
   const ctx = {
     agents: {
@@ -275,7 +316,7 @@ test("role creation preserves its setup error when private disposal also fails",
   const result = await outcome(manager.createRoleAgent({
     run_id: "run-primary-role-error",
     role: "researcher",
-    preset_id: "ecology-researcher-v15",
+    preset_id: "ecology-researcher-v17",
     model: "provider/model",
     cwd: "/tmp",
   }));

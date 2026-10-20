@@ -108,7 +108,7 @@ class DatasetTaskAdapterTests(unittest.TestCase):
         dataset = SimpleNamespace(dataset_id=adapter.dataset_id, episode_id=adapter.dataset_id + ":test",
                                   timestamps=tuple(range(2000)), partitions={"model_selection": IndexRange(0, 2000)})
         with patch("ecologyrsi_dsh.evaluators.epoch_cohorts.DATASET_ADAPTERS", {adapter.dataset_id: adapter}):
-            cohort = plan_run_adaptation_cohort(dataset, schedule=OptimizationSchedule.for_new_run(), seed=0)
+            cohort = plan_run_adaptation_cohort(dataset, schedule=OptimizationSchedule.for_quick_run(), seed=0)
         self.assertEqual(cohort.cohort.maximum_horizon, 6)
         self.assertTrue(all(o.maximum_target_timestamp - o.origin_timestamp == 6 for o in cohort.origins))
         for previous, following in zip(cohort.batches, cohort.batches[1:]):

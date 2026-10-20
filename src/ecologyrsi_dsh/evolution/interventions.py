@@ -600,4 +600,3 @@ def advisory_only_receipts(
             row["host_did_not_enforce"] = requested
         result.append(row)
     return result
-

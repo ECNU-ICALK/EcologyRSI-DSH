@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { runtimeCapabilities, inferenceConfigDigest } from "../lib/runtime/capabilities.js";
 
+function settingsFor(config = { providers: {} }) {
+  return { describe(options) {
+    assert.deepEqual(options, { redactSecrets: true });
+    return [{ ns: "llm-pi-ai", value: config }];
+  } };
+}
+
 test("wire and thinking config invalidate cached preflight without hashing credentials", async () => {
   const config = { providers: { p: { api: "openai-completions", apiKeyEnv: "KEY",
     baseURL: "https://example.test/v1?key=secret", headers: { authorization: "secret" },
@@ -13,11 +20,22 @@ test("wire and thinking config invalidate cached preflight without hashing crede
   assert.equal(inferenceConfigDigest(config), initial);
   config.providers.p.models[0].compat.supportsStrictMode = true;
   assert.notEqual(inferenceConfigDigest(config), initial);
-  const ctx = { settings: { get: () => config } };
+  const ctx = { settings: settingsFor(config) };
   const first = await runtimeCapabilities(ctx, [{ preset_id: "p" }]);
   config.providers.p.reasoning = "off";
   const second = await runtimeCapabilities(ctx, [{ preset_id: "p" }]);
   assert.notEqual(first.presets[0].content_digest, second.presets[0].content_digest);
+});
+
+test("missing, obsolete, ambiguous or malformed live configuration fails closed", async () => {
+  for (const settings of [undefined, { get: () => ({ providers: {} }) },
+    { describe: () => [] }, { describe: () => [{ ns: "llm-pi-ai", value: {} }] },
+    { describe: () => [{ ns: "llm-pi-ai", value: { providers: [] } }] },
+    { describe: () => [{ ns: "llm-pi-ai", value: { providers: {} } }, { ns: "llm-pi-ai", value: { providers: {} } }] }]) {
+    await assert.rejects(runtimeCapabilities({ settings }, []), /live inference configuration is unavailable or ambiguous/);
+  }
+  await assert.rejects(runtimeCapabilities({ settings: { describe() { throw new Error("private configuration detail"); } } }, []),
+    error => error.message === "DSH live inference configuration is unavailable or ambiguous");
 });
 
 
@@ -28,6 +46,7 @@ const ROOT_SERVICES = [
 
 test("DSH 0.2 scope leases are released on success and catalog failure without exposing keys", async () => {
   const ctx = Object.fromEntries(ROOT_SERVICES.map(name => [name, {}]));
+  ctx.settings = settingsFor();
   let released = 0;
   const key = { toJSON() { throw new Error("opaque key must stay inside the host"); } };
   ctx.agentPresets.acquireScope = async () => ({
@@ -48,7 +67,7 @@ test("DSH 0.2 scope leases are released on success and catalog failure without e
 });
 
 test("missing root services are reported truthfully", async () => {
-  const result = await runtimeCapabilities({ webServer: {} }, []);
+  const result = await runtimeCapabilities({ webServer: {}, settings: settingsFor() }, []);
   assert.equal(result.ready, false);
   assert.deepEqual(result.root_services.missing.sort(), ROOT_SERVICES.sort());
   assert.equal(result.live_agent_service_ready, false);
@@ -58,15 +77,16 @@ test("missing root services are reported truthfully", async () => {
 test("preset mount, tool surface and route resolution do not create probe agents", async () => {
   let created = 0;
   const ctx = Object.fromEntries(ROOT_SERVICES.map((name) => [name, {}]));
+  ctx.settings = settingsFor();
   ctx.agents.create = () => { created += 1; throw new Error("must not create"); };
   ctx.agentPresets.acquireScope = async id => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} });
-  ctx.tools.schemas = (key) => key.presetId.endsWith("ecology-researcher-v15")
+  ctx.tools.schemas = (key) => key.presetId.endsWith("ecology-researcher-v17")
     ? [{ name: "read_generation_context" }]
     : [];
   ctx.llm.resolveCallConfig = async ({ model }) => ({ model, provider: "fake" });
   const result = await runtimeCapabilities(ctx, [
     {
-      preset_id: "ecology-researcher-v15",
+      preset_id: "ecology-researcher-v17",
       required_tools: ["read_generation_context"],
       model: "fake/model",
     },
@@ -82,6 +102,7 @@ test("preset mount, tool surface and route resolution do not create probe agents
 
 test("tool surface verification rejects undeclared extra tools", async () => {
   const ctx = Object.fromEntries(ROOT_SERVICES.map((name) => [name, {}]));
+  ctx.settings = settingsFor();
   ctx.agentPresets.acquireScope = async id => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} });
   ctx.tools.schemas = () => [
     { name: "ecology_execute_prediction_tool" },
@@ -89,7 +110,7 @@ test("tool surface verification rejects undeclared extra tools", async () => {
   ];
   ctx.llm.resolveCallConfig = async () => ({ provider: "fake", model: "model" });
   const result = await runtimeCapabilities(ctx, [{
-    preset_id: "ecology-sample-planner-v12",
+    preset_id: "ecology-sample-planner-v14",
     required_tools: ["ecology_execute_prediction_tool"],
   }]);
   assert.equal(result.presets[0].tool_surface_verified, false);

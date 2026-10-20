@@ -32,7 +32,135 @@ from ecologyrsi_dsh.integrations.dsh_native_runtime import (
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
+class FailureStageDiagnosticsTests(unittest.TestCase):
+    def test_reused_screening_is_not_new_formal_execution(self):
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        schedule = OptimizationSchedule.for_new_run()
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0),
+            task_manifest=SimpleNamespace(metadata={
+                'optimization_protocol': schedule.protocol,
+                'optimization_schedule': schedule.to_dict(),
+            }), events=(),
+            candidate_screening_events=tuple(SimpleNamespace(payload={'generation': 0}) for _ in range(5)),
+            formal_batch_evaluations=tuple(SimpleNamespace(
+                scope=SimpleNamespace(generation=0, origin_count=count), metrics=metrics)
+                for count, metrics in ((10, {'reused_screening_evidence': True}), (25, {}), (25, {}))),
+            formal_trajectories=(SimpleNamespace(generation=0, status='completed'),),
+            holdout_evaluations=(),
+        )
+        _, context = auto_progress_module._failure_diagnostics(state,
+            DshNativeRuntimeUnavailableError(error_code='structured_output_attempt_limit_exceeded'))
+        self.assertEqual(context['formal_origin_occurrences_completed'], 50)
+        self.assertEqual(context['formal_origin_occurrences_upper_bound'], 50)
+        self.assertEqual(context['stage'], 'holdout')
+
+    def test_sample_pause_preserves_root_code_and_excludes_other_faults(self):
+        state = SimpleNamespace(run=SimpleNamespace(generation=0),
+            task_manifest=SimpleNamespace(metadata={}), events=())
+        root = DshNativeRuntimeUnavailableError(error_code='structured_output_attempt_limit_exceeded')
+        outer = DshNativeRuntimeUnavailableError(error_code='evaluation_execution_incomplete')
+        outer.__cause__ = root
+        pause = auto_progress_module._sample_output_protocol_pause(state, outer, stage='evaluation')
+        self.assertEqual(pause.code, root.error_code)
+        for stage in ('research', 'proposal', 'preflight'):
+            self.assertIsNone(auto_progress_module._sample_output_protocol_pause(state, root, stage=stage))
+        for code in ('structured_child_aborted', 'structured_child_tool_protocol_error',
+                     'structured_child_execution_budget_exhausted', 'model_provider_quota_exhausted'):
+            self.assertIsNone(auto_progress_module._sample_output_protocol_pause(state,
+                DshNativeRuntimeUnavailableError(error_code=code), stage='evaluation'))
+        self.assertIsNone(auto_progress_module._sample_output_protocol_pause(state,
+            DshNativeRuntimeUnavailableError(error_code=root.error_code, failure_domain='provider'), stage='evaluation'))
+    def test_native_proposal_failure_uses_unfinished_stage_not_screening(self):
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        schedule = OptimizationSchedule.for_new_run()
+        state = SimpleNamespace(run=SimpleNamespace(generation=0),
+            task_manifest=SimpleNamespace(metadata={'optimization_protocol': schedule.protocol}),
+            events=(SimpleNamespace(kind='EvolutionStageRecorded', payload={
+                'generation': 0, 'stage': 'proposal', 'status': 'started'}),))
+        error = DshNativeRuntimeUnavailableError(error_code='structured_result_missing')
+        code, context = auto_progress_module._failure_diagnostics(state, error)
+        self.assertEqual(code, 'structured_result_missing')
+        self.assertEqual(context['stage'], 'proposal')
+        self.assertEqual(context['work_unit_kind'], 'proposal')
+
+    def test_joint_screening_includes_incumbent_before_formal_batch(self):
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        schedule = OptimizationSchedule.for_new_run()
+        for completed in (0, 4, 5):
+            with self.subTest(completed=completed):
+                state = SimpleNamespace(
+                    run=SimpleNamespace(generation=0),
+                    task_manifest=SimpleNamespace(metadata={
+                        'optimization_protocol': schedule.protocol,
+                        'optimization_schedule': schedule.to_dict(),
+                    }),
+                    candidate_screening_events=tuple(SimpleNamespace(payload={'generation': 0})
+                        for _ in range(completed)),
+                    formal_batch_evaluations=(), formal_trajectories=(), formal_batches=(),
+                )
+                code, context = auto_progress_module._failure_diagnostics(state, ValueError())
+                expected = 'screening' if completed < 5 else 'formal_batch'
+                self.assertEqual(context['stage'], expected)
+                self.assertEqual(code, f'auto_progress_{expected}_host_value_error')
+
+
 class AutoProgressHTTPTests(unittest.TestCase):
+    def test_output_protocol_drain_pauses_native_before_siblings_join(self):
+        state = SimpleNamespace(run=SimpleNamespace(generation=0),
+            task_manifest=SimpleNamespace(metadata={}), events=())
+        quiescence = object()
+        error = DshNativeRuntimeUnavailableError(error_code='structured_output_attempt_limit_exceeded')
+        with patch.object(self.server.director, 'state', return_value=state), \
+             patch.object(self.server.auto_progress, '_close_native_admission', return_value=quiescence) as close, \
+             patch.object(self.server.auto_progress, '_start_native_quiescence') as drain:
+            self.server.auto_progress.abort_native_evaluation('run:output', error=error)
+        close.assert_called_once_with(state, action='pause')
+        drain.assert_called_once_with('pause', quiescence)
+
+    def test_evaluation_output_fault_pauses_once_and_explicit_resume_clears_admission(self):
+        for index, code in enumerate(('structured_output_attempt_limit_exceeded',
+                'structured_child_output_budget_exhausted', 'structured_child_output_schema_invalid',
+                'structured_result_missing', 'evaluation_execution_incomplete')):
+            with self.subTest(code=code):
+                status, created = self.request('/runs', 'POST', {
+                    'domain_pack_id': 'crop_soil_water', 'dataset_id': 'generated-toy-series@1',
+                    'rounds': 1, 'candidates_per_generation': 1, 'max_candidates': 1,
+                    'auto_progress': True, 'auto_advance': 0, 'start': False,
+                    'idempotency_key': f'sample-output-pause-{index}',
+                })
+                self.assertEqual(status, 201, created)
+                run_id = created['projection']['run_id']
+                self.server.director.start_run(run_id)
+                before = self.server.director.state(run_id)
+                error = DshNativeRuntimeUnavailableError('private payload', error_code=code,
+                    status_code=422, failure_domain='execution_contract')
+                with self.assertRaises(DshNativeRuntimeUnavailableError):
+                    with self.server.sample_admission.admit(run_id, 2):
+                        raise error
+                def fail_generation(_endpoint, target):
+                    self.server.director.record_evolution_stage(target, generation=0,
+                        stage='evaluation', status='failed', attempt=1, public_error='评测提交未完成。')
+                    raise error
+                with patch.object(auto_progress_module, 'execute_generation', side_effect=fail_generation) as execute:
+                    self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
+                execute.assert_called_once()
+                paused = self.server.director.state(run_id)
+                self.assertEqual(paused.run.status.value, 'paused')
+                self.assertEqual(paused.events[-1].payload['code'], code)
+                self.assertEqual(paused.task_manifest, before.task_manifest)
+                self.assertEqual(paused.candidates, before.candidates)
+                self.assertFalse(any(e.kind in {'RunFailed', 'GatewayRetryScheduled', 'CandidateFailed'} for e in paused.events))
+                self.assertNotIn('private payload', str(paused.events))
+                with patch.object(self.server.auto_progress, 'schedule', return_value=False):
+                    resumed_status, response = self.request(f'/runs/{run_id}/control', 'POST',
+                        {'action': 'resume', 'idempotency_key': f'sample-resume-{index}'})
+                self.assertEqual(resumed_status, 200, response)
+                self.assertIsNone(self.server.sample_admission.execution_failure_for(run_id))
+                with self.server.sample_admission.admit(run_id, 2):
+                    pass
+                self.assertEqual(self.server.director.state(run_id).task_manifest, before.task_manifest)
+
     def test_fatal_evaluation_starts_native_drain_before_generation_returns(self):
         state, quiescence = object(), object()
         with patch.object(self.server.director, "state", return_value=state), \
@@ -128,10 +256,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
 
         from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
-        for status in (422, 502):
-            exhausted = DshNativeRuntimeUnavailableError(error_code="structured_result_missing", status_code=status)
-            self.assertFalse(auto_progress_module._progress_failure_retryable(exhausted, stage="research"))
-            self.assertIsNone(auto_progress_module._retry_later_error(exhausted, stage="research"))
+        for code in ("structured_result_missing", "structured_output_attempt_limit_exceeded"):
+            for status in (422, 502):
+                exhausted = DshNativeRuntimeUnavailableError(error_code=code, status_code=status)
+                self.assertFalse(auto_progress_module._progress_failure_retryable(exhausted, stage="research"))
+                self.assertIsNone(auto_progress_module._retry_later_error(exhausted, stage="research"))
 
         truncated = GatewayResponseError(
             "research response reached its output limit",
@@ -330,6 +459,63 @@ class AutoProgressHTTPTests(unittest.TestCase):
                         for event in state.events
                     )
                 )
+
+    def test_provider_quota_pauses_once_and_can_resume_without_budget_changes(self):
+        status, created = self.request("/runs", "POST", {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
+            "auto_progress": True, "auto_advance": 0, "start": False,
+            "idempotency_key": "quota-exhaustion",
+        })
+        self.assertEqual(status, 201)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        before = self.server.director.state(run_id)
+        error = DshNativeRuntimeUnavailableError(
+            "private provider payload", error_code="model_provider_quota_exhausted",
+            status_code=429, failure_domain="provider", provider_status=429,
+        )
+        with patch.object(auto_progress_module, "execute_generation", side_effect=error) as execute:
+            self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
+        execute.assert_called_once()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        event = state.events[-1]
+        self.assertEqual(event.kind, "RunPaused")
+        self.assertEqual(event.payload["code"], "model_provider_quota_exhausted")
+        self.assertIn("不是本地 Token 预算限制", event.payload["reason"])
+        self.assertIn("恢复运行", event.payload["reason"])
+        self.assertNotIn("private", str(state.events))
+        self.assertEqual(state.task_manifest, before.task_manifest)
+        self.assertEqual(state.events[:-1], before.events)
+        self.assertFalse(any(e.kind == "RunFailed" for e in state.events))
+        self.server.director.resume_run(run_id)
+        self.server.auto_progress._run_one_generation(run_id)
+        resumed = self.server.director.state(run_id)
+        self.assertEqual(resumed.run.status.value, "completed")
+        self.assertEqual(resumed.task_manifest, before.task_manifest)
+
+    def test_provider_quota_during_preflight_also_pauses(self):
+        status, created = self.request("/runs", "POST", {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
+            "auto_progress": True, "auto_advance": 0, "start": False,
+            "idempotency_key": "quota-preflight-pause",
+        })
+        self.assertEqual(status, 201)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        error = DshNativeRuntimeUnavailableError(
+            "private provider payload", error_code="model_provider_quota_exhausted",
+            status_code=429, failure_domain="provider", provider_status=429,
+        )
+        with patch.object(self.server, "validate_frozen_runtime_bindings", side_effect=error), \
+             patch.object(auto_progress_module, "execute_generation") as execute:
+            self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
+        execute.assert_not_called()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(state.events[-1].payload["code"], error.error_code)
 
     def test_host_fault_pause_write_is_retried_without_replaying_work(self) -> None:
         status, created = self.request(
@@ -936,6 +1122,79 @@ class AutoProgressHTTPTests(unittest.TestCase):
             "research_contract_fallback_unavailable",
         )
         self.assertIn("candidate direction d1", paused.payload["reason"])
+
+    def test_research_output_exhaustion_pauses_without_outer_retry_or_run_failure(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "research-output-circuit-breaker",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        executed = threading.Event()
+        calls: list[str] = []
+
+        def invalid_research(_endpoint: object, target_run_id: str) -> object:
+            calls.append(target_run_id)
+            with self.server.mutation_lock:
+                self.server.director.record_evolution_stage(
+                    target_run_id,
+                    generation=0,
+                    stage="research",
+                    status="failed",
+                    attempt=1,
+                    public_error="远程研究计划响应未通过宿主契约校验。",
+                )
+            executed.set()
+            raise auto_progress_module.DshResearchOutputBudgetError() from DshNativeRuntimeUnavailableError(
+                error_code="structured_child_output_budget_exhausted"
+            )
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=invalid_research,
+            ),
+            patch.object(
+                self.server.auto_progress,
+                "_gateway_retry_delay",
+                return_value=60.0,
+            ),
+        ):
+            with self.server.mutation_lock:
+                self.server.director.start_run(run_id)
+                self.server.auto_progress.schedule(run_id)
+            self.assertTrue(executed.wait(timeout=2))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if self.server.director.state(run_id).run.status.value == "paused":
+                    break
+                time.sleep(0.01)
+
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(calls, [run_id])
+        self.assertFalse(
+            any(event.kind == "GatewayRetryScheduled" for event in state.events)
+        )
+        paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
+        self.assertEqual(
+            paused.payload["code"],
+            "research_output_budget_exhausted",
+        )
+        self.assertIn("单次输出上限", paused.payload["reason"])
+        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
 
     def test_gateway_retry_delay_saturates_before_large_exponent(self) -> None:
         work_item = ("run:large-retry-attempt", 1)

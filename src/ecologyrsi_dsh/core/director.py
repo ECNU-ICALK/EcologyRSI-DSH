@@ -287,7 +287,7 @@ def _effective_artifact_binding(state: RunState, artifact: ModelArtifact) -> dic
         raise ValueError("effective artifact identity requires a candidate revision")
     scope = resolve_artifact_scope(
         artifact, holdouts=state.generation_holdouts,
-        evaluations=(*state.formal_batch_evaluations, *state.holdout_evaluations),
+        evaluations=(*state.formal_batch_evaluations, *state.holdout_evaluations, *state.holdout_rechecks),
     )
     return build_artifact_revision_binding(artifact, state.revision(artifact.candidate_revision_id), scope)
 
@@ -2089,8 +2089,9 @@ class EvolutionDirector:
         seed_profile = resolve_candidate_agent_profile(seed, current_program_registry())
         seed_policy = build_agent_policy(genome_digest=seed.genome_digest, profile=seed_profile,
             parameters=seed.scientific_program["parameter_overrides"], previous_analysis=None, generation=0,
+            joint=state.task_manifest.metadata.get("optimization_protocol") in {"joint_plugin_epoch@1", "joint_plugin_epoch@2"},
             prediction_formula_policy=("mean-referenced-tools@1"
-                if state.task_manifest.metadata.get("optimization_protocol") == "evidence_guided_epoch@1"
+                if state.task_manifest.metadata.get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}
                 else None))
         proposal = Proposal(
             proposal_id=proposal_id,
@@ -3721,7 +3722,15 @@ class EvolutionDirector:
         state = self.state(run_id)
         arm = evaluation.scope.holdout_arm
         assert arm is not None
-        existing = state.holdout_evaluation_for(evaluation.scope.generation, arm)
+        existing = (state.holdout_recheck_for(evaluation.scope.generation, arm)
+                    if evaluation.scope.inference_replica else state.holdout_evaluation_for(evaluation.scope.generation, arm))
+        if evaluation.scope.inference_replica:
+            schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+            original = state.holdout_evaluation_for(evaluation.scope.generation, arm)
+            if (not schedule.unified or evaluation.scope.inference_replica != 1 or original is None
+                    or evaluation.evaluator_digest != original.evaluator_digest
+                    or state.comparison_for(evaluation.scope.generation) is not None):
+                raise ValueError("invalid conditional holdout recheck")
         if existing is not None:
             if existing.to_dict() != evaluation.to_dict():
                 raise ValueError("holdout arm already has a different evaluation")
@@ -3775,7 +3784,7 @@ class EvolutionDirector:
             "HoldoutEvaluationRecorded",
             {"evaluation": evaluation.to_dict()},
             f"{run_id}:generation:{holdout.generation}:"
-            f"holdout:{arm.value}:evaluated",
+            f"holdout:{arm.value}:evaluated" + (":recheck" if evaluation.scope.inference_replica else ""),
         )
         self.ledger.append_many(
             run_id,
@@ -3831,6 +3840,7 @@ class EvolutionDirector:
             ),
             persisted_screening_events=getattr(state, "candidate_screening_events", ()),
             persisted_batch_evaluations=getattr(state, "formal_batch_evaluations", ()),
+            persisted_rechecks=tuple(item for item in state.holdout_rechecks if item.scope.generation == comparison.generation),
         )
         self.ledger.append(
             run_id,
@@ -5228,6 +5238,117 @@ class EvolutionDirector:
                     and checkpoint.get("schema_version") == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION)
 
     @staticmethod
+    def _sample_checkpoint_matches_frozen_race_finalist(
+        state: RunState,
+        candidate: Candidate,
+        checkpoint: Mapping[str, Any] | None,
+        *,
+        generation: int,
+    ) -> bool:
+        """Honor a sealed race selection without reopening arbitrary duplicates.
+
+        Older races marked a behavioral repeat DUPLICATE before nevertheless
+        admitting it to the frozen five-arm race and selecting it as finalist.
+        That historical status is not an authorization to replay prior scores:
+        every allowed checkpoint must still identify this race's exact batch,
+        revision, arm and fresh cohort. Keep the original events unchanged.
+        """
+        if (
+            candidate.generation > generation
+            or candidate.role is not CandidateRole.SEARCH
+            or not isinstance(checkpoint, Mapping)
+            or checkpoint.get("schema_version")
+            != _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+        ):
+            return False
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata.get("optimization_schedule")
+            or OptimizationSchedule.default().to_dict()
+        )
+        if not schedule.race:
+            return False
+        planned = state.generation_cohort_for(candidate.generation)
+        initial = state.initial_revision_for(candidate.candidate_id)
+        selection = state.formal_selection_for(candidate.generation)
+        trajectory = state.trajectory_for(candidate.candidate_id)
+        if (
+            initial is None
+            or race_screening_revision(planned, candidate.candidate_id)
+            != initial.revision_id
+            or selection is None
+            or candidate.candidate_id not in selection.payload["selected_candidate_ids"]
+            or trajectory is None
+            or trajectory.generation != candidate.generation
+            or trajectory.initial_revision_id != initial.revision_id
+        ):
+            return False
+        try:
+            phase = EvaluationPhase(checkpoint.get("evaluation_phase"))
+            scopes: list[EvaluationScope] = []
+            if phase is EvaluationPhase.FORMAL_BATCH:
+                if candidate.generation != generation:
+                    return False
+                index = checkpoint.get("formal_batch_index")
+                if type(index) is not int or index < 0:
+                    return False
+                batch = state.formal_batch_for(candidate.candidate_id, index)
+                if batch is None or batch.generation != generation:
+                    return False
+                for arm in FormalBatchArm:
+                    scopes.append(EvaluationScope(
+                        run_id=state.run.run_id, generation=generation,
+                        candidate_id=candidate.candidate_id,
+                        candidate_revision_id=checkpoint["candidate_revision_id"],
+                        phase=phase, cohort_digest=batch.cohort_digest,
+                        origin_count=batch.origin_count, batch_index=index,
+                        formal_batch_arm=arm,
+                    ))
+            elif phase is EvaluationPhase.HOLDOUT:
+                if trajectory.status is not TrajectoryStatus.COMPLETED:
+                    return False
+                arm = HoldoutArm(checkpoint.get("holdout_arm"))
+                holdout = state.generation_holdout_for(generation)
+                if (
+                    holdout is None
+                    or checkpoint.get("candidate_revision_id")
+                    != trajectory.final_revision_id
+                ):
+                    return False
+                if candidate.generation == generation:
+                    if arm is HoldoutArm.INCUMBENT:
+                        return False
+                elif (
+                    arm is not HoldoutArm.INCUMBENT
+                    or state.effective_revision_for(generation - 1)
+                    != trajectory.final_revision_id
+                    or race_screening_revision(
+                        state.generation_cohort_for(generation), candidate.candidate_id
+                    ) != trajectory.final_revision_id
+                ):
+                    # A former duplicate can become a control only through the
+                    # sealed champion decision and the new race's binding.
+                    return False
+                scopes.append(EvaluationScope(
+                    run_id=state.run.run_id, generation=generation,
+                    candidate_id=candidate.candidate_id,
+                    candidate_revision_id=checkpoint["candidate_revision_id"],
+                    phase=phase, cohort_digest=holdout.cohort_digest,
+                    origin_count=holdout.origin_count, holdout_arm=arm,
+                    inference_replica=checkpoint.get("inference_replica", 0),
+                ))
+            for scope in scopes:
+                try:
+                    EvolutionDirector._validate_evaluation_scope(state, candidate, scope)
+                    EvolutionDirector._validate_checkpoint_scope(checkpoint, scope)
+                    EvolutionDirector._validate_checkpoint_sample_count(state, checkpoint, scope)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                return True
+        except (KeyError, TypeError, ValueError):
+            return False
+        return False
+
+    @staticmethod
     def _sample_checkpoint_candidate_status_allowed(
         state: RunState,
         candidate: Candidate,
@@ -5239,8 +5360,24 @@ class EvolutionDirector:
 
         if EvolutionDirector._sample_checkpoint_matches_frozen_race(state, candidate, checkpoint, generation=generation):
             return True
+        if candidate.status is CandidateStatus.DUPLICATE:
+            return EvolutionDirector._sample_checkpoint_matches_frozen_race_finalist(
+                state, candidate, checkpoint, generation=generation
+            )
         if candidate.status is CandidateStatus.SPAWNED:
-            return candidate.generation == generation
+            if candidate.generation == generation:
+                return True
+            # An incumbent-only replay deliberately leaves the seed SPAWNED.
+            # It may be measured in a later generation only as that generation's
+            # exact frozen control, never as an arbitrary historical candidate.
+            return bool(
+                candidate.generation < generation
+                and isinstance(checkpoint, Mapping)
+                and checkpoint.get("holdout_arm") == HoldoutArm.INCUMBENT.value
+                and EvolutionDirector._sample_checkpoint_matches_frozen_holdout(
+                    state, candidate, checkpoint, generation=generation
+                )
+            )
         if not (
             isinstance(checkpoint, Mapping)
             and checkpoint.get("schema_version")

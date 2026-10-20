@@ -100,6 +100,11 @@ class CampaignTests(unittest.TestCase):
         ):
             parent=SimpleNamespace(scientific_program={'predictor_ref':{'id':predictor},'parameter_overrides':{parameter:0.4}})
             facts=_predictor_semantics(parent)
+            budget=facts['sample_inference']['tool_budget_per_origin_attempt']
+            self.assertIsInstance(budget,str)
+            self.assertIn('prediction_contract.max_prediction_tool_calls',budget)
+            self.assertIn('remaining_calls',budget)
+            self.assertIn('failed calls also consume budget',budget)
             self.assertEqual(facts['residual_scale_scope'],scope)
             self.assertEqual(facts['residual_scale_values'],{parameter:0.4})
             self.assertFalse(facts['fit_updates_residual_scales'])

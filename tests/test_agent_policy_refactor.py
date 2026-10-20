@@ -111,6 +111,41 @@ class AgentPolicyRefactorTests(unittest.TestCase):
         self.assertIsNone(outcome.error)
         self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 2)
 
+    def test_frozen_budgets_include_failed_calls_for_two_four_and_six(self):
+        for budget in (2, 4, 6):
+            with self.subTest(budget=budget):
+                fixture = agent_fixtures.AgentOwnedPredictionTests()
+                self.addCleanup(fixture.doCleanups)
+                archived = build_agent_policy(
+                    genome_digest='a'*64, profile={}, parameters={},
+                    previous_analysis=None, generation=0,
+                    prediction_tool_call_budget=budget,
+                )
+
+                def policy(context, call):
+                    contract = context['context']['prediction_contract']
+                    self.assertEqual(contract['max_prediction_tool_calls'], budget)
+                    failed = call('candidate-model', 'bad', {'unsupported': 1})
+                    self.assertEqual(failed['status'], 'failed')
+                    self.assertEqual(failed['remaining_calls'], budget - 1)
+                    for index in range(1, budget):
+                        accepted = call('candidate-model', f'ok-{index}')
+                        self.assertEqual(accepted['status'], 'completed')
+                        self.assertEqual(accepted['remaining_calls'], budget - index - 1)
+                    with self.assertRaisesRegex(ValueError, 'budget'):
+                        call('candidate-model', 'over')
+                    return result(context, method='model', refs=('ok-1',))
+
+                adapter, _, _, ledger = fixture.setup_agent(policy)
+                plan = adapter.plan_batch({
+                    'run_id': 'run-agent', 'candidate_id': 'candidate-1',
+                    'algorithm_id': 'registered-predictor', 'algorithm_version': '1',
+                    'agent_policy': archived,
+                })
+                self.assertIsNone(fixture.predict(adapter, plan).error)
+                self.assertEqual(len(ledger.events_by_kind(
+                    'run-agent', 'DshPredictionToolExecuted')), budget)
+
     def test_formal_experience_survives_final_holdout_without_using_holdout_labels(self):
         tool = {'tool_id': 'ridge', 'evidence_kind': 'raw_tool_output', 'source_phase': 'formal_batch', 'mae': 3.}
         candidate = SimpleNamespace(candidate_id='c', generation=1)

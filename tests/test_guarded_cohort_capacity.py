@@ -80,25 +80,51 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
         self.assertEqual(report["holdout_inference_replicas"], 1)
         self.assertEqual(report["execution_plan"], trial.execution_plan(4, cells_per_origin=9, native=True))
 
-    def test_opt_in_protocol_selects_a_fixed_schedule_and_rejects_conflicting_schedule(self):
+    def test_unified_protocol_selects_a_fixed_schedule_and_rejects_legacy_schedule(self):
         body = {
             "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
             "strategy_id": "parameter_sweep@1", "evaluator_id": "toy_time_forward@1",
             "policy_model_id": "host_parameter_generator@1", "judge_model_id": "rule_judge@1",
-            "optimization_protocol": "evidence_guided_epoch@1",
+            "optimization_protocol": "joint_plugin_epoch@2",
             "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
             "auto_advance": 0, "idempotency_key": "guided-protocol-selection",
         }
         status, created = self.request("/runs", "POST", body)
         self.assertEqual(status, 201, created)
         metadata = self.server.director.state(created["projection"]["run_id"]).task_manifest.metadata
-        self.assertEqual(metadata["optimization_protocol"], "evidence_guided_epoch@1")
-        self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_evidence_guided_run().to_dict())
-        body.update(optimization_schedule=OptimizationSchedule.for_new_run().to_dict(),
+        self.assertEqual(metadata["optimization_protocol"], "joint_plugin_epoch@2")
+        self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
+        body.update(optimization_schedule=OptimizationSchedule.for_quick_run().to_dict(),
                     idempotency_key="guided-protocol-conflict")
         status, rejected = self.request("/runs", "POST", body)
         self.assertEqual(status, 400, rejected)
-        self.assertIn("differs from the frozen schedule", rejected["error"])
+        self.assertIn("legacy schedules are replay-only", rejected["error"])
+
+    def test_joint_api_freezes_its_own_schedule_and_mutation_policy(self):
+        body = {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "strategy_id": "parameter_sweep@1", "evaluator_id": "toy_time_forward@1",
+            "policy_model_id": "host_parameter_generator@1", "judge_model_id": "rule_judge@1",
+            "optimization_protocol": "joint_plugin_epoch@2",
+            "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
+            "auto_advance": 0, "idempotency_key": "joint-protocol-selection",
+        }
+        status, created = self.request("/runs", "POST", body)
+        self.assertEqual(status, 201, created)
+        metadata = self.server.director.state(created["projection"]["run_id"]).task_manifest.metadata
+        self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
+        self.assertEqual(metadata["mutation_policy"]["candidate_maximum_operations"], 4)
+        self.assertEqual(metadata["mutation_policy"]["local_maximum_operations"], 2)
+        self.assertEqual(metadata["mutation_policy"]["mutation_operator_id"], "joint-plugin-mutation@1")
+        with (patch.object(self.server.datasets, "selection_view", return_value=dataset_fixture(2000)),
+              patch.object(self.server.datasets, "partition_summary", return_value={})):
+            status, report = self.request("/evolution-capacity", "POST", {
+                "dataset_id": "agc_cucumber_2018", "episode_id": None,
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(), "planned_generations": 4,
+            })
+        self.assertEqual(status, 200, report)
+        self.assertEqual(report["candidate_origin_executions_for_run"], 1200)
+        self.assertEqual(report["required_unique_origins"], 340)
 
     def test_capacity_preview_enforces_the_same_day_blocks_and_counts_inference_replicas(self):
         from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
@@ -135,7 +161,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
         from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
         # The legacy 12-hour preview admits five rounds, while native 48-hour
         # prediction needs the same purged timeline that admits only four.
-        fixture = dataset_fixture(754)
+        fixture = dataset_fixture(1056)
         view = SimpleNamespace(**{
             **vars(fixture), "dataset_id": "agc_cucumber_2018",
             "episode_id": "agc_cucumber_2018:test", "data_protocol_digest": "c" * 64,
@@ -155,8 +181,8 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
-                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -209,7 +235,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             paid_preflight.assert_not_called()
         self.server.dsh_native_runtime.run_stage.assert_not_called()
 
-    def test_small_guarded_run_rejected_before_any_model_stage_and_legacy_remains_accepted(self):
+    def test_legacy_creation_rejected_before_model_stage_and_unified_is_accepted(self):
         description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
                                       "domain_id": "greenhouse_test", "adapter_id": "greenhouse_test"},
                        "readiness": {"ready": True}}
@@ -225,8 +251,8 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
-                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -244,29 +270,28 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             with patch("ecologyrsi_dsh.api.handler.run_preflight") as paid_preflight:
                 status, rejected = self.request("/model-preflight", "POST", body)
                 self.assertEqual(status, 400, rejected)
-                self.assertIn("请增大局部批次", rejected["error"])
+                self.assertIn("legacy schedules are replay-only", rejected["error"])
                 paid_preflight.assert_not_called()
             status, rejected = self.request("/runs", "POST", body)
             self.assertEqual(status, 400, rejected)
-            self.assertIn("请增大局部批次", rejected["error"])
+            self.assertIn("legacy schedules are replay-only", rejected["error"])
             native.run_stage.assert_not_called()
             body.update(prediction_model_id="greenhouse-exogenous-ridge@1", idempotency_key="legacy-small-blocks")
             status, created = self.request("/runs", "POST", body)
-            self.assertEqual(status, 201, created)
-            state = self.server.director.state(created["projection"]["run_id"])
-            self.assertNotIn("guarded_cohort_evidence_capacity", state.task_manifest.metadata)
+            self.assertEqual(status, 400, created)
+            self.assertIn("legacy schedules are replay-only", created["error"])
             body.update(prediction_model_id=BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                        optimization_schedule=OptimizationSchedule.for_comparison_run().to_dict(), idempotency_key="guard-valid-blocks")
+                        optimization_schedule=OptimizationSchedule.for_new_run().to_dict(), idempotency_key="guard-valid-blocks")
             status, created = self.request("/runs", "POST", body)
             self.assertEqual(status, 201, created)
             state = self.server.director.state(created["projection"]["run_id"])
             report = state.task_manifest.metadata["guarded_cohort_evidence_capacity"]
             self.assertTrue(report["sufficient"])
-            self.assertTrue(all(row["day_block_count"] >= 2 for row in report["formal_batches"]))
-            self.assertTrue(all(row["day_block_count"] >= 8 for row in report["selection_holdouts"]))
+            self.assertTrue(all(row["day_block_count"] >= 2 for row in report["formal_batches"] if row["batch_index"] == 1))
+            self.assertTrue(all(row["day_block_count"] >= 3 for row in report["selection_holdouts"]))
             self.assertEqual(state.task_manifest.metadata["sample_budget_class"], "selection_eligible")
             self.assertEqual(state.task_manifest.metadata["minimum_selection_origin_samples_per_update"], 40)
-            self.assertEqual(state.task_manifest.metadata["optimization_schedule"], OptimizationSchedule.for_comparison_run().to_dict())
+            self.assertEqual(state.task_manifest.metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
             # Explicit budgets must survive normalization and receive the same
             # rejection before preflight as before actual run creation.
             invalid_budgets = (

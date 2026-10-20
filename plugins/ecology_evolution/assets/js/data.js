@@ -189,11 +189,15 @@
     };
   }
 
-  function resetCandidateSamples(runId, candidateId) {
+  function invalidateCandidateSampleRequest() {
     state.candidateSampleRequest += 1;
-    state.candidateSamplePage = null;
     state.candidateSampleLoading = false;
     state.candidateSampleRefreshing = false;
+  }
+
+  function resetCandidateSamples(runId, candidateId) {
+    invalidateCandidateSampleRequest();
+    state.candidateSamplePage = null;
     state.candidateSampleError = null;
     state.candidateSampleUnavailable = false;
     state.candidateSamplePermissionDenied = false;
@@ -268,7 +272,7 @@
   }
 
   function selectedCandidateForSamples() {
-    var run = state.activeRun;
+    var run = displayedRun();
     if (!run || !state.selectedCandidateId) { return null; }
     return sampleCandidates(run).find(function (candidate) {
       return String(candidate.id || candidate.candidate_id) === String(state.selectedCandidateId);
@@ -278,6 +282,14 @@
   function candidateSampleSelectionMatches(runId, candidateId) {
     var selection = state.candidateSampleSelection || {};
     return String(selection.run_id || "") === String(runId || "") && String(selection.candidate_id || "") === String(candidateId || "");
+  }
+
+  function candidateSampleRequestIsCurrent(requestId, contextEpoch, runId, candidateId) {
+    var run = displayedRun();
+    return requestId === state.candidateSampleRequest && contextEpoch === state.contextEpoch
+      && run && String(run.id) === String(runId)
+      && String(state.selectedCandidateId || "") === String(candidateId || "")
+      && candidateSampleSelectionMatches(runId, candidateId);
   }
 
   // Poll the durable projection while a run is active.  This is deliberately
@@ -410,16 +422,18 @@
   function renderCandidateSampleViews() {
     if (typeof renderCandidateSamples === "function") { renderCandidateSamples(); }
     if (state.workspace === "process" && typeof renderExecutionSamples === "function") {
-      var round = typeof executionRound === "function" ? executionRound(state.activeRun) : null;
-      var candidate = typeof executionCandidateFor === "function" ? executionCandidateFor(state.activeRun, round) : null;
-      renderExecutionSamples(candidate, state.activeRun);
+      var run = displayedRun();
+      var round = typeof executionRound === "function" ? executionRound(run) : null;
+      var candidate = typeof executionCandidateFor === "function" ? executionCandidateFor(run, round) : null;
+      renderExecutionSamples(candidate, run);
     }
   }
 
   function loadCandidateSamples(offset, options) {
     if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
+    if (createDisplayStatus()) { return Promise.resolve(false); }
     var settings = options || {};
-    var run = state.activeRun;
+    var run = displayedRun();
     var candidate = selectedCandidateForSamples();
     if (!run || !candidate) {
       resetCandidateSamples(run && run.id, null);
@@ -463,7 +477,7 @@
     var contextEpoch = state.contextEpoch;
     var query = new URLSearchParams({candidate_id: candidateId, offset: String(pageOffset), limit: String(pageLimit)});
     return request("/runs/" + encodeURIComponent(run.id) + "/samples?" + query.toString(), {timeout: dataRequestTimeout}).then(function (payload) {
-      if (requestId !== state.candidateSampleRequest || contextEpoch !== state.contextEpoch || !candidateSampleSelectionMatches(run.id, candidateId)) { return false; }
+      if (!candidateSampleRequestIsCurrent(requestId, contextEpoch, run.id, candidateId)) { return false; }
       state.candidateSamplePage = normalizeCandidateSamplePage(payload, run.id, candidateId, pageOffset, pageLimit);
       state.candidateSampleOffset = state.candidateSamplePage.offset;
       state.candidateSampleRetryOffset = null;
@@ -471,7 +485,7 @@
       state.candidateSampleError = null;
       return true;
     }).catch(function (error) {
-      if (requestId !== state.candidateSampleRequest || contextEpoch !== state.contextEpoch || !candidateSampleSelectionMatches(run.id, candidateId)) { return false; }
+      if (!candidateSampleRequestIsCurrent(requestId, contextEpoch, run.id, candidateId)) { return false; }
       if (Number(error && error.status) === 403) {
         state.candidateSamplePage = null;
         state.candidateSampleUnavailable = true;
@@ -484,7 +498,7 @@
       if (settings.silent !== true) { showToast("逐样本结果读取失败，已保留当前数据。"); }
       return false;
     }).finally(function () {
-      if (requestId === state.candidateSampleRequest) {
+      if (candidateSampleRequestIsCurrent(requestId, contextEpoch, run.id, candidateId)) {
         state.candidateSampleLoading = false;
         state.candidateSampleRefreshing = false;
         renderCandidateSampleViews();
@@ -495,7 +509,7 @@
   function refreshCandidateSamples(options) {
     if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
     var settings = options || {};
-    var run = state.activeRun;
+    var run = displayedRun();
     var candidate = selectedCandidateForSamples();
     if (!run || !candidate) { return Promise.resolve(false); }
     var candidateId = candidate.id || candidate.candidate_id;
@@ -610,6 +624,9 @@
     }
     var incomingStatus = String(incomingRun.status || "").toLowerCase();
     if (incomingStatus !== "failed") { return false; }
+    // The old run may still be polled while a new creation is in preflight.
+    // Its failure must not replace the new attempt's actual error banner.
+    if (state.createStatus && !state.createStatus.runId) { return false; }
     var previousStatus = String(previousRun && previousRun.status || "").toLowerCase();
     state.commandError = "后台进化失败：" + runFailureMessage(incomingRun, events);
     if (previousStatus !== "failed") { showToast(state.commandError); }

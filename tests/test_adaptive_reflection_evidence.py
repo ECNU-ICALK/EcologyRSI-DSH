@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from ecologyrsi_dsh.application.generation_execution import (
@@ -475,6 +476,10 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
 
         self.assertEqual(analysis.selected_candidate_id, candidates[3].candidate_id)
         self.assertEqual(analysis.eligible_count, 1)
+        self.assertIn("3 臂留出比较", analysis.selection_reason)
+        self.assertIn("2 个 finalist", analysis.next_generation_focus)
+        self.assertNotIn("Top-2", analysis.next_generation_focus)
+        self.assertNotIn("训练比较", analysis.selection_reason)
         self.assertEqual(len(analysis.ranking), 4)
         winner = analysis.ranking[0]
         failed = next(
@@ -727,6 +732,13 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             incumbent_revision.candidate_id,
         )
         self.assertIsNone(no_improvement.champion_candidate_id)
+        self.assertEqual(no_improvement.eligible_count, 0)
+        self.assertEqual(
+            no_improvement.selection_reason,
+            "本轮 2 个 finalist 均未通过留出集门禁，保留 incumbent。",
+        )
+        self.assertIn("2 个 finalist", no_improvement.next_generation_focus)
+        self.assertNotIn("Top-2", no_improvement.next_generation_focus)
         self.assertIn("incumbent", no_improvement.next_search_direction[0])
         self.assertNotIn("冠军", no_improvement.next_search_direction[0])
         self.assertTrue(all(row["rank"] is None for row in no_improvement.ranking))
@@ -752,6 +764,64 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             ],
             incumbent_revision.revision_id,
         )
+
+        # A one-finalist schedule has two actual holdout arms. Wording must
+        # describe those arms without changing gate eligibility or selection.
+        for selected_finalist in (False, True):
+            with self.subTest(single_finalist_selected=selected_finalist):
+                single_gate = finalist_gate(
+                    eligible=selected_finalist,
+                    no_regression=selected_finalist,
+                )
+                selected_holdout = (
+                    failed_holdout if selected_finalist else incumbent_holdout
+                )
+                single_comparison = replace(
+                    incumbent_comparison,
+                    holdout_evaluations=(failed_holdout, incumbent_holdout),
+                    selected_candidate_id=selected_holdout.scope.candidate_id,
+                    selected_revision_id=selected_holdout.scope.candidate_revision_id,
+                    gate_results={
+                        **incumbent_gate_results,
+                        "arms": {
+                            HoldoutArm.FINALIST_1.value: single_gate,
+                            HoldoutArm.INCUMBENT.value: gate_results["arms"][
+                                HoldoutArm.INCUMBENT.value
+                            ],
+                        },
+                        "eligible_finalist_count": int(selected_finalist),
+                        "selected_arm": selected_holdout.scope.holdout_arm.value,
+                        "selected_score": selected_holdout.score,
+                        "delta_to_incumbent": (
+                            selected_holdout.score - incumbent_holdout.score
+                        ),
+                    },
+                )
+                before = canonical_json(single_comparison.to_dict())
+                single = _build_adaptive_analysis(
+                    state,
+                    0,
+                    single_comparison,
+                    (candidates[0],),
+                    incumbent_revision.candidate_id,
+                )
+                self.assertEqual(single.eligible_count, int(selected_finalist))
+                self.assertEqual(
+                    single.selected_candidate_id,
+                    candidates[0].candidate_id if selected_finalist else None,
+                )
+                self.assertIn("1 个 finalist", single.next_generation_focus)
+                self.assertNotIn("Top-2", single.next_generation_focus)
+                if selected_finalist:
+                    self.assertIn("2 臂留出比较", single.selection_reason)
+                    self.assertNotIn("三臂", single.selection_reason)
+                    self.assertNotIn("训练比较", single.selection_reason)
+                else:
+                    self.assertEqual(
+                        single.selection_reason,
+                        "本轮 1 个 finalist 均未通过留出集门禁，保留 incumbent。",
+                    )
+                self.assertEqual(before, canonical_json(single_comparison.to_dict()))
 
         exploration_comparison = GenerationComparison(
             comparison_id="comparison:adaptive-reflection:exploration",

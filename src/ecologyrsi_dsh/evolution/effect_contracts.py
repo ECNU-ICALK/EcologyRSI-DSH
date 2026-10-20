@@ -17,6 +17,7 @@ EFFECT_CONTRACT_SCHEMA = "ecologyrsi-dsh.edit-effect-contract/1"
 TRAINING_EVIDENCE_PHASES = frozenset({"screening", "formal_batch", "training_feedback"})
 _PREDICATES = {
     "candidate_model_evidence": "hard",
+    "strategy_program_evidence": "hard",
     "guidance_behavior_changed": "soft",
     "skill_triggered": "soft",
     "execution_branch_exercised": "hard",
@@ -116,6 +117,8 @@ def resolve_mutation_effects(parent, child, operations, registry, *, runtime_con
         scientific = source["scientific_program"]
         op = operation["op"]
         name = operation.get("name")
+        if op == "author_strategy_program":
+            return profile(genome, "sample-planner").get("strategy_program"), "compiled_strategy_program"
         if op == "set_bounded_parameter":
             return scientific["parameter_overrides"].get(name), "candidate_parameter"
         if op == "select_registered_pipeline":
@@ -177,9 +180,15 @@ def resolve_mutation_effects(parent, child, operations, registry, *, runtime_con
 def _effect_checks(resolution: Mapping) -> list[dict]:
     checks = {}
     for row in resolution["operations"]:
-        predicate = ("candidate_model_evidence" if row["effect_kind"] == "prediction" else
+        predicate = ("strategy_program_evidence" if row["operation"] == "author_strategy_program" else "candidate_model_evidence" if row["effect_kind"] == "prediction" else
                      "execution_branch_exercised" if row["effect_kind"] == "execution" else
                      "guidance_behavior_changed")
+        if row["operation"] == "author_strategy_program":
+            before, after = row["before_effective_value"], row["after_effective_value"]
+            if isinstance(before, Mapping) and all(before.get(k) == after.get(k) for k in ("calls", "expression")):
+                # A guidance-only revision is not measured merely by running
+                # unchanged arithmetic. Its effect needs paired observations.
+                predicate = "guidance_behavior_changed"
         checks[predicate] = {"predicate_id": predicate, "semantics": _PREDICATES[predicate]}
         if row["operation"] == "author_skill_program":
             checks["skill_triggered"] = {"predicate_id": "skill_triggered", "semantics": "soft"}
@@ -234,7 +243,7 @@ def _checked_observations(checks, observations):
         refs = _texts(observation["evidence_refs"], "effect evidence_refs")
         if eligible and not refs:
             raise ValueError("effect observation requires receipt references")
-        satisfied = matched == eligible if predicate == "candidate_model_evidence" else matched > 0
+        satisfied = matched == eligible if predicate in {"candidate_model_evidence", "strategy_program_evidence"} else matched > 0
         status = ("not_exercised" if eligible == 0 else "passed" if satisfied else
                   "failed" if check["semantics"] == "hard" else "inconclusive")
         results.append({**check, **dict(observation), "status": status})
@@ -319,6 +328,9 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
     eligible, model_matches, skill_eligible, triggered, branch_eligible, branches = 0, 0, 0, 0, 0, 0
     trace_missing = False
     formula_observed = formula_matched = 0
+    program_matches = 0
+    program_digests = {digest(row["after_effective_value"]) for row in (resolution or {}).get("operations", ())
+                       if row["operation"] == "author_strategy_program"}
     for record in records:
         if affected_cells and "target" in record and "horizon_hours" in record:
             if f"{record['target']}@{record['horizon_hours']}h" not in affected_cells:
@@ -348,10 +360,14 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
                 model_refs.add(ref)
             if (tool.get("status") == "completed" and tool.get("used_as_evidence") is True
                     and (tool.get("tool_id") == "candidate-model"
+                         or (tool.get("tool_id") == "candidate-program" and tool.get("candidate_model_consumed") is True)
                          or (expected_predictor is not None and tool.get("tool_id") == expected_predictor
                              and tool.get("effective_parameters_digest") == expected_parameters))):
                 matched = True
         model_matches += int(matched)
+        program_matches += int(any(tool.get("status") == "completed" and tool.get("used_as_evidence") is True
+            and tool.get("tool_id") == "candidate-program" and tool.get("program_digest") in program_digests
+            for tool in accepted.get("model_evidence", ())))
         # A final-prediction digest also proves an observed direct/no-tool case.
         formula_status = accepted.get("selected_tool", {}).get("formula_status")
         formula_observed += int(formula_status in {"passed", "not_exercised"})
@@ -367,6 +383,7 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
             triggered += int(skill["trigger_status"] == "triggered")
             skill_refs.add("skill:" + skill["output_digest"])
     observations = {
+        "strategy_program_evidence": {"eligible": eligible, "matched": program_matches, "evidence_refs": sorted(model_refs)},
         "candidate_model_evidence": {"eligible": eligible, "matched": model_matches, "evidence_refs": sorted(model_refs)},
         "skill_triggered": {"eligible": skill_eligible, "matched": triggered, "evidence_refs": sorted(skill_refs)},
         "execution_branch_exercised": {"eligible": branch_eligible, "matched": branches, "evidence_refs": sorted(branch_refs)},

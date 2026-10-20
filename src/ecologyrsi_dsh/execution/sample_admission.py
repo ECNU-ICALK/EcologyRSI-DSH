@@ -9,7 +9,7 @@ from typing import Callable, Iterator
 
 from ..core.errors import (
     dsh_native_runtime_error_in_chain,
-    dsh_native_runtime_retryable,
+    dsh_native_runtime_congestion_signal,
     dsh_native_runtime_evaluation_fatal,
 )
 
@@ -142,7 +142,7 @@ class RunSampleAdmission:
                     notify_failure = True
                 if (
                     dsh_error is not None
-                    and dsh_native_runtime_retryable(dsh_error)
+                    and dsh_native_runtime_congestion_signal(dsh_error)
                     and not (resumed and dsh_error.provider_status is None)
                     and dsh_error.error_code != "dsh_native_runtime_transport_error"
                     and admission_congestion_epoch == state.congestion_epoch
@@ -185,6 +185,23 @@ class RunSampleAdmission:
                         state.successful_since_adjustment = 0
                         state.adjustment_epoch += 1
                 self._condition.notify_all()
+
+    def execution_failure_for(self, run_id: str) -> BaseException | None:
+        """Read the failure owning sibling drain; never expose its payload."""
+        with self._lock:
+            state = self._states.get(run_id)
+            return state.execution_failure if state is not None else None
+
+    def reset_execution_failure(self, run_id: str) -> None:
+        """Reopen only drained admissions at an explicit resume boundary."""
+        with self._condition:
+            state = self._states.get(run_id)
+            if state is None:
+                return
+            if state.active or state.waiting:
+                raise RuntimeError("cannot reset execution failure before sample quiescence")
+            state.execution_failure = None
+            self._condition.notify_all()
 
     def snapshot(self, run_id: str) -> dict[str, int]:
         with self._lock:

@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from ..core.ledger import ConcurrentRunMutationError
 from ..core.models import canonical_json, digest
+from ..core.agent_prediction import PredictionContractViolation
 from ..knowledge.retrieval import (
     assess_dynamic_search_quality,
     merge_dynamic_search_results,
@@ -252,8 +253,10 @@ class DshToolService:
         *,
         retrieval_fallback: Callable[..., Mapping[str, Any]] | None = None,
         monotonic_ms: Callable[[], float] | None = None,
+        activation_attestor: Callable[..., bool] | None = None,
     ) -> None:
         self.ledger = ledger
+        self._activation_attestor = activation_attestor
         self._fences: dict[tuple[str, int, int], AdmissionFence] = {}
         self._run_admission: dict[str, str] = {}
         self._admission_registry_lock = RLock()
@@ -307,19 +310,22 @@ class DshToolService:
 
     @contextmanager
     def bind_prediction_tool(self, *, run_id, stage_attempt, idempotency_key,
-                             wave_digest, sample_ids, catalog, executor,
-                             prediction_tool_call_budget=None, origin_timestamp=None, mean_blend_required=False):
+                             wave_digest, sample_ids, catalog, executor, identity_digests,
+                             prediction_tool_call_budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None):
         """Bind a bounded model/tool catalog to one authenticated Agent wave."""
         if not run_id or not idempotency_key or not sample_ids or len(set(sample_ids)) != len(sample_ids):
             raise ValueError("invalid prediction wave identity")
         if len(wave_digest) != 64 or stage_attempt < 1:
             raise ValueError("invalid prediction wave digest/attempt")
+        if identity_digests is None:
+            raise ValueError("prediction wave requires frozen Host identity")
         key = (run_id, stage_attempt, idempotency_key)
         binding = DshPredictionToolBinding(
             run_id=run_id, stage_attempt=stage_attempt, idempotency_key=idempotency_key,
             wave_digest=wave_digest, sample_ids=sample_ids, catalog=catalog, executor=executor,
             budget=prediction_tool_call_budget, origin_timestamp=origin_timestamp,
-            mean_blend_required=mean_blend_required,
+            mean_blend_required=mean_blend_required, allowed_methods=allowed_methods,
+            identity_digests=identity_digests,
         )
         with self._prediction_lock:
             if key in self._prediction_bindings:
@@ -1189,6 +1195,144 @@ class DshToolService:
                     )
         return role
 
+    def _require_prediction_activation(self, identity, binding, fence, admission_id) -> None:
+        """Read the Host wave and the native process's actual child activation.
+
+        Neither an envelope nor a successful dry-run can register a session or
+        grant a lease. Native attestation is a separate authenticated read, and
+        final persistence checks again while its original Host fence is open.
+        """
+        if binding.identity_digests is None or any(
+            identity[name] != binding.identity_digests[name]
+            for name in _GENOME_IDENTITY_DIGEST_FIELDS
+        ):
+            raise DshToolAuthorizationError("prediction frozen identity mismatch")
+        key = (str(identity["run_id"]), int(identity["stage_attempt"]), str(identity["idempotency_key"]))
+
+        def remaining() -> float:
+            with self._prediction_lock:
+                if self._prediction_bindings.get(key) is not binding:
+                    raise DshPredictionBindingClosedError("prediction binding is closed")
+            with self._admission_registry_lock:
+                if self._run_admission.get(identity["run_id"], "open") != "open":
+                    raise DshToolAdmissionClosedError("run admission is closed")
+            with fence.lock:
+                if (fence.run_id != identity["run_id"] or fence.run_state_revision != identity["run_state_revision"]
+                    or fence.stage_attempt != identity["stage_attempt"] or fence.admission_id != admission_id
+                    or fence.role != identity["role"] or fence.stage != identity["stage"]
+                    or fence.idempotency_key != identity["idempotency_key"]):
+                    raise DshToolAuthorizationError("prediction activation admission mismatch")
+                if fence.state != "open":
+                    raise DshToolAdmissionClosedError("stage admission is closed")
+                if fence.deadline_monotonic_ms is None:
+                    raise DshToolOperationalTimeoutError("structured admission is not armed")
+                seconds = (fence.deadline_monotonic_ms - self._monotonic_ms()) / 1000
+                if seconds <= 0:
+                    raise DshToolOperationalTimeoutError("structured role deadline expired")
+                return seconds
+
+        timeout = remaining()
+        events = self.ledger.dsh_usage_binding_events(
+            identity["run_id"], identity["child_reservation_id"], identity["session_id"]
+        )
+        reservation = next((event for event in events if event.kind == "DshChildLaunchReserved"
+            and event.payload.get("launch", {}).get("reservation_id") == identity["child_reservation_id"]), None)
+        if reservation is None or any(reservation.payload["launch"].get(name) != identity[name]
+                for name in ("run_id", "stage", "role", "idempotency_key")):
+            raise DshToolAuthorizationError("prediction activation reservation mismatch")
+        if self._activation_attestor is None:
+            raise DshStructuredResultPersistenceError("native activation attestation is unavailable")
+        from ..core.errors import DshNativeRuntimeUnavailableError
+        try:
+            valid = self._activation_attestor(dict(identity),
+                parent_session_id=reservation.payload["parent_session_id"], timeout=timeout)
+        except DshNativeRuntimeUnavailableError as exc:
+            remaining()
+            if getattr(exc, "error_code", None) == "dsh_native_runtime_contract_error":
+                raise RuntimeError("invalid native activation attestation") from exc
+            if getattr(exc, "status_code", None) in (401, 403):
+                raise DshToolAuthorizationError("native activation attestation authorization failed") from exc
+            raise DshStructuredResultPersistenceError("native activation attestation is unavailable") from exc
+        remaining()
+        if valid is not True:
+            if valid is not False:
+                raise RuntimeError("invalid native activation attestation")
+            raise DshToolAuthorizationError("prediction child activation mismatch")
+
+    def validate_structured(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
+        """Dry-run the live Planner binding, before native one-shot capture.
+
+        This is not an acceptance receipt or a reservation. It writes no event,
+        executes no capability, consumes no budget and never closes admission.
+        The eventual accept_structured call still validates its own payload.
+        """
+        if not isinstance(envelope, Mapping) or set(envelope) != {
+            "identity", "output_schema_id", "structured", "result_digest", "admission_id"
+        }:
+            raise DshToolAuthorizationError("invalid prediction validation envelope")
+        identity = envelope["identity"]
+        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
+            raise DshToolAuthorizationError("invalid Host-bound prediction validation identity")
+        if identity.get("stage") != "sample.plan" or envelope["output_schema_id"] != "ecology-sample-predictions@2":
+            raise DshToolAuthorizationError("prediction validation stage/schema mismatch")
+        self._authorize_identity(identity, expected_role="sample-planner", allow_ledger_advance=True)
+        run_id = str(identity["run_id"])
+        key = (run_id, int(identity["stage_attempt"]), str(identity["idempotency_key"]))
+        fence_key = (run_id, int(identity["run_state_revision"]), int(identity["stage_attempt"]))
+        with self._admission_registry_lock:
+            fence = self._fences.get(fence_key)
+        if fence is None:
+            raise DshToolAdmissionClosedError("structured admission is unavailable")
+
+        def require_open() -> None:
+            with self._admission_registry_lock:
+                if self._run_admission.get(run_id, "open") != "open":
+                    raise DshToolAdmissionClosedError("run admission is closed")
+            with fence.lock:
+                if (fence.admission_id != envelope["admission_id"]
+                    or fence.role != identity["role"] or fence.stage != identity["stage"]
+                    or fence.idempotency_key != identity["idempotency_key"]):
+                    raise DshToolAuthorizationError("structured admission binding mismatch")
+                if fence.state != "open":
+                    raise DshToolAdmissionClosedError("stage admission is closed")
+                if fence.deadline_monotonic_ms is None or self._monotonic_ms() >= fence.deadline_monotonic_ms:
+                    raise DshToolOperationalTimeoutError("structured role deadline expired")
+
+        require_open()
+        with self._prediction_lock:
+            binding = self._prediction_bindings.get(key)
+        if binding is None:
+            raise DshPredictionBindingClosedError("sample.plan has no active prediction tool binding")
+        self._require_prediction_activation(identity, binding, fence, envelope["admission_id"])
+        structured = envelope["structured"]
+        if not isinstance(structured, Mapping) or structured.get("wave_digest") != binding.wave_digest:
+            raise DshToolAuthorizationError("sample.plan result does not match its prediction wave")
+        actual_digest = digest(structured)
+        if envelope["result_digest"] != actual_digest:
+            raise DshToolAuthorizationError("prediction validation result digest mismatch")
+        diagnostics = []
+        try:
+            binding.final_receipt(structured, session_id=str(identity["session_id"]))
+        except PredictionContractViolation as exc:
+            # Only a known domain exception becomes correctable model feedback.
+            # Other ValueError/RuntimeError/transport failures keep their type.
+            diagnostics = [dict(item) for item in exc.diagnostics]
+            if not diagnostics:
+                raise RuntimeError("prediction contract failure has no diagnostics") from exc
+        require_open()
+        with self._prediction_lock:
+            if self._prediction_bindings.get(key) is not binding:
+                raise DshPredictionBindingClosedError("prediction binding closed during validation")
+        result = {"schema_version": "ecologyrsi-dsh.prediction-prevalidation/1",
+                  "valid": not diagnostics, "result_digest": actual_digest, "diagnostics": diagnostics}
+        # Paths contain only Host-generated indices and field names. A known
+        # failure stays invalid even when its bounded details are truncated.
+        while len(canonical_json(result).encode("utf-8")) > 4096 and len(diagnostics) > 1:
+            diagnostics.pop()
+        if len(canonical_json(result).encode("utf-8")) > 4096:
+            raise RuntimeError("prediction validation diagnostics exceeded their bound")
+        return result
+
     def accept_structured(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
         required_fields = {
             "identity",
@@ -1362,6 +1506,9 @@ class DshToolService:
             if not fence_open:
                 raise DshToolAdmissionClosedError("stage admission is closed")
             raise DshToolOperationalTimeoutError("structured role deadline expired")
+
+        if identity.get("stage") == "sample.plan":
+            self._require_prediction_activation(identity, binding, fence, admission_id)
 
         @contextmanager
         def commit_guard(inserted: bool) -> Iterator[None]:

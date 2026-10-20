@@ -2876,6 +2876,41 @@ def _execute_adaptive_holdout_arm(
     return evaluation
 
 
+def _execute_joint_holdout_recheck(services, run_id, original, cohort):
+    """One checkpointed second inference; original results remain immutable."""
+    state = services.director.state(run_id)
+    scope = replace(original.scope, inference_replica=1)
+    existing = state.holdout_recheck_for(scope.generation, scope.holdout_arm)
+    if existing is not None:
+        return existing
+    if not _run_admission_open(services.director, run_id):
+        raise RuntimeError("joint holdout recheck interrupted by run control")
+    event_id = f"{run_id}:generation:{scope.generation}:holdout:{scope.holdout_arm.value}:recheck-started"
+    if not any(event.event_id == event_id for event in state.events):
+        services.ledger.append(run_id, "HoldoutRecheckStarted", {
+            "schema_version": "ecologyrsi-dsh.holdout-arm-started/1",
+            "generation": scope.generation, "holdout_arm": scope.holdout_arm.value,
+            "candidate_id": scope.candidate_id, "candidate_revision_id": scope.candidate_revision_id,
+            "cohort_digest": scope.cohort_digest, "origin_count": scope.origin_count}, event_id=event_id)
+    task = _phase_task_manifest(state.task_manifest, scope.generation, "holdout")
+    candidate, proposal, spec = _holdout_replay_inputs(state,
+        state.candidate(scope.candidate_id), scope.generation, scope.candidate_revision_id, task)
+    callbacks = EvaluationSession(services, run_id=run_id, generation=scope.generation,
+        proposal_id=candidate.proposal_id, candidate_id=candidate.candidate_id, scope=scope)
+    bundle = services.evaluators.evaluate_scientific(task, candidate, proposal,
+        scope=scope, cohort=cohort, algorithm_spec=spec, **callbacks.evaluation_kwargs())
+    from ..evaluators.execution_validity import require_valid_execution
+    require_valid_execution(bundle.evaluation.metrics, cohort.origin_count, phase="holdout_recheck")
+    if bundle.sample_results is None:
+        raise RuntimeError("joint recheck is missing its durable sample-result checkpoint")
+    evaluation = HoldoutEvaluation(
+        evaluation_id=f"holdout-recheck:{scope.generation}:{scope.holdout_arm.value}",
+        scope=scope, score=bundle.evaluation.score, passed=bundle.evaluation.passed,
+        metrics=deep_thaw_json(bundle.evaluation.metrics), evaluator_digest=str(bundle.evaluation.evaluator_digest))
+    return _director_mutation(services, "record_holdout_evaluation", run_id, evaluation,
+        sample_results=callbacks.completion_payload(evaluation.evaluation_id, bundle.sample_results))
+
+
 def _canonical_holdout_outcome_complete(
     artifact: Any,
     evaluation: Evaluation | None,
@@ -3688,9 +3723,14 @@ def _build_adaptive_analysis(
             if positive_delta_search and selected
             else "修复初筛失败原因后再寻求全局晋升"
             if exploration_only
-            else "保持 Top-2 结构，围绕留出比较选中候选继续批次局部更新"
+            else (
+                f"围绕本轮 {len(finalist_evaluations)} 个 finalist 的留出比较结果，"
+                "继续批次局部更新"
+            )
             if selected
-            else "保持 Top-2 结构，修复本轮 finalist 的留出门禁失败"
+            else (
+                f"修复本轮 {len(finalist_evaluations)} 个 finalist 的留出门禁失败"
+            )
         ),
         selection_reason=(
             (
@@ -3706,13 +3746,16 @@ def _build_adaptive_analysis(
             if positive_delta_search and selected
             else "本代无候选通过初筛，仅保留探索证据；全局 incumbent 不变。"
             if exploration_only
-            else f"候选 {selected} 在本轮冻结的三臂训练比较中胜出。"
+            else (
+                f"候选 {selected} 在本轮冻结的 "
+                f"{len(comparison.holdout_evaluations)} 臂留出比较中胜出。"
+            )
             if selected
             # The finalist count is scheduled, not fixed: `quick_adaptive_epoch@1`
             # runs a single finalist, so a hardcoded "两个 finalist" misreported
             # every failed quick generation. Report what this epoch actually ran.
             else (
-                f"本轮 {len(eligible_finalist_ids)} 个 finalist "
+                f"本轮 {len(finalist_evaluations)} 个 finalist "
                 "均未通过留出集门禁，保留 incumbent。"
             )
         ),
@@ -3948,7 +3991,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
     if comparison is None:
         reviews = _ensure_finalist_reviews(services, run_id, evaluations)
         state = services.director.state(run_id)
-        comparison = build_generation_comparison(
+        comparison_inputs = dict(
             quick_experiment=schedule.quick,
             experiment_protocol=schedule.protocol,
             training_effect_evidence=finalist_training_effect_evidence(evaluations,
@@ -3969,6 +4012,13 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
             ),
             require_paired_strict_chain=guarded_search(state.task_manifest.metadata),
         )
+        comparison = build_generation_comparison(**comparison_inputs)
+        if schedule.unified:
+            recheck = comparison.gate_results["arms"]["finalist_1"]["joint_recheck"]
+            if recheck["required"]:
+                repeats = tuple(_execute_joint_holdout_recheck(services, run_id, item, cohorts.holdout)
+                                for item in evaluations)
+                comparison = build_generation_comparison(**comparison_inputs, holdout_rechecks=repeats)
         _director_mutation(services, "record_generation_comparison", run_id, comparison)
     _director_mutation(
         services,

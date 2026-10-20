@@ -16,7 +16,10 @@ from ecologyrsi_dsh.api.projection import (
     _host_activity_projection, _runtime_failure_projection,
 )
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
-from ecologyrsi_dsh.core.model_execution_policy import LOCAL_EDIT_CONTEXT_POLICY, NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+from ecologyrsi_dsh.core.model_execution_policy import (
+    LOCAL_EDIT_CONTEXT_POLICY, NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+)
 from ecologyrsi_dsh.core.trajectory import LocalEditOutcome
 from ecologyrsi_dsh.evolution.local_edits import LocalEditProposal, LocalEditResult
 from ecologyrsi_dsh.execution.host_activity import HostActivityMonitor, validate_host_interruption
@@ -52,18 +55,34 @@ class EditorEvidenceTests(TestCase):
         parent = _parent()
         context = _context(parent)
         revision = NS(revision_id=context.candidate_revision_id, genome=parent.to_dict(),
-                      candidate_id=context.candidate_id, behavior_digest=parent.behavior_digest)
+                      candidate_id=context.candidate_id, behavior_digest=parent.behavior_digest,
+                      genome_digest=parent.genome_digest)
+        candidate = NS(candidate_id=context.candidate_id)
+        # A native editor now resolves the actual revision identity. Keep this
+        # R0 fixture complete instead of bypassing that production validation.
+        identity = {
+            "execution_protocol": "dsh_native_plugin_evolution@1",
+            "genome_digest": parent.genome_digest, "behavior_digest": parent.behavior_digest,
+            **{key: "a" * 64 for key in (
+                "compiled_behavior_digest", "phenotype_instance_digest", "compiler_semantic_digest",
+                "registry_catalog_digest", "security_semantic_digest", "runtime_execution_digest",
+                "evaluation_cohort_digest")},
+        }
         evaluation = NS(score=.1, passed=False, metrics={"sample_execution": {"coverage_pass": True}}, scope=NS(scope_key="scope"))
         state = policy_state(run=NS(run_id=context.run_id), events=(NS(seq=1),),
-            candidate_identity_binding=lambda _: {}, batch_evaluation_for=lambda *_: evaluation,
+            candidate=lambda _: candidate, candidate_identity_binding=lambda _: identity,
+            batch_evaluation_for=lambda *_: evaluation,
             revision=lambda _: revision, formal_batches=(), local_edit_outcomes=(),
             local_edit_proposal_for=lambda *_: None, candidate_revisions=(revision,), batch_comparison_for=lambda *_: None)
         services = NS(dsh_native_runtime=object(), ledger=NS(latest_seq=lambda: 1))
         answer = LocalEditProposal("keep", (), context.allowed_evidence_refs[:1], (), ())
         with patch("ecologyrsi_dsh.application.formal_trajectory.DshStructuredRoleRuntime") as runtime:
             runtime.return_value.run.return_value = answer.to_dict()
-            self.assertEqual(_local_edit_proposal(services, state, NS(candidate_id=context.candidate_id), NS(batch_index=0), context), answer)
+            self.assertEqual(_local_edit_proposal(services, state, candidate, NS(batch_index=0), context), answer)
             sent = runtime.return_value.run.call_args.kwargs["context"]
+            self.assertEqual(runtime.return_value.run.call_args.kwargs["identity_digests"],
+                             {key: identity[key] for key in (
+                                 "genome_digest", "compiled_behavior_digest", "phenotype_instance_digest")})
         self.assertFalse(sent["decision_policy"]["host_rolls_back_a_clear_score_regression"])
         self.assertFalse(sent["decision_policy"]["cross_batch_scores_measure_edit_effect"])
         self.assertIsNone(sent["best_observed"])
@@ -148,23 +167,40 @@ class HostInterruptionTests(TestCase):
         self.assertEqual(callback[0], callback[1])
 
     def test_only_confirmed_provider_congestion_reduces_limit_across_gap(self):
-        cases = [(False, "structured_role_operational_timeout", None, 4),
-                 (True, "structured_role_operational_timeout", None, 8),
-                 (True, "provider_unavailable", 503, 4),
-                 (True, "provider_rate_limited", 429, 4),
-                 (False, "dsh_native_runtime_transport_error", None, 8)]
-        for gap, code, provider_status, expected in cases:
-            with self.subTest(gap=gap, code=code):
-                monitor, clocks = self.monitor()
-                admission = RunSampleAdmission(host_activity=monitor)
-                with self.assertRaises(DshNativeRuntimeUnavailableError):
-                    with admission.admit("r", 8):
-                        if gap:
-                            clocks[0] += 100
-                            clocks[1] += 100
-                        raise DshNativeRuntimeUnavailableError(error_code=code, status_code=503, provider_status=provider_status)
-                self.assertEqual(admission.snapshot("r")["adaptive_limit"], expected)
-                self.assertEqual(admission.snapshot("r")["active"], 0)
+        # The HTTP envelope is the local native controller's status. Only its
+        # trusted provider domain plus upstream status prove provider failure.
+        # A local operational deadline is ambiguous even without a host gap.
+        cases = [
+            ("structured_role_operational_timeout", None, None, 8),
+            ("provider_unavailable", "provider", 503, 4),
+            ("provider_rate_limited", "provider", 429, 4),
+            ("provider_unavailable", None, 503, 8),
+            ("provider_unavailable", "provider", None, 8),
+            ("structured_result_persist_host_rejected", "execution_contract", None, 8),
+            ("dsh_native_runtime_transport_error", None, None, 8),
+        ]
+        for gap in (False, True):
+            for code, failure_domain, provider_status, expected in cases:
+                with self.subTest(gap=gap, code=code, failure_domain=failure_domain,
+                                  provider_status=provider_status):
+                    monitor, clocks = self.monitor()
+                    admission = RunSampleAdmission(host_activity=monitor)
+                    with self.assertRaises(DshNativeRuntimeUnavailableError):
+                        with admission.admit("r", 8):
+                            if gap:
+                                clocks[0] += 100
+                                clocks[1] += 100
+                            raise DshNativeRuntimeUnavailableError(
+                                error_code=code, status_code=503,
+                                failure_domain=failure_domain,
+                                provider_status=provider_status,
+                            )
+                    snapshot = admission.snapshot("r")
+                    self.assertEqual(snapshot["adaptive_limit"], expected)
+                    self.assertEqual(snapshot["congestion_events"], int(expected == 4))
+                    self.assertEqual(snapshot["active"], 0)
+                    self.assertEqual(snapshot["waiting"], 0)
+                    self.assertEqual(monitor.observe(), int(gap))
 
     def test_gap_is_idempotent_replayable_and_does_not_change_run_status(self):
         with EventLedger() as ledger:
@@ -229,6 +265,8 @@ class RuntimeProjectionTests(TestCase):
         self.assertEqual(usage["by_stage"]["sample.plan"], {"session_count": 1, "total_tokens": 120})
         self.assertEqual(sum(r["total_tokens"] for r in usage["by_stage"].values()), usage["total_tokens"])
 
-    def test_quality_limits_remain_unchanged(self):
+    def test_new_quality_limits_do_not_rewrite_historical_budgets(self):
         self.assertEqual(dict(NATIVE_SAMPLE_OPERATION_MAX_TOKENS), {
+            "sample.planner": 32768, "sample.repair": 32768, "sample.critic": 8192})
+        self.assertEqual(dict(LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS), {
             "sample.planner": 16384, "sample.repair": 16384, "sample.critic": 8192})

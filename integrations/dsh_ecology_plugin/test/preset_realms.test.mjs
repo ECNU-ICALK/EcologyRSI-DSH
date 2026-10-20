@@ -4,9 +4,9 @@ import test from "node:test";
 
 const ids = [
   "ecology-coordinator-v6",
-  "ecology-researcher-v15",
-  "ecology-candidate-proposer-v6",
-  "ecology-sample-planner-v12",
+  "ecology-researcher-v17",
+  "ecology-candidate-proposer-v9",
+  "ecology-sample-planner-v14",
   "ecology-sample-critic-v6",
   "ecology-generation-judge-v10",
 ];

@@ -83,7 +83,7 @@ def prior_candidate_tool_experience(state, candidate, metrics):
 
 
 def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis, generation,
-                       prediction_tool_call_budget=None, prediction_formula_policy=None):
+                       prediction_tool_call_budget=None, prediction_formula_policy=None, joint=False):
     budget = PREDICTION_TOOL_CALL_BUDGET if prediction_tool_call_budget is None else prediction_tool_call_budget
     if type(budget) is not int or not 1 <= budget <= MAX_PREDICTION_CALLS:
         raise ValueError('prediction tool call budget must be a positive int within the receipt cap')
@@ -113,6 +113,9 @@ def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis,
                           'max_tool_calls_per_attempt': budget,
                           'model_parameter_selection': 'agent_within_registered_bounds',
                           'critic_protocol': 'ecology-sample-review@2', 'holdout_replicates': 2}}
+    if joint:
+        from .joint_policy import INFERENCE_POLICY
+        body['inference']['tool_selection_policy'] = INFERENCE_POLICY
     if prediction_formula_policy is not None:
         body['inference']['prediction_formula_policy'] = prediction_formula_policy
     return {**body, 'policy_digest': digest(body)}
@@ -176,6 +179,7 @@ def rebind_agent_policy(policy, *, genome_digest, profile, parameters):
     base = build_agent_policy(genome_digest=genome_digest, profile=profile, parameters=parameters,
                               previous_analysis=None, generation=0,
                               prediction_tool_call_budget=frozen_budget,
+                              joint=bool(policy and policy.get("inference", {}).get("tool_selection_policy") == "autonomous-plugin-tools@1"),
                               prediction_formula_policy=(policy.get("inference", {}).get("prediction_formula_policy")
                                                          if policy is not None else None))
     if policy is not None:

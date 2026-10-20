@@ -24,7 +24,7 @@ class ParameterConsistencyTests(unittest.TestCase):
         defaults = {name: rule['default'] for name, rule in run_parameter_contract()['parameters'].items()}
         self.assertEqual(defaults['formal_origin_count'] % defaults['local_batch_origin_count'], 0)
         self.assertGreaterEqual(defaults['max_candidates'], defaults['rounds'] * defaults['candidates_per_generation'])
-        self.assertIsNotNone(OptimizationSchedule.for_new_run())
+        self.assertIsNotNone(OptimizationSchedule.for_quick_run())
         self.assertIsNotNone(OptimizationSchedule.for_comparison_run())
 
     def test_browser_bootstrap_matches_the_published_contract(self):

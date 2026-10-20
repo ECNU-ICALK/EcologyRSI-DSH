@@ -1,4 +1,4 @@
-include README.md CHANGELOG.md LICENSE NOTICE RELEASE-CHECKLIST.md pyproject.toml uv.lock Makefile
+include README.md CHANGELOG.md LICENSE NOTICE RELEASE-CHECKLIST.md pyproject.toml ruff.toml uv.lock Makefile
 recursive-include src *.py
 recursive-include src/ecologyrsi_dsh/knowledge *.json
 recursive-include examples *.py *.json *.md
@@ -15,16 +15,19 @@ exclude EcologyRSI-DSH-旧API迁移映射与验收附录.md
 exclude EcologyRSI-DSH-最终交付审查与运行说明.md
 exclude EcologyRSI-DSH-迁移清单模板.yaml
 recursive-include plugins/ecology_evolution *.html *.css *.js *.json *.md *.mjs
-recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml
+recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml *.py
 include integrations/dsh_ecology_plugin/LICENSE integrations/dsh_ecology_plugin/NOTICE
 prune integrations/dsh_ecology_plugin/.runtime
 prune integrations/dsh_ecology_plugin/.dsh
 prune integrations/dsh_ecology_plugin/.ssh
-include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.9.0.tgz
+include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.11.tgz
 recursive-include scripts *.sh *.py *.mjs *.cjs
-recursive-include tests *.py *.json
+recursive-include tests *.py *.json *.mjs
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
 global-exclude .env .env.* .npmrc .pypirc *.pem *.key *.p12 *.pfx
 global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yml
 global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yaml
 global-exclude */.runtime/* */.dsh/* */.ssh/*
+
+include docs/plugin-joint-evolution-2026-10-03.md
+include docs/reasoning-configuration-2026-10-20.md

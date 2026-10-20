@@ -47,8 +47,8 @@ def preflight_audit_required(metadata: Mapping[str, Any]) -> bool:
     return True
 
 
-def _audit_identities(metadata: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
-    identities = required_canary_identities(metadata)
+def _audit_identities(metadata: Mapping[str, Any], *, recorded: bool = False) -> tuple[dict[str, str], ...]:
+    identities = required_canary_identities(metadata, recorded=recorded)
     # Historical receipts prove only the roles checked at creation. Never
     # silently add critic evidence while replaying an immutable run.
     return identities[:2] if metadata.get(AUDIT_METADATA_KEY) == LEGACY_AUDIT_SCHEMA else identities
@@ -93,18 +93,23 @@ def _safe_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
 
 def build_preflight_audit(task: Any, run_id: str, receipts: Sequence[Mapping[str, Any]],
                           *, checked_at: str | None = None) -> dict[str, Any]:
+    return _build_preflight_audit(task, run_id, receipts, checked_at=checked_at, recorded=False)
+
+
+def _build_preflight_audit(task: Any, run_id: str, receipts: Sequence[Mapping[str, Any]],
+                           *, checked_at: str | None, recorded: bool) -> dict[str, Any]:
     if not preflight_audit_required(task.metadata):
         raise ValueError("run does not opt into durable model preflight audit")
     checked_at = checked_at or datetime.now(timezone.utc).isoformat()
     now = _time(checked_at)
-    identities = _audit_identities(task.metadata)
+    identities = _audit_identities(task.metadata, recorded=recorded)
     if len(receipts) != len(identities):
         raise ValueError("model preflight requires every frozen role")
     safe = []
     for receipt, identity in zip(receipts, identities, strict=True):
-        validate_canary_receipt(receipt, identity, now=now, require_passed=True)
+        validate_canary_receipt(receipt, identity, now=now, require_passed=True, recorded=recorded)
         summary = _safe_receipt(receipt)
-        validate_canary_receipt(summary, identity, now=now, require_passed=True)
+        validate_canary_receipt(summary, identity, now=now, require_passed=True, recorded=recorded)
         safe.append({"receipt": summary, "receipt_digest": digest(summary)})
     body = {"schema_version": task.metadata[AUDIT_METADATA_KEY], "scope": SCOPE, "run_id": run_id,
             "task_manifest_digest": task.digest, "checked_at": checked_at, "receipts": safe}
@@ -127,10 +132,10 @@ def validate_preflight_audit(payload: Mapping[str, Any], task: Any, run_id: str,
         raise ValueError("model preflight audit receipts are invalid")
     # The event timestamp is authoritative: a receipt must still be valid when
     # persisted, even when runtime setup took longer than the initial gate.
-    expected = build_preflight_audit(task, run_id, [entry["receipt"] for entry in entries],
-                                     checked_at=payload["checked_at"])
-    for entry, identity in zip(entries, _audit_identities(task.metadata), strict=True):
-        validate_canary_receipt(entry["receipt"], identity, now=recorded, require_passed=True)
+    expected = _build_preflight_audit(task, run_id, [entry["receipt"] for entry in entries],
+                                     checked_at=payload["checked_at"], recorded=True)
+    for entry, identity in zip(entries, _audit_identities(task.metadata, recorded=True), strict=True):
+        validate_canary_receipt(entry["receipt"], identity, now=recorded, require_passed=True, recorded=True)
     if digest(payload) != digest(expected):
         raise ValueError("model preflight audit identity or digest mismatch")
 

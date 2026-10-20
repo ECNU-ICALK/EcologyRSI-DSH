@@ -1,9 +1,27 @@
 from types import SimpleNamespace as NS
 import unittest
 
-from ecologyrsi_dsh.api.evidence_projection import candidate_score_evidence, evidence_funnel
+from ecologyrsi_dsh.api.evidence_projection import candidate_score_evidence, contribution_observations, evidence_funnel
 from ecologyrsi_dsh.evolution.diagnosis import diagnose_evidence, failure_category
 from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.core.trajectory import BatchEvaluation, EvaluationScope
+
+
+def frozen_receipt_batch(run_id="run:receipt", candidate_id="c", *, tampered=False):
+    receipt = {"schema_version": "ecologyrsi-dsh.edit-effect-receipt/1", "status": "passed",
+               "scope_digest": digest({"scope": run_id}),
+               "checks": [{"observed": {"values": [1, 2]}, "status": "passed"}]}
+    receipt["receipt_digest"] = digest(receipt)
+    if tampered:
+        receipt["checks"][0]["observed"]["values"][0] = 99
+    return BatchEvaluation(
+        evaluation_id="evaluation:receipt", scope=EvaluationScope(
+            run_id=run_id, generation=0, candidate_id=candidate_id,
+            candidate_revision_id="revision:receipt", phase="formal_batch",
+            cohort_digest=digest({"cohort": run_id}), origin_count=10, batch_index=0),
+        score=-.02, passed=False, evaluator_digest=digest({"evaluator": 1}),
+        metrics={"sample_execution": {"mutation_effect_receipt": receipt},
+                 "sample_execution_trace_archive": "private-compressed-trace"})
 
 
 def state(**values):
@@ -13,6 +31,46 @@ def state(**values):
 
 
 class EvidenceProjectionTests(unittest.TestCase):
+    def test_diagnostics_activation_is_not_inferred_from_deployment_or_measurements(self):
+        s = state()
+        self.assertEqual(contribution_observations(s)["status"], "not_enabled")
+        summary = {"schema_version": "test-summary", "cells": []}
+        s.formal_batch_evaluations = [NS(evaluation_id="e", metrics={"sample_execution": {"prediction_contribution": summary}})]
+        legacy = contribution_observations(s)
+        self.assertFalse(legacy["enabled"])
+        self.assertEqual(legacy["status"], "not_enabled")
+        self.assertEqual(legacy["latest_training_summary"], summary)
+        for policy in ("prediction_contribution@1", "prediction_contribution@2"):
+            s.task_manifest.metadata["behavior_diagnostics_policy"] = policy
+            self.assertEqual(contribution_observations(s)["status"], "recorded")
+            self.assertEqual(contribution_observations(s)["latest_training_summary"], summary)
+        s.formal_batch_evaluations = []
+        enabled = contribution_observations(s)
+        self.assertTrue(enabled["enabled"])
+        self.assertEqual(enabled["status"], "awaiting_evidence")
+        self.assertEqual(enabled["activation_source"], "frozen_task_manifest")
+
+    def test_deep_frozen_receipt_matches_plain_json_and_is_deduplicated_without_mutation(self):
+        batch = frozen_receipt_batch()
+        before = batch.to_dict()
+        s = state()
+        s.formal_batch_evaluations = [batch]
+        s.events = [NS(kind="CandidateScreeningRecorded", payload={"metrics": before["metrics"]})]
+        report = evidence_funnel(s)
+        observed = report["execution_effect_observations"]
+        self.assertEqual((observed["recorded"], observed["passed"]), (1, 1))
+        self.assertFalse(observed["controlled_behavior_change_verified"])
+        self.assertNotIn("private-compressed-trace", repr(report))
+        self.assertEqual(batch.to_dict(), before)
+        with self.assertRaises(TypeError):
+            batch.metrics["sample_execution"]["mutation_effect_receipt"]["checks"][0]["status"] = "failed"
+
+    def test_deep_frozen_receipt_with_tampered_nested_value_is_not_counted(self):
+        s = state()
+        s.formal_batch_evaluations = [frozen_receipt_batch(tampered=True)]
+        observed = evidence_funnel(s)["execution_effect_observations"]
+        self.assertEqual((observed["recorded"], observed["passed"]), (0, 0))
+
     def test_host_resolution_and_execution_receipts_are_counted_without_claiming_behavior_difference(self):
         resolution = {"schema_version": "ecologyrsi-dsh.mutation-effect-resolution/1", "operations": [{"path": "parameter:x"}]}
         resolution["resolution_digest"] = digest(resolution)

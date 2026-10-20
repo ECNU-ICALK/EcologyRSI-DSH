@@ -400,6 +400,99 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "strategy_program"
+            ],
+            "properties": {
+              "op": {
+                "const": "author_strategy_program"
+              },
+              "role": {
+                "const": "sample-planner"
+              },
+              "strategy_program": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "schema_version",
+                  "planner_prompt",
+                  "research_prompt",
+                  "proposal_prompt",
+                  "memory",
+                  "calls",
+                  "expression"
+                ],
+                "properties": {
+                  "schema_version": {
+                    "const": "ecologyrsi-dsh.strategy-program/1"
+                  },
+                  "planner_prompt": {
+                    "type": "string",
+                    "maxLength": 1200
+                  },
+                  "research_prompt": {
+                    "type": "string",
+                    "maxLength": 1200
+                  },
+                  "proposal_prompt": {
+                    "type": "string",
+                    "maxLength": 1200
+                  },
+                  "memory": {
+                    "type": "string",
+                    "maxLength": 1200
+                  },
+                  "calls": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "tool_id",
+                        "parameters"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_]{0,23}$"
+                        },
+                        "tool_id": {
+                          "enum": [
+                            "candidate-model",
+                            "persistence",
+                            "causal-trend@1",
+                            "causal-mean@1",
+                            "causal-seasonal@1",
+                            "greenhouse-exogenous-ridge@1",
+                            "greenhouse-baseline-aligned-ridge@1",
+                            "greenhouse-targetwise-ridge@1",
+                            "greenhouse-horizon-targetwise-ridge@1",
+                            "greenhouse-recipe-ridge@1"
+                          ]
+                        },
+                        "parameters": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  },
+                  "expression": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                }
+              }
+            }
           }
         ]
       }

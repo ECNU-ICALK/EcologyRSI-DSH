@@ -33,55 +33,95 @@ def successful_agent_provenance_passes(sample):
     return value is True
 
 
-def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str, allowed_methods=None):
+class PredictionContractViolation(ValueError):
+    """Known, correctable prediction errors with value-free bounded diagnostics.
+
+    The legacy exception text remains available to internal callers. Only the
+    fixed code/path projection is suitable for model feedback; never forward
+    arbitrary exception strings across that boundary.
+    """
+
+    def __init__(self, message, diagnostics):
+        super().__init__(message)
+        self.diagnostics = tuple(dict(item) for item in diagnostics[:32])
+
+
+def frozen_prediction_methods(allowed_methods=None):
     if allowed_methods is None:
-        permitted = PREDICTION_METHODS
-    else:
-        permitted = frozenset(allowed_methods)
-        if not permitted or not permitted <= PREDICTION_METHODS:
-            raise ValueError("allowed prediction methods are invalid")
+        return PREDICTION_METHODS
+    permitted = frozenset(allowed_methods)
+    if not permitted or not permitted <= PREDICTION_METHODS:
+        raise ValueError("allowed prediction methods are invalid")
+    return permitted
+
+
+def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str, allowed_methods=None):
+    permitted = frozen_prediction_methods(allowed_methods)
+    issues = []
+    messages = []
+
+    def invalid(message, code, path):
+        messages.append(message)
+        if len(issues) < 32:
+            issues.append({"code": code, "path": path})
+
+    def fail(message, code, path):
+        raise PredictionContractViolation(message, [{"code": code, "path": path}])
+
     if not isinstance(value, Mapping) or set(value) != {"schema_version", "wave_digest", "decisions"}:
-        raise ValueError("agent prediction result fields are invalid")
-    if value["schema_version"] != AGENT_PREDICTION_SCHEMA or value["wave_digest"] != wave_digest:
-        raise ValueError("agent prediction schema/wave mismatch")
+        fail("agent prediction result fields are invalid", "prediction_fields_invalid", "value")
+    if value["schema_version"] != AGENT_PREDICTION_SCHEMA:
+        fail("agent prediction schema/wave mismatch", "prediction_binding_mismatch", "value.schema_version")
+    if value["wave_digest"] != wave_digest:
+        fail("agent prediction schema/wave mismatch", "prediction_binding_mismatch", "value.wave_digest")
     rows = value["decisions"]
-    if not isinstance(rows, list) or len(rows) != len(sample_ids):
-        raise ValueError("agent must predict every sample exactly once")
+    if not isinstance(rows, list):
+        fail("agent must predict every sample exactly once", "sample_coverage_invalid", "value.decisions")
+    if len(rows) != len(sample_ids):
+        invalid("agent must predict every sample exactly once", "sample_coverage_invalid", "value.decisions")
     seen = set()
-    for row in rows:
+    for index, row in enumerate(rows):
+        path = f"value.decisions[{index}]"
         if not isinstance(row, Mapping) or set(row) != {
             "sample_id", "predicted", "confidence", "reason_code", "method", "evidence_call_ids"
         }:
-            raise ValueError("agent prediction fields are invalid")
+            invalid("agent prediction fields are invalid", "prediction_fields_invalid", path)
+            continue
         sample_id = row["sample_id"]
         if not isinstance(sample_id, str) or sample_id not in sample_ids or sample_id in seen:
-            raise ValueError("unknown or duplicate prediction sample")
-        seen.add(sample_id)
+            invalid("unknown or duplicate prediction sample", "sample_identity_invalid", path + ".sample_id")
+        else:
+            seen.add(sample_id)
+        finite = {}
         for name in ("predicted", "confidence"):
             number = row[name]
-            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
-                raise ValueError(f"agent {name} must be finite")
-        if not 0 <= row["confidence"] <= 1:
-            raise ValueError("agent confidence must be in [0, 1]")
-        if row["method"] not in PREDICTION_METHODS:
-            raise ValueError("unknown agent prediction method")
-        if row["method"] not in permitted:
-            # The candidate's own authored blend_rule, enforced rather than
-            # merely stated in the prompt. A directive that says "do not blend"
-            # is a constraint the host can score, which is what separates this
-            # clause from the strategy clauses beside it.
-            raise ValueError("agent prediction method is outside the candidate's directive")
-        if row["reason_code"] not in REMOTE_REASON_CODES:
-            raise ValueError("agent reason code is invalid")
+            try:
+                finite[name] = not isinstance(number, bool) and isinstance(number, (int, float)) and math.isfinite(number)
+            except OverflowError:
+                finite[name] = False
+            if not finite[name]:
+                invalid(f"agent {name} must be finite", "prediction_number_nonfinite", path + "." + name)
+        if finite["confidence"] and not 0 <= row["confidence"] <= 1:
+            invalid("agent confidence must be in [0, 1]", "confidence_out_of_range", path + ".confidence")
+        method = row["method"]
+        if not isinstance(method, str) or method not in PREDICTION_METHODS:
+            invalid("unknown agent prediction method", "prediction_method_unknown", path + ".method")
+        elif method not in permitted:
+            invalid("agent prediction method is outside the candidate's directive", "prediction_method_forbidden", path + ".method")
+        if not isinstance(row["reason_code"], str) or row["reason_code"] not in REMOTE_REASON_CODES:
+            invalid("agent reason code is invalid", "prediction_reason_invalid", path + ".reason_code")
         refs = row["evidence_call_ids"]
-        if not isinstance(refs, list) or len(refs) > MAX_PREDICTION_CALLS or not all(
+        refs_valid = isinstance(refs, list) and len(refs) <= MAX_PREDICTION_CALLS and all(
             isinstance(ref, str) and 1 <= len(ref) <= 80 for ref in refs
-        ) or len(set(refs)) != len(refs):
-            raise ValueError("agent evidence references are invalid")
-        if row["method"] != "direct" and not refs:
-            raise ValueError("model-based predictions require tool evidence")
-        if row["method"] == "blend" and len(refs) < 2:
-            raise ValueError("blended predictions require at least two tool results")
+        ) and len(set(refs)) == len(refs)
+        if not refs_valid:
+            invalid("agent evidence references are invalid", "evidence_references_invalid", path + ".evidence_call_ids")
+        elif method != "direct" and not refs:
+            invalid("model-based predictions require tool evidence", "evidence_required", path + ".evidence_call_ids")
+        elif method == "blend" and len(refs) < 2:
+            invalid("blended predictions require at least two tool results", "blend_requires_two_results", path + ".evidence_call_ids")
+    if issues:
+        raise PredictionContractViolation(messages[0], issues)
     return rows
 
 
@@ -144,6 +184,9 @@ def validate_tool_event(p):
         raise ValueError("prediction tool event digest mismatch")
     if result.get("status") not in {"completed", "failed"} or result.get("tool_id") != p["tool_id"] or result.get("call_id") != p["call_id"] or result.get("wave_digest") != p["wave_digest"]:
         raise ValueError("prediction tool event result mismatch")
+    cost = result.get("charged_calls", 1)
+    if type(cost) is not int or not 1 <= cost <= 4:
+        raise ValueError("prediction tool event call cost is invalid")
     arguments = p["arguments"]
     if (not isinstance(arguments, Mapping)
             or set(arguments) != {"tool_id", "call_id", "wave_digest", "parameters"}

@@ -4,8 +4,12 @@ from copy import deepcopy
 from threading import RLock
 import math
 from time import monotonic
+from types import MappingProxyType
 
-from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions
+from ..core.agent_prediction import (
+    PREDICTION_TOOL_CALL_BUDGET, PredictionContractViolation,
+    frozen_prediction_methods, validate_predictions,
+)
 from ..core.models import digest
 
 # The per-cell evidence contract accepts a flat map of bounded finite numbers
@@ -33,7 +37,17 @@ def _public_numeric_parameters(parameters):
 
 class DshPredictionToolBinding:
     def __init__(self, *, run_id, stage_attempt, idempotency_key, wave_digest, sample_ids, catalog, executor,
-                 budget=None, origin_timestamp=None, mean_blend_required=False):
+                 budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None, identity_digests=None):
+        if identity_digests is not None:
+            fields = {"genome_digest", "compiled_behavior_digest", "phenotype_instance_digest"}
+            if not isinstance(identity_digests, Mapping) or set(identity_digests) != fields or any(
+                not isinstance(value, str) or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+                for value in identity_digests.values()
+            ):
+                raise ValueError("invalid frozen prediction identity")
+        self.identity_digests = (MappingProxyType(dict(identity_digests))
+                                 if identity_digests is not None else None)
         self.run_id = run_id
         self.stage_attempt = stage_attempt
         self.idempotency_key = idempotency_key
@@ -43,7 +57,12 @@ class DshPredictionToolBinding:
         # attribute a tool call to an origin without joining through sample_ids.
         self.origin_timestamp = origin_timestamp
         self.mean_blend_required = mean_blend_required
+        self.allowed_methods = frozen_prediction_methods(allowed_methods)
         self.catalog = {item['tool_id']: dict(item) for item in catalog}
+        for item in self.catalog.values():
+            cost = item.get("call_cost", 1)
+            if type(cost) is not int or not 1 <= cost <= 4:
+                raise ValueError("invalid numerical call cost")
         self.executor = executor
         # The budget this run froze into its Agent policy, not the current
         # default: an archived wave must be restorable under the same ceiling.
@@ -59,6 +78,11 @@ class DshPredictionToolBinding:
         validate_tool_event(p)
         if p['wave_digest'] != self.wave_digest or p['sample_ids'] != list(self.sample_ids):
             raise ValueError('recorded tool call belongs to another wave')
+        cost = self.catalog[p['tool_id']].get('call_cost', 1)
+        if p['result'].get('charged_calls', 1) != cost:
+            raise ValueError('recorded numerical call cost differs from frozen catalog')
+        if p['call_id'] not in self.calls and self._spent() + cost > self.budget:
+            raise ValueError('restored prediction calls exceed frozen budget')
         self.calls[p['call_id']] = (deepcopy(p), event.event_id)
         if p['result']['status'] == 'completed':
             self._predictions[self._computation_key(p['arguments'])] = (
@@ -77,6 +101,9 @@ class DshPredictionToolBinding:
         return digest({'wave_digest': self.wave_digest, 'tool_id': arguments['tool_id'],
                        'version': tool['version'], 'parameters': parameters})
 
+    def _spent(self):
+        return sum(p["result"].get("charged_calls", 1) for p, _ in self.calls.values())
+
     def execute(self, arguments, *, session_id, persist):
         if set(arguments) != {'tool_id', 'wave_digest', 'call_id', 'parameters'}:
             raise ValueError('tool requires tool_id, wave_digest, call_id and parameters')
@@ -91,9 +118,12 @@ class DshPredictionToolBinding:
                 if p['arguments'] != arguments:
                     raise ValueError('prediction call_id was reused with different arguments')
             else:
-                if len(self.calls) >= self.budget:
+                cost = self.catalog[arguments["tool_id"]].get("call_cost", 1)
+                if self._spent() + cost > self.budget:
                     raise ValueError('prediction tool call budget exhausted')
                 result = {'tool_id': arguments['tool_id'], 'call_id': call_id, 'wave_digest': self.wave_digest}
+                if cost != 1:
+                    result['charged_calls'] = cost
                 started = monotonic()
                 computation_key = self._computation_key(arguments)
                 cached = self._predictions.get(computation_key)
@@ -145,15 +175,21 @@ class DshPredictionToolBinding:
                     self._predictions.setdefault(computation_key, (deepcopy(result['outputs']), event_id))
             self._session_calls.setdefault(session_id, set()).add(call_id)
             return {'accepted': True, 'event_id': event_id, 'output_digest': p['output_digest'],
-                    'remaining_calls': max(0, self.budget - len(self.calls)), **deepcopy(p['result'])}
+                    'remaining_calls': max(0, self.budget - self._spent()), **deepcopy(p['result'])}
 
     def final_receipt(self, structured, *, session_id):
-        rows = validate_predictions(structured, self.sample_ids, wave_digest=self.wave_digest)
+        rows = validate_predictions(structured, self.sample_ids, wave_digest=self.wave_digest,
+                                    allowed_methods=self.allowed_methods)
         with self._lock:
             visible = self._session_calls.get(session_id, set())
             successful = {key for key in visible if self.calls[key][0]['result']['status'] == 'completed'}
-            if any(set(row['evidence_call_ids']) - successful for row in rows):
-                raise ValueError('Agent cites tool evidence it did not receive or that failed')
+            unavailable = [{
+                'code': 'evidence_unavailable',
+                'path': f'value.decisions[{index}].evidence_call_ids',
+            } for index, row in enumerate(rows) if set(row['evidence_call_ids']) - successful]
+            if unavailable:
+                raise PredictionContractViolation(
+                    'Agent cites tool evidence it did not receive or that failed', unavailable)
             self.validate_formulas(rows)
             return {
                 'schema_version': 'ecologyrsi-dsh.agent-prediction-receipt/2',
@@ -172,22 +208,27 @@ class DshPredictionToolBinding:
         if not self.mean_blend_required:
             return
         with self._lock:
-            for row in rows:
+            invalid = []
+            for index, row in enumerate(rows):
                 if row['method'] != 'blend':
                     continue
                 values = []
                 for call_id in row['evidence_call_ids']:
                     call = self.calls.get(call_id)
                     if call is None or call[0]['result']['status'] != 'completed':
-                        raise ValueError('mean blend requires successful cited calls')
+                        raise PredictionContractViolation('mean blend requires successful cited calls', [{
+                            'code': 'evidence_unavailable', 'path': f'value.decisions[{index}].evidence_call_ids'}])
                     output = next((item for item in call[0]['result']['outputs']
                                    if item['sample_id'] == row['sample_id']), None)
                     if output is None:
-                        raise ValueError('mean blend evidence belongs to another sample')
+                        raise PredictionContractViolation('mean blend evidence belongs to another sample', [{
+                            'code': 'evidence_unavailable', 'path': f'value.decisions[{index}].evidence_call_ids'}])
                     values.append(output['predicted'])
                 if len(values) < 2 or not math.isclose(
                         row['predicted'], math.fsum(values) / len(values), rel_tol=1e-9, abs_tol=1e-9):
-                    raise ValueError('mean blend prediction does not equal its cited outputs')
+                    invalid.append({'code': 'mean_blend_mismatch', 'path': f'value.decisions[{index}].predicted'})
+            if invalid:
+                raise PredictionContractViolation('mean blend prediction does not equal its cited outputs', invalid)
 
     def public_trace(self, sample_id=None, evidence_call_ids=()):
         """Bounded per-cell evidence, distinct from every call made in the wave."""
@@ -209,6 +250,13 @@ class DshPredictionToolBinding:
                 output = next((row for row in p['result'].get('outputs', ()) if row['sample_id'] == sample_id), None)
                 if output is not None:
                     item['tool_predicted'] = output['predicted']
+                    program_digest = output.get('metadata', {}).get('program_digest')
+                    if program_digest:
+                        item['program_digest'] = program_digest
+                        item['calculation_digest'] = output['metadata']['calculation_digest']
+                        if any(call.get('tool_id') == 'candidate-model' and call.get('used_in_expression') is True
+                               for call in output.get('metadata', {}).get('internal_calls', ())):
+                            item['candidate_model_consumed'] = True
                     reported = output.get('metadata', {}).get('parameters')
                     if reported is not None:
                         item['parameters'] = _public_numeric_parameters(reported)

@@ -28,6 +28,7 @@ from .genome import (
 
 LOCAL_EDIT_SCHEMA_VERSION = "ecology-local-edit@1"
 LOCAL_EDIT_MAXIMUM_OPERATIONS = 5
+LOCAL_EDIT_REVISIT_MAX_CHARACTERS = 400
 
 
 def _digest_text(value: Any, name: str) -> str:
@@ -65,6 +66,7 @@ class LocalEditContext:
     parameter_schemas: Mapping[str, Mapping[str, Any]]
     runtime_constraints: Mapping[str, Any] = field(default_factory=dict)
     evidence_phase: str = "formal_batch"
+    search_policy: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("run_id", "candidate_id", "candidate_revision_id"):
@@ -109,6 +111,8 @@ class LocalEditContext:
         if self.evidence_phase not in TRAINING_EVIDENCE_PHASES:
             raise ValueError("local edits require completed training evidence")
         object.__setattr__(self, "runtime_constraints", validate_runtime_constraints(self.runtime_constraints))
+        if self.search_policy not in (None, "cellwise_training_evidence@1"):
+            raise ValueError("unsupported local edit search policy")
         canonical_json(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,6 +137,7 @@ class LocalEditContext:
             },
             "runtime_constraints": dict(self.runtime_constraints),
             "evidence_phase": self.evidence_phase,
+            **({"search_policy": self.search_policy} if self.search_policy else {}),
         }
 
 
@@ -154,8 +159,11 @@ class LocalEditProposal:
                     or self.revisit.get("reason") not in {"safety_recovery", "new_batch_evidence", "paired_recheck"}
                     or not isinstance(self.revisit.get("justification"), str)
                     or not self.revisit["justification"].strip()
-                    or len(self.revisit["justification"]) > 400):
-                raise ValueError("invalid local edit revisit reason")
+                    or len(self.revisit["justification"]) > LOCAL_EDIT_REVISIT_MAX_CHARACTERS):
+                raise ValueError(
+                    "local edit revisit requires reason safety_recovery, new_batch_evidence "
+                    "or paired_recheck and a non-blank justification of at most 400 characters"
+                )
             object.__setattr__(self, "revisit", dict(self.revisit))
         object.__setattr__(self, "decision", LocalEditProposalDecision(self.decision))
         if isinstance(self.operations, (str, bytes)) or not isinstance(
@@ -227,6 +235,17 @@ def validate_local_edit_proposal(
         raise ValueError(
             "local edit operations exceed maximum_operations or are empty"
         )
+    if context.search_policy == "cellwise_training_evidence@1" and count:
+        # Isolate one change so same-cohort evidence can attribute its effect.
+        if count != 1:
+            raise ValueError("targeted local edit requires exactly one operation")
+        op = result.operations[0]
+        if op.get("op") == "set_bounded_parameter":
+            name = op.get("name", op.get("parameter"))
+            if any("residual_scale" in key for key in context.parameter_schemas) and name is not None:
+                cell_names = {key for key in context.parameter_schemas if key.endswith("h_residual_scale")}
+                if cell_names and name not in cell_names:
+                    raise ValueError("targeted parameter edit must address one target-horizon residual cell")
     seen_paths: set[str] = set()
     for operation in result.operations:
         axis, target, path = mutation_spec(operation.get("op")).coordinates(operation)
@@ -257,6 +276,8 @@ def apply_local_edit_bundle(
     proposal: LocalEditProposal | Mapping[str, Any],
     context: LocalEditContext,
     registry: Any,
+    *,
+    task: Any = None,
 ) -> LocalEditResult:
     validated = validate_local_edit_proposal(proposal, context)
     proposal_digest = digest(validated.to_dict())
@@ -306,6 +327,19 @@ def apply_local_edit_bundle(
     )
     if child.behavior_digest == parent.behavior_digest:
         raise ValueError("local edit did not change executable behavior")
+    if task is not None:
+        from .program_preflight import enabled, validate_program_inputs
+        if enabled(task.metadata):
+            from .workflow_ir import resolve_candidate_agent_profile, _effective_parameters
+            scientific = child.scientific_program
+            predictor_id = scientific["predictor_ref"]["id"]
+            parameters = ({"feature_recipe": scientific["feature_recipe"]}
+                          if "feature_recipe" in scientific else _effective_parameters(
+                              registry, "predictors", predictor_id, scientific["parameter_overrides"]))
+            validate_program_inputs(task,
+                predictor_id=predictor_id,
+                parameters=parameters,
+                role_profiles=[resolve_candidate_agent_profile(child, registry)])
     resolution = resolve_mutation_effects(
         parent, child, validated.operations, registry,
         runtime_constraints=context.runtime_constraints,
@@ -333,6 +367,8 @@ def apply_or_reject_local_edit_bundle(
     proposal: LocalEditProposal | Mapping[str, Any],
     context: LocalEditContext,
     registry: Any,
+    *,
+    task: Any = None,
 ) -> LocalEditResult:
     """Apply one model-authored edit, or reject invalid bounded content.
 
@@ -345,7 +381,7 @@ def apply_or_reject_local_edit_bundle(
     if context.parent_genome_digest != parent.genome_digest:
         raise ValueError("local edit parent genome digest mismatch")
     try:
-        return apply_local_edit_bundle(parent, proposal, context, registry)
+        return apply_local_edit_bundle(parent, proposal, context, registry, task=task)
     except (TypeError, ValueError) as exc:
         proposal_data = (
             proposal.to_dict()

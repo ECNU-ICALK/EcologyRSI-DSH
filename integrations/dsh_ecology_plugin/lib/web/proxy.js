@@ -1,9 +1,14 @@
 import { request as httpRequest } from "node:http";
+import { CANARY_PRESETS } from "../runtime/contracts.js";
 
 export const API_BASE = "/api/ecology-evolution";
-// Two sequential 120-second model-contract canaries plus bounded local receipt
-// overhead. Ordinary API requests retain the configured short idle timeout.
-export const MODEL_PREFLIGHT_PROXY_TIMEOUT_MS = 250_000;
+// One sequential 120-second probe per manifest role, plus local receipt
+// overhead. Keep the per-role bound aligned with Host CanaryBounds; adding a
+// role must not silently leave the proxy on the former two-role deadline.
+// Ordinary API requests retain their configured short idle timeout.
+export const MODEL_PREFLIGHT_ROLE_TIMEOUT_MS = 120_000;
+export const MODEL_PREFLIGHT_PROXY_TIMEOUT_MS =
+  Object.keys(CANARY_PRESETS).length * MODEL_PREFLIGHT_ROLE_TIMEOUT_MS + 10_000;
 
 const HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",

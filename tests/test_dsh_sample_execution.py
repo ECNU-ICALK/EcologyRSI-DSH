@@ -175,6 +175,8 @@ class _PersistingRetryRuntime:
         self.ledger = ledger
         self.requests: list[dict] = []
         self.fail_next_critic = True
+        from tests.agent_prediction_fixtures import TestActivationAuthority
+        self.activation_authority = TestActivationAuthority()
 
     def run_stage(self, request: dict) -> dict:
         self.requests.append(request)
@@ -218,6 +220,8 @@ class _PersistingRetryRuntime:
             "activation_lease_id": f"lease:{len(self.requests)}",
             **request["request"]["identity_digests"],
         }
+        self.activation_authority.register(identity, "session:role-host")
+        self.service._activation_attestor = self.activation_authority
         if stage == "sample.plan":
             tool_id = context["available_tools"][0]["tool_id"]
             tool_result = self.service.execute(

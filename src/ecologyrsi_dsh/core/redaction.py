@@ -223,6 +223,8 @@ def public_exception_summary(exc: BaseException) -> str:
     code = safe_error_code(
         getattr(exc, "error_code", None) or getattr(exc, "code", None)
     )
+    if code == "model_provider_quota_exhausted":
+        return "模型网关返回 QUOTA 限制（HTTP 429），已停止后续请求；这不是本地 Token 预算限制，无法据此判断余额或限额周期。[model_provider_quota_exhausted]"
     return f"{type_name} [{code}]" if code is not None else type_name
 
 

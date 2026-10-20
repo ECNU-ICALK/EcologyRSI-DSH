@@ -41,7 +41,7 @@ class StructuredStageBudgetTests(unittest.TestCase):
         for stage, context, tokens in [
             ("generation.research-synthesis", {}, 16384),
             ("generation.search-plan", policy, 16384),
-            ("sample.plan", policy, 16385),
+            ("sample.plan", policy, 32769),
             ("generation.research-synthesis", policy, None),
             ("generation.research-synthesis", policy, 8192),
             ("generation.research-synthesis", policy, 16385),
@@ -58,7 +58,7 @@ class StructuredStageBudgetTests(unittest.TestCase):
         # decision object at once, so its stage ceiling is raised on its own
         # contract, not by borrowing the research synthesis policy.
         _result, request = self.request("sample.plan", {}, NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.planner"])
-        self.assertEqual(request["max_tokens"], 16384)
+        self.assertEqual(request["max_tokens"], 32768)
         with self.assertRaises(ValueError): self.request("sample.critic", {}, 16384)
         # The critic's frozen budget must fit inside the default stage ceiling;
         # nothing else declares one for it.
@@ -70,13 +70,13 @@ class StructuredStageBudgetTests(unittest.TestCase):
         # the frozen manifest constant, the plan the workbench displays, and the
         # plugin's runaway-child abort. A raise applied to one of them is a
         # contract split the suite could not otherwise see.
-        plan = OptimizationSchedule.for_new_run().execution_plan(5, cells_per_origin=9)
+        plan = OptimizationSchedule.for_quick_run().execution_plan(5, cells_per_origin=9)
         per_call = plan["output_tokens_per_llm_call"]
         limits = plan["sample_execution_limits"]
         self.assertEqual(per_call["planner"], NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.planner"])
         self.assertEqual(per_call["critic"], NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.critic"])
-        self.assertEqual(limits["planner_reported_output_threshold"], 2 * per_call["planner"])
-        self.assertEqual(limits["critic_reported_output_threshold"], 2 * per_call["critic"])
+        self.assertIsNone(limits["planner_reported_output_threshold"])
+        self.assertIsNone(limits["critic_reported_output_threshold"])
         source = (Path(__file__).resolve().parents[1]
                   / "integrations/dsh_ecology_plugin/lib/runtime/sample-stage-budget.js").read_text(encoding="utf-8")
         for stage, steps, reported in (
@@ -84,10 +84,26 @@ class StructuredStageBudgetTests(unittest.TestCase):
             ("sample.critic", limits["critic_steps"], limits["critic_reported_output_threshold"]),
         ):
             found = re.search(
-                rf'"{re.escape(stage)}":\s*\{{\s*maxSteps:\s*(\d+),\s*maxReportedOutputTokens:\s*(\d+)\s*\}}',
+                rf'"{re.escape(stage)}":\s*\{{\s*maxSteps:\s*(\d+),\s*maxReportedOutputTokens:\s*(null)\s*\}}',
                 source)
             self.assertIsNotNone(found, stage)
-            self.assertEqual((int(found[1]), int(found[2])), (steps, reported), stage)
+            self.assertEqual((int(found[1]), None), (steps, reported), stage)
+
+    def test_adapter_preserves_omitted_and_explicit_historical_budgets(self):
+        from ecologyrsi_dsh.evaluators.dsh_sample_adapter import DshSampleCollaborationAdapter
+        from ecologyrsi_dsh.core.model_execution_policy import LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+        kwargs = dict(run_id='run:budget', runtime_provider=lambda: object(),
+            revision_provider=lambda _: {}, identity_digests={
+                'genome_digest':'a'*64, 'compiled_behavior_digest':'b'*64, 'phenotype_instance_digest':'c'*64},
+            strategy_model_id='dsh/strategy', review_model_id='dsh/review',
+            forecast_bundle_tool=lambda **_: None, prediction_tool_binder=lambda **_: None)
+        omitted = DshSampleCollaborationAdapter(**kwargs)
+        self.assertEqual(omitted.operation_max_tokens, dict(LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS))
+        for frozen in (LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS, NATIVE_SAMPLE_OPERATION_MAX_TOKENS):
+            actual = DshSampleCollaborationAdapter(**kwargs, operation_max_tokens=frozen)
+            self.assertEqual(actual.operation_max_tokens, dict(frozen))
+        with self.assertRaises(ValueError):
+            DshSampleCollaborationAdapter(**kwargs, operation_max_tokens={})
 
     def test_fatal_cause_wins_over_wrapper_and_cancelled_sibling(self):
         from ecologyrsi_dsh.core.errors import dsh_native_runtime_error_in_chain, preferred_execution_failure

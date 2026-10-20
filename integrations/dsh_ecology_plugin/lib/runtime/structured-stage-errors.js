@@ -1,11 +1,13 @@
 const PHASE_CODES = Object.freeze({
   start: "structured_child_start_failed",
   output_schema: "structured_child_output_schema_invalid",
+  output_attempts: "structured_output_attempt_limit_exceeded",
   result: "structured_child_result_failed",
   control: "provider_stage_admission_closed",
   aborted: "structured_child_aborted",
   model: "structured_child_model_error",
   model_terminal: "structured_child_model_error",
+  provider_quota: "model_provider_quota_exhausted",
   route_cooldown: "provider_route_cooling_down",
   tool_protocol: "structured_child_tool_protocol_error",
   output_budget: "structured_child_output_budget_exhausted",
@@ -72,8 +74,29 @@ export function isStructuredProviderRateLimit(error) {
 // Never forward provider messages or accept metadata attached by a tool.
 export function structuredFailureContract(error) {
   const trusted = trustedStructuredErrors.get(error);
+  if (trusted?.phase === "persistence"
+    && PERSISTENCE_CONTRACT_CODES.has(structuredFailureCode(error))) return {
+    schema_version: "ecology-runtime-failure/1",
+    error_code: structuredFailureCode(error),
+    failure_domain: "execution_contract",
+    retryable: false,
+    provider_status: null,
+    retry_after_ms: null,
+    affected_scope: "stage",
+    http_status: 422,
+  };
+  if (trusted?.phase === "provider_quota") return {
+    schema_version: "ecology-runtime-failure/1",
+    error_code: PHASE_CODES.provider_quota,
+    failure_domain: "provider",
+    retryable: false,
+    provider_status: 429,
+    retry_after_ms: null,
+    affected_scope: "model_route",
+    http_status: 429,
+  };
   if (!trusted || !["model", "model_terminal", "route_cooldown", "tool_protocol",
-    "output_budget", "execution_budget", "output_schema", "capture"].includes(trusted.phase)) return null;
+    "output_budget", "execution_budget", "output_schema", "output_attempts", "capture"].includes(trusted.phase)) return null;
   // A malformed tool envelope is a failed provider attempt, not a scientific
   // result. Mixed upstream replicas can alternate valid calls and DSML prose;
   // allow bounded Host recovery without accepting or executing that prose.
@@ -92,6 +115,15 @@ export function structuredFailureContract(error) {
     http_status: retryable ? (providerStatus === 429 ? 429 : 503) : 422,
   };
 }
+
+const PERSISTENCE_CONTRACT_CODES = new Set([
+  "structured_result_persist_host_rejected",
+  "structured_result_persist_authorization",
+  "structured_result_persist_binding_closed",
+  "structured_result_persist_admission_closed",
+  "structured_result_persist_tool_evidence",
+  "structured_result_persist_invalid_response",
+]);
 
 const PERSISTENCE_BOUNDARIES = Object.freeze({
   dsh_session_projection_not_ready: "structured_result_persist_projection_lag",

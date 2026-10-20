@@ -219,7 +219,7 @@
     if (!Array.isArray(trace.rows) && legacyRows.length) { trace.rows = legacyRows; }
     if (!trace.status && legacyRows.length) {
       var candidateStatus = String(candidate && candidate.status || "").toLowerCase();
-      trace.status = candidateStatus === "failed" ? "failed" : candidateStatus === "duplicate" ? "skipped" : candidateStatus === "evaluating" ? "evaluating" : "completed";
+      trace.status = candidateStatus === "failed" ? "failed" : candidateStatus === "duplicate" ? "partial" : candidateStatus === "evaluating" ? "evaluating" : "completed";
     }
     var traceSummary = candidateEvidenceObject(trace.sample_execution);
     var metricSummary = candidateEvidenceObject(metrics.sample_execution);
@@ -378,7 +378,7 @@
       sampleStatus = progressPaused ? "paused" : "running";
     }
     if (sampleStatus === "completed" && summary.coverage_pass === false) { sampleStatus = "warning"; }
-    var duplicateSkipped = String(candidate.status || "").toLowerCase() === "duplicate" || sampleStatus === "skipped";
+    var duplicateSkipped = sampleStatus === "skipped";
     var specificationStatus = algorithmSpec.algorithm_id ? "completed" : duplicateSkipped ? "skipped" : "pending";
     var compileStatus = latestCompile.status || (execution.status === "compile_failed" ? "failed" : algorithmSpec.algorithm_id ? "passed" : duplicateSkipped ? "skipped" : "pending");
     var debugStatus = latestDebug.status || (execution.status === "debug_passed" ? "passed" : execution.status === "debug_failed" ? "failed" : duplicateSkipped ? "skipped" : "pending");
@@ -467,7 +467,7 @@
       not_selected_by_screening_top_k: "初筛未入围，不参加正式评测",
       outside_preregistered_quick_trajectory: "按预登记规则未进入训练（未执行预筛）",
       execution_failed: "训练或评测失败",
-      duplicate: "参数重复，未重复评测"
+      duplicate: "已标记为等价方案，评测情况见执行证据"
     }[String(value || "")] || String(value || "等待轮末统一选择");
   }
   function candidateFiniteNumber(value) {
@@ -565,7 +565,7 @@
     if (String(candidate.status || "").toLowerCase() === "failed") { return { text: "执行失败", className: "pill-red" }; }
     if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: candidate.selection_reason === "outside_preregistered_quick_trajectory" ? "按预登记规则未进入训练" : "初筛未入围", className: "pill-neutral" }; }
     if (String(candidate.status || "").toLowerCase() === "rejected") { return { text: "未保留", className: "pill-red" }; }
-    if (String(candidate.status || "").toLowerCase() === "duplicate") { return { text: "重复跳过", className: "pill-neutral" }; }
+    if (String(candidate.status || "").toLowerCase() === "duplicate") { return { text: "已标记等价版本", className: "pill-neutral" }; }
     return { text: candidateStatusText(candidate.status), className: candidateStatusClass(candidate.status) };
   }
   function candidateParentScore(candidate, candidates) {
@@ -878,7 +878,7 @@
     var section = $("#candidate-samples");
     var followControl = $("#candidate-follow-active");
     if (!table || !candidateNode || !statusNode || !countNode || !pageNode || !previous || !next || !retry) { return; }
-    var run = state.activeRun;
+    var run = displayedRun();
     var candidate = selectedCandidateForSamples();
     if (followControl) {
       followControl.checked = !state.candidateSelectionPinned;
@@ -1051,9 +1051,9 @@
   }
 
   function renderCandidates() {
-    var run = state.activeRun;
+    var run = displayedRun();
     var candidates = run ? run.candidates : [];
-    syncCandidateSelection(run);
+    if (run || !state.activeRun) { syncCandidateSelection(run); }
     var body = $("#candidate-table");
     var evidence = run && run.evolution_evidence && typeof run.evolution_evidence === "object" ? run.evolution_evidence : {};
     var positiveDeltaV3 = String(evidence.protocol_scope || "") === "positive_delta_search_v3";

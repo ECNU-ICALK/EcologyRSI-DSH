@@ -46,6 +46,7 @@ _EVENT_TYPE_ALIASES = {
     "FormalBatchEvaluated": "formal.batch_evaluated",
     "FormalBatchCompared": "formal.batch_compared",
     "HoldoutArmStarted": "holdout.arm_started",
+    "HoldoutRecheckStarted": "holdout.recheck_started",
     "GenerationComparisonRecorded": "generation.comparison_recorded",
     "ArtifactRecorded": "artifact.recorded",
     "EvaluationRecorded": "evaluation.completed",

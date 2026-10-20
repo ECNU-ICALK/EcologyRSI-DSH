@@ -457,12 +457,16 @@ class LocalEditTests(unittest.TestCase):
                 current_program_registry(),
             )
 
-    def test_outer_candidate_contract_remains_one_operation(self) -> None:
-        source = (
-            __import__("pathlib").Path(__file__).parents[1]
-            / "src/ecologyrsi_dsh/evolution/strategies.py"
-        ).read_text(encoding="utf-8")
-        self.assertGreaterEqual(source.count('"maximum_operations": 1'), 2)
+    def test_legacy_outer_candidate_still_rejects_multiple_operations(self) -> None:
+        from ecologyrsi_dsh.evolution.genome import apply_genome_mutation, TRUST_REGION_MUTATION_OPERATOR_ID
+        from tests.test_evolution_genome import _seed_genome, _mutation_context
+        parent = _seed_genome()
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            apply_genome_mutation(parent, {"schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": [{"op": "set_bounded_parameter", "name": "ridge_alpha", "value": .2},
+                               {"op": "set_bounded_workflow_parameter", "name": "max_attempts", "value": 4}]},
+                _mutation_context(parent, mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID),
+                current_program_registry())
 
 
 if __name__ == "__main__":

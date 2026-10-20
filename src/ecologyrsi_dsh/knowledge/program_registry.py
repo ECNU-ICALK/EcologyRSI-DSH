@@ -120,6 +120,13 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
                 ),
             },
         },
+        "greenhouse-baseline-aligned-ridge@2": {
+            "version": "greenhouse-baseline-aligned-ridge-operator-graph/2",
+            "parameters": {"history_steps": _parameter(minimum=1, maximum=12, default=6, integer=True),
+                "ridge_alpha": _parameter(minimum=0.0001, maximum=1.0, default=0.1),
+                **{f"{t}_{h}h_residual_scale": _parameter(minimum=0., maximum=1., default=0.)
+                   for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)}},
+        },
         "greenhouse-baseline-aligned-ridge@1": {
             "version": "greenhouse-baseline-aligned-ridge-operator-graph/1",
             "parameters": {
@@ -720,6 +727,8 @@ class ProgramRegistrySnapshot:
             raise TypeError("program registry must be an object")
         thawed = deep_thaw_json(frozen)
         templates = seed_templates or (
+            _seed_template(thawed, template_id="greenhouse-baseline-aligned-cellwise-default@1",
+                predictor_id="greenhouse-baseline-aligned-ridge@2", feature_policy_id="registered_greenhouse_features@1"),
             _seed_template(
                 thawed,
                 template_id="greenhouse-default@1",
@@ -782,7 +791,7 @@ class ProgramRegistrySnapshot:
                 value["template_id"] = value["template_id"].removesuffix("@1") + "@2"
                 profiles = value["agent_program"]["candidate_execution_program"]["role_profiles"]
                 for profile in profiles:
-                    profile["preset_id"] = "ecology-sample-planner-v12"
+                    profile["preset_id"] = "ecology-sample-planner-v14"
                 harness_templates.append(SeedGenomeTemplate.from_dict(value))
             templates = (*templates, *harness_templates)
         identity = {
@@ -908,6 +917,27 @@ def _validate_scalar_contract(value: Any, contract: Mapping[str, Any], name: str
 
 
 _CURRENT_PROGRAM_REGISTRY = ProgramRegistrySnapshot.from_programs(_CURRENT_PROGRAMS)
+
+
+
+# Additive capabilities must not rebind already-frozen genomes. Reconstruct the
+# exact prior snapshot from unchanged entries; never relax an arbitrary digest.
+_prior_catalog = _CURRENT_PROGRAM_REGISTRY.to_dict()
+_prior_catalog["programs"]["predictors"].pop("greenhouse-baseline-aligned-ridge@2")
+_PRE_CELLWISE_PROGRAM_REGISTRY = ProgramRegistrySnapshot.from_programs(
+    _prior_catalog["programs"], seed_templates=tuple(
+        SeedGenomeTemplate.from_dict(item) for item in _prior_catalog["seed_templates"]
+        if not item["template_id"].startswith("greenhouse-baseline-aligned-cellwise-default@")))
+del _prior_catalog
+
+
+def registry_for_frozen_catalog(registry: ProgramRegistrySnapshot, catalog_digest: str) -> ProgramRegistrySnapshot:
+    if registry.catalog_digest == catalog_digest:
+        return registry
+    if (registry.catalog_digest == _CURRENT_PROGRAM_REGISTRY.catalog_digest
+            and catalog_digest == _PRE_CELLWISE_PROGRAM_REGISTRY.catalog_digest):
+        return _PRE_CELLWISE_PROGRAM_REGISTRY
+    raise ValueError("genome registry catalog binding mismatch")
 
 
 def current_program_registry() -> ProgramRegistrySnapshot:

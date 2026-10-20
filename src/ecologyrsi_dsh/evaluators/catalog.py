@@ -1,7 +1,7 @@
 """Model registration, parameter contracts and frozen evaluator identities."""
 from __future__ import annotations
 
-from ..core.prediction_policy import RUNTIME_EVALUATOR_ID
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID
 import math
 from collections.abc import Mapping
 from typing import Any
@@ -29,6 +29,7 @@ from .noninferiority import (
 from .baselines import BASELINE_PROFILE_VERSION, BASELINE_SELECTION_TOLERANCE
 from .greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
+    BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     RECIPE_FEATURE_POLICY_ID,
@@ -347,6 +348,12 @@ class EvaluatorCatalog:
                 "implementation": "greenhouse-recipe-multihorizon-forward/1",
             },
         ]
+        reference = next(item for item in items if item["id"] == RUNTIME_EVALUATOR_ID)
+        items.append({**reference, "id": CELLWISE_EVALUATOR_ID,
+            "label": "温室逐目标逐时距残差评测 v5",
+            "description": "独立九格残差系数；沿用训练拟合分区选定基线和固定科学门槛。",
+            "prediction_model_ids": [*reference["prediction_model_ids"], BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID],
+            "implementation": "greenhouse-cellwise-aligned-forward/1"})
         adapter = dataset_adapter(dataset_id) if dataset_id and dataset_id != TOY_DATASET_ID else None
         if dataset_id is not None:
             items = [item for item in items if dataset_id in item["dataset_ids"]]
@@ -513,6 +520,14 @@ class EvaluatorCatalog:
                 "implementation": "greenhouse-recipe-ridge/1",
             },
         ]
+        items.append({"id": BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+            "label": "温室基线对齐岭回归（九格独立残差）",
+            "description": "训练拟合选定基线；三个目标各自拥有1、6、24小时残差系数。",
+            "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+            "parameter_names": ["history_steps", "ridge_alpha", *[
+                f"{t}_{h}h_residual_scale" for t in GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS for h in (1, 6, 24)]],
+            "scientific_scope": "historical_replay_prediction_non_causal",
+            "implementation": "greenhouse-baseline-aligned-ridge/2"})
         for item in items:
             body = {
                 "prediction_model_id": item["id"],
@@ -702,7 +717,7 @@ class EvaluatorCatalog:
                 "co2_concentration_6h_residual_scale": (float, 0.0, 1.0),
                 "co2_concentration_24h_residual_scale": (float, 0.0, 1.0),
             }
-            if predictor_model_id == HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
+            if predictor_model_id in (HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID)
             else
             {
                 "history_steps": (int, 1, 12),

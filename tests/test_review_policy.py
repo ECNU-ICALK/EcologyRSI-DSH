@@ -15,7 +15,7 @@ class PurposeBoundReviewTests(unittest.TestCase):
     def setUp(self):
         self.candidate = small_holdout(HoldoutArm.FINALIST_1, .2)
         self.incumbent = small_holdout(HoldoutArm.INCUMBENT, .1)
-        self.task = SimpleNamespace(metadata={"optimization_schedule": OptimizationSchedule.for_new_run().to_dict()})
+        self.task = SimpleNamespace(metadata={"optimization_schedule": OptimizationSchedule.for_quick_run().to_dict()})
 
     def decide(self, *, accepted=False, candidate=None, status="completed", policy=None):
         item = candidate or self.candidate
@@ -88,6 +88,26 @@ class PurposeBoundReviewTests(unittest.TestCase):
         ):
             with self.subTest(reference=reference.evaluator_digest), self.assertRaisesRegex(ValueError, "same frozen cohort"):
                 build_host_gate_summary(self.task, self.candidate, reference)
+
+    def test_real_dataset_contract_pairs_canonical_and_frozen_evaluations(self):
+        from tests.test_paired_execution_qualification import evaluation, with_dataset_task
+
+        candidate = with_dataset_task(evaluation(HoldoutArm.FINALIST_1, skill=.2))
+        incumbent = with_dataset_task(evaluation(HoldoutArm.INCUMBENT, skill=.1))
+        canonical = Evaluation(evaluation_id=candidate.evaluation_id, run_id=candidate.scope.run_id,
+            candidate_id=candidate.scope.candidate_id, candidate_revision_id=candidate.scope.candidate_revision_id,
+            evaluation_scope=candidate.scope.to_dict(), score=candidate.score, passed=candidate.passed,
+            metrics=candidate.to_dict()["metrics"], evaluator_digest=candidate.evaluator_digest)
+        mixed = build_host_gate_summary(self.task, canonical, incumbent)
+        frozen = build_host_gate_summary(self.task, candidate, incumbent)
+        self.assertEqual(mixed, frozen)
+        self.assertTrue(mixed["applicable_exploration_gates"]["complete_paired_scoring_evidence"])
+        # Normalizing representation must never normalize away real contract changes.
+        altered = candidate.to_dict()["metrics"]
+        altered["dataset_task"]["minimum_skill"] = .5
+        changed = replace(canonical, metrics=altered)
+        self.assertFalse(build_host_gate_summary(self.task, changed, incumbent)
+                         ["applicable_exploration_gates"]["complete_paired_scoring_evidence"])
 
     def test_hard_effect_failure_blocks_selection_but_soft_or_unexercised_does_not(self):
         for semantics, status, rejected in (

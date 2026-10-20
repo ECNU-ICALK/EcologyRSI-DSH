@@ -1,6 +1,7 @@
 import { ROLE_CONTRACTS } from "../runtime/contracts.js";
 import { assertModelArgumentsSafe, TOOL_DEFINITIONS } from "./definitions.js";
 import { executeDynamicRetrieval } from "./retrieval.js";
+import { projectPredictionToolResult } from "../runtime/display-projection.js";
 
 export const DYNAMIC_RETRIEVAL_TOOL_PROFILE = "dynamic-retrieval-v1";
 
@@ -67,7 +68,9 @@ export function registerRoleTools(ctx, config = {}) {
       ...definition,
       output: {
         schema: { type: "object", additionalProperties: true },
-        render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
+        render: (_args, value) => [{ type: "text", text: JSON.stringify(
+          name === "ecology_execute_prediction_tool" ? projectPredictionToolResult(value) : value,
+        ) }],
       },
       execute: handler,
     });
