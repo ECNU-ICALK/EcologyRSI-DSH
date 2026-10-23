@@ -6,7 +6,7 @@ import {
   roleToolNames,
 } from "../tools/roles.js";
 import { MAX_REQUEST_TIMEOUT_MS, SidecarClient, SidecarError } from "../sidecar/client.js";
-import { normalizeRetrievalArguments } from "../tools/retrieval.js";
+import { formalRetrievalPolicy, comparisonRetrievalPolicy, normalizeRetrievalArguments, retrievalPolicy, RETRIEVAL_KEY_CONTRACT, RETRIEVAL_KEY_ERROR } from "../tools/retrieval.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
 import {
@@ -40,7 +40,7 @@ import { maximumStructuredOutputAttempts } from "./structured-output-budget.js";
 import { modelContextView } from "./display-projection.js";
 import { researchNestedRequiredFields } from "./research-schema-feedback.js";
 import { installSampleOutputCoverage } from "./sample-output-coverage.js";
-import { installSampleOutputPrevalidation, trustedSamplePredictionRepair } from "./sample-output-prevalidation.js";
+import { installSampleOutputPrevalidation, trustedSamplePredictionRepair, PREDICTION_SHAPE_INSTRUCTION } from "./sample-output-prevalidation.js";
 
 const STAGE_INSTRUCTIONS = Object.freeze({
   "generation.research": Object.freeze({
@@ -49,15 +49,16 @@ const STAGE_INSTRUCTIONS = Object.freeze({
     instruction: [
       "Plan the literature search from the previous aggregate result and reflection.",
       "Use every target and horizon in forecast_objective as the full scientific scope; a later generation may prioritize frozen weak cells but must not silently collapse the task to one target.",
-      "Return focused scholarly queries only; do not claim that a source was found yet.",
-      "Keep every search query within 180 characters and every focus area within 240 characters.",
+      "Return focused scholarly queries; distinguish sources actually retrieved through web_search from proposed searches.",
+      "Follow retrieval_contract.maximum_queries and maximum_query_characters when supplied; otherwise keep search plans within 12 queries of 600 characters. Keep every focus area within 240 characters.",
+      "Prefer focused queries of at most 128 Unicode characters when feasible so every configured source can execute them. Use site:, lang:, after: or before: filters where useful.",
       "If host_validation_feedback is present, correct its validation_detail in a fresh complete response.",
-      "The Host will execute the queries through its bounded metadata retriever.",
+      "The Host will execute the submitted queries through its configured retrieval sources.",
     ].join(" "),
   }),
   "generation.research-synthesis": Object.freeze({
     instruction: [
-      "Use only the frozen evidence_catalog supplied by the Host.",
+      "Use the frozen evidence_catalog for structured citations. You may search at any reasoning step to explore alternatives or resolve uncertainty; dynamic evidence is advisory and cannot add an allowed evidence_ref.",
       "Treat synthesis_contract.predictor_semantics as implementation facts. Ridge coefficients are independent per target and horizon in all ridge variants. Residual scales are fixed genome controls, not automatically fitted; selecting a pipeline only installs its defaults. Never claim otherwise in prose.",
       "Reason against the complete forecast_objective target-horizon matrix; a focused direction must state its local weakness without treating one target as the whole task.",
       "For every evidence_ref copy one string verbatim from synthesis_contract.allowed_evidence_refs, which lists the frozen knowledge_id, evidence_digest, and registered capability_id/capability_ids values; never invent a source.",
@@ -122,7 +123,7 @@ const STAGE_INSTRUCTIONS = Object.freeze({
     instruction: [
       "Analyze the label-free forecast origin using the candidate-selected Skill. You own the final numeric predictions.",
       "Follow the candidate's evidence requirements and prediction_contract.max_prediction_tool_calls. Call ecology_execute_prediction_tool using a catalog tool_id, unique call_id, exact wave_digest, and permitted parameters. Track remaining_calls returned by the Host; zero means submit now. Use parameters={} for defaults and never borrow parameter names from another tool. Stop gathering evidence once the complete vector is supported.",
-      "You may use a model result, blend multiple results, adjust a forecast, or predict directly from the observable context. Reference successful call_ids in evidence_call_ids for model, blend, and adjusted predictions.",
+      "Use only methods permitted by the frozen prediction_contract. A legacy contract may allow model, blend, adjusted or direct; evidence-mean-or-model@1 permits only exact single-tool copies or equal-weight means of distinct successful computations. Copy the optional tool mean_formula numbers and references when choosing that formula. Never adjust a value under that frozen formula policy. Reference the successful call_ids actually used.",
       "Submit exactly one structured_output with a finite predicted value, confidence, method, reason_code, and evidence_call_ids for each exact Host sample_id. Do not submit next_tool.",
       "When output_repair_contract is present in context, the previous attempt exhausted output before submission. Follow that corrective contract within unchanged budgets; do not repeat lengthy analysis, invent evidence, or skip candidate restrictions.",
       "Never access evaluation labels or future observations. Only one output argument correction is allowed; other failures end this turn for Host-owned retries.",
@@ -133,6 +134,8 @@ const STAGE_INSTRUCTIONS = Object.freeze({
       "Review exactly the supplied immutable prediction decisions and use the exact wave_digest from context.",
       "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
       "Return one decision for every supplied sample_id and no additional decisions.",
+      "After reading the Skill, audit the supplied evidence once and submit promptly. This is a pre-score evidence check, not a new forecasting or model-fitting task: do not reconstruct forecasts or repeatedly derive the time series.",
+      "Reserve the output budget for the complete decisions array. Each decision contains only sample_id, action, confidence, and one allowed reason_code; do not add a narrative. If supplied evidence is insufficient, return uncertain with an appropriate allowed reason_code instead of extending analysis or assuming acceptance.",
       "Never call structured_output with empty arguments.",
       "If skill fails, end the child turn. If structured_output rejects its arguments, correct only the arguments once; emit no prose or additional tool calls.",
     ].join(" "),
@@ -336,6 +339,20 @@ function specializeSampleOutputSchema(stage, schema, context) {
     ...sampleIdSchema,
     enum: sampleIds,
   };
+  const predictionContract = context?.context?.prediction_contract;
+  if (stage === "sample.plan" && predictionContract?.formula_policy === "evidence-mean-or-model@1") {
+    const methods = predictionContract.allowed_methods;
+    if (!Array.isArray(methods) || !methods.length
+      || methods.some(method => !["model", "blend"].includes(method))
+      || new Set(methods).size !== methods.length) {
+      throw sampleStageContextInvalid("frozen formula requires explicit model/blend methods");
+    }
+    properties.decisions.items.properties.method = {
+      ...properties.decisions.items.properties.method,
+      enum: [...methods],
+      description: "model: exact copy of one successful tool output; blend: equal-weight mean of distinct successful tool outputs. Follow the frozen prediction_contract.",
+    };
+  }
   return schema;
 }
 
@@ -627,9 +644,14 @@ function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminal
   }
   // An empty object is rejected before any retrieval or admission side effect.
   // It has no key to preserve; only a later successful, well-formed call can
-  // recover it. Nonempty requests still require the same retrieval key.
+  // recover it. A syntactically invalid key is likewise rejected before
+  // admission and must be replaced. Valid keys remain bound across repairs.
   const emptyArguments = args && typeof args === "object"
     && !Array.isArray(args) && Object.keys(args).length === 0;
+  const invalidRetrievalKey = typeof args?.retrieval_key === "string"
+    && expectedError === `Error: ${RETRIEVAL_KEY_ERROR}`;
+  const exactErrors = new Set([expectedError,
+    ...(invalidRetrievalKey ? ["Error: web_search retrieval_key is invalid"] : [])]);
   if (!emptyArguments && (!args || typeof args.retrieval_key !== "string")) return null;
   const callData = eventData(call.event);
   if (retrievalCalls.filter((item) => eventData(item.event).callId === callData.callId).length !== 1) return null;
@@ -642,7 +664,7 @@ function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminal
       && Array.isArray(item.event.sourceEventSeqs)
       && item.event.sourceEventSeqs.length === 1 && item.event.sourceEventSeqs[0] === call.seq
       && identity.content?.length === 1 && identity.content[0]?.type === "text"
-      && identity.content[0].text === expectedError;
+      && exactErrors.has(identity.content[0].text);
   });
   if (!failed) return null;
   const corrected = retrievalCalls.some((retry) => {
@@ -653,11 +675,11 @@ function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminal
     try { normalized = normalizeRetrievalArguments(callArguments(retry.event)); }
     catch { return false; }
     const result = successfulResultAfter(events, retry);
-    return (emptyArguments || normalized.retrieval_key === args.retrieval_key)
+    return (emptyArguments || invalidRetrievalKey || normalized.retrieval_key === args.retrieval_key)
       && result && result.seq < terminalSeq;
   });
   // Only a source-bound argument rejection followed by a successful correction
-  // is recoverable. Both attempts still consume the three-call retrieval budget.
+  // is recoverable. Both attempts still consume the Host retrieval call budget.
   return corrected ? failed : null;
 }
 
@@ -937,6 +959,7 @@ export function skillInvocationEvidence(
     skillName,
     allowsPredictionTools = false,
     allowDynamicRetrieval = false,
+    retrievalPolicy: configuredRetrievalPolicy,
     samplePredictionRepair = null,
   } = {},
 ) {
@@ -972,8 +995,9 @@ export function skillInvocationEvidence(
   if (!allowDynamicRetrieval && retrievalCalls.length > 0) {
     throw new Error("dynamic retrieval is outside the frozen legacy tool profile");
   }
-  if (retrievalCalls.length > 3) {
-    throw new Error("the zero to three dynamic retrieval call budget was exceeded");
+  const searchPolicy = retrievalPolicy(configuredRetrievalPolicy);
+  if (retrievalCalls.length > searchPolicy.dynamic_max_calls_per_stage) {
+    throw new Error("the Host dynamic retrieval call budget was exceeded");
   }
   for (const retrievalCall of retrievalCalls) {
     const retrievalResult = successfulResultAfter(events, retrievalCall)
@@ -1022,6 +1046,8 @@ export function skillInvocationEvidence(
 }
 
 export class NativeStageRunner {
+  #formalRetrievalByReservation = new WeakMap();
+
   constructor(ctx, {
     roleAgents,
     runRegistry,
@@ -1068,9 +1094,18 @@ export class NativeStageRunner {
       launchFence: this.providerStageGate,
     });
     this.childBindings = new ChildBindingRegistry();
+    // Local policy belongs to the exact trusted child reservation. It is not a
+    // new identity field and cannot be supplied or overridden by tool arguments.
     this.schemaCache = new Map();
     this.bridge = Object.freeze({
-      bindingFor: (exec, expected) => this.childBindings.bindingFor(exec?.agent || exec, expected),
+      bindingFor: (exec, expected) => {
+        const agent = exec?.agent || exec;
+        const identity = this.childBindings.bindingFor(agent, expected);
+        const formal = this.#formalRetrievalByReservation.get(this.childBindings.children.get(agent?.id));
+        return expected?.toolName === "web_search" && formal
+          ? Object.freeze({ ...identity, formal_retrieval: formal })
+          : identity;
+      },
       sidecar,
     });
   }
@@ -1150,6 +1185,40 @@ export class NativeStageRunner {
     ) {
       throw new Error("DSH structured stage context digest mismatch");
     }
+    const formalPhases = new Set(["validation", "final_test"]);
+    const formalScope = [
+      request.context.evaluation_scope?.phase,
+      request.context.context?.evaluation_scope?.phase,
+      ...(Array.isArray(request.context.samples)
+        ? request.context.samples.map(sample => sample?.partition) : []),
+    ].some(phase => formalPhases.has(phase));
+    const formalRetrieval = formalRetrievalPolicy(request.context.formal_retrieval, { required: formalScope });
+    const comparisonRetrieval = comparisonRetrievalPolicy(request.context, binding.stage, { formalScope });
+    const formalExecution = this.runRegistry?.get?.(binding.run_id)?.binding?.formal_execution;
+    if (comparisonRetrieval && formalExecution) {
+      throw new Error("comparison retrieval cannot replace formal runtime isolation");
+    }
+    if ((formalScope || formalRetrieval) && !formalExecution) {
+      throw new Error("formal stage requires a prepared formal runtime generation");
+    }
+    if (formalExecution) {
+      const phases = [
+        request.context.evaluation_scope?.phase,
+        request.context.context?.evaluation_scope?.phase,
+      ].filter(value => value !== undefined && value !== null);
+      // The numerical evaluator retains training_feedback as its output slot
+      // for a Host-only formal_view. Only the explicit evaluation scope grants
+      // formal authority; that internal slot must never substitute for it.
+      const partitions = (Array.isArray(request.context.samples)
+        ? request.context.samples.map(sample => sample?.partition) : [])
+        .filter(value => value !== undefined && value !== null);
+      if (!["sample.plan", "sample.critic"].includes(binding.stage)
+        || !formalRetrieval || formalRetrieval.snapshot_digest !== formalExecution.snapshot_digest
+        || phases.length === 0 || phases.some(phase => phase !== formalExecution.stage)
+        || partitions.some(partition => ![formalExecution.stage, "training_feedback"].includes(partition))) {
+        throw new Error("formal runtime stage does not match its frozen execution");
+      }
+    }
     try {
       validateStructuredStageBudget(binding.stage, request.max_tokens, request.context,
         "DSH structured stage max_tokens");
@@ -1189,6 +1258,7 @@ export class NativeStageRunner {
               contract,
               request,
               identityDigests,
+              formalRetrieval: formalRetrieval || comparisonRetrieval,
               roleHost,
               lifecycle,
               signal,
@@ -1245,6 +1315,7 @@ export class NativeStageRunner {
     contract,
     request,
     identityDigests,
+    formalRetrieval,
     roleHost,
     lifecycle,
     signal = null,
@@ -1309,6 +1380,7 @@ export class NativeStageRunner {
       allowed_tools: roleToolNames(contract.role, roleHost.binding?.tool_profile),
     };
     const reservation = this.childBindings.reserve(roleHost.sessionId, launch, frozenIdentity);
+    if (formalRetrieval) this.#formalRetrievalByReservation.set(reservation, formalRetrieval);
     const skillName = expectedSkillName(contract, request);
     let persistedSkillEvidence = null;
     const budgetController = new AbortController();
@@ -1332,6 +1404,7 @@ export class NativeStageRunner {
       const responseProtocol = [
         "Do not narrate analysis.",
         ...(binding.stage === "sample.plan" ? [
+          PREDICTION_SHAPE_INSTRUCTION,
           `Submit exactly ${request.context.samples.length} decisions, one for every frozen context.samples sample_id. Decision order may vary; duplicates, missing ids and extra ids are invalid. Correct sample-output-coverage INVALID_ARGS feedback within the existing two-output-attempt limit.`,
         ] : []),
         "Pass the result object directly as structured_output arguments. Include every field in output_contract.required_fields and copy output_contract.fixed_fields exactly; these are required even when the tool schema supplies a const.",
@@ -1343,14 +1416,22 @@ export class NativeStageRunner {
         ] : []),
         "Use native JSON objects and arrays, not JSON-encoded strings. Do not wrap the result in value, result, or output_contract, and do not prefix field names with value.",
         "In INVALID_ARGS feedback, value is the validator's root path: missing value.schema_version means add schema_version at the top level, not a value wrapper or a value.schema_version key. Correct the named field and preserve all other valid fields.",
-        ...(["generation.search-plan", "generation.research-synthesis"].includes(binding.stage) ? [
-          "Do not call web_search in this stage. The Host executes the search plan and freezes the evidence catalog before synthesis.",
-          "Keep findings concise. Every citation must be a literal identifier in the supplied frozen evidence catalog.",
-        ] : []),
+        ...(formalRetrieval ? [] : [
+          "When the Host enables online retrieval, dynamic search is available throughout planning and proposal development, including generation.search-plan and generation.research-synthesis. Decide whether to search again after each result; do not wait for a new generation when current reasoning needs more evidence.",
+        ]),
+        "Dynamic search results may inform reasoning, but every structured evidence_ref must remain a literal identifier in the supplied frozen evidence catalog.",
         `Your first response must call skill exactly once with name ${skillName}.`,
-        "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
+        (() => {
+          const policy = retrievalPolicy(request.context.retrieval_policy);
+          if (formalRetrieval) {
+            return `Formal evaluation uses only the frozen evidence snapshot ${formalRetrieval.snapshot_digest} (${formalRetrieval.document_count} documents). After the Skill result, you may call web_search at any reasoning step before final structured_output to search this fixed library, with up to ${policy.dynamic_max_calls_per_stage} calls, ${policy.max_queries_per_call} queries per call and ${policy.max_results} returned sources. Queries may change as reasoning develops, but the library cannot change. Live network retrieval and external fallback are forbidden. Returned URLs are citations only; never open, fetch or otherwise read them remotely. Empty results mean the frozen library has no matching evidence. ${RETRIEVAL_KEY_CONTRACT}. If a call is rejected for invalid arguments, correct it and obtain a successful web_search result before structured_output.`;
+          }
+          return policy.online_enabled
+            ? `After the Skill result, decide autonomously whether external evidence would improve your next decision. You may interleave up to ${policy.dynamic_max_calls_per_stage} web_search calls before final structured_output, with up to ${policy.max_queries_per_call} queries of ${policy.max_query_chars} characters per call and ${policy.max_results} returned sources. Prefer focused queries of at most 128 Unicode characters when feasible for compatibility across sources; site:, lang:, after: and before: filters are supported. Use varied queries to cover mechanisms, alternative methods and conflicting evidence; refine them as reasoning develops. Submit queries and retrieval_key only, and never choose a provider. ${RETRIEVAL_KEY_CONTRACT}. If a call is rejected for invalid arguments, correct it and obtain a successful web_search result before structured_output. Search is optional; stop when evidence is sufficient or the budget is exhausted.`
+            : "Online retrieval is disabled by the Host. Use the supplied evidence and do not call web_search.";
+        })(),
         ...(contract.allowsPredictionTools ? [
-          "After the Skill result, analyze the sample within prediction_contract.max_prediction_tool_calls, interleaving searches only when needed. Use unique call_ids; wait for each tool result before continuing and respect remaining_calls.",
+          "After the Skill result, analyze the sample within prediction_contract.max_prediction_tool_calls, interleaving searches when needed and permitted by the Host retrieval policy. Use unique call_ids; wait for each tool result before continuing and respect remaining_calls.",
           "When ready, call structured_output once with your final numerical predictions and evidence references. Emit no prose.",
         ] : [
           "Then call structured_output exactly once with one concise object matching the supplied output schema.",
@@ -1374,6 +1455,9 @@ export class NativeStageRunner {
         instruction: [
           ...responseProtocol,
           contract.instruction || "",
+          ...((request.context?.synthesis_contract?.candidate_portfolio || request.context?.candidate_portfolio) ? [
+            "The frozen candidate_portfolio takes precedence over legacy family advice: follow its slot_requirements and supply mechanism_hypothesis from its catalog. A different prompt or Skill name alone does not establish a different mechanism. Test the hypothesis; never treat it as a scientific result.",
+          ] : []),
         ].filter(Boolean).join(" "),
         stage: binding.stage,
         output_contract: {
@@ -1434,6 +1518,7 @@ export class NativeStageRunner {
             skillName,
             allowsPredictionTools: contract.allowsPredictionTools === true,
             allowDynamicRetrieval: true,
+            retrievalPolicy: request.context.retrieval_policy,
             samplePredictionRepair: samplePrevalidation ? {
               authority: samplePrevalidation.repairAuthority, sessionId,
               resultDigest: jsonDigest(structured),
@@ -1495,6 +1580,7 @@ export class NativeStageRunner {
       });
       samplePrevalidation = installSampleOutputPrevalidation(this.ctx, {
         stage: binding.stage,
+        sampleIds: binding.stage === "sample.plan" ? request.context.samples.map(sample => sample.sample_id) : [],
         parentSessionId: roleHost.sessionId,
         label: reservation.label,
         bindOutput: outputTransport.bind,

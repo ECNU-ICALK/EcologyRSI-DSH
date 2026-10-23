@@ -93,7 +93,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v15",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -126,7 +126,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                     self.assertEqual(dict(metadata["research_execution_policy"]), dict(RESEARCH_EXECUTION_POLICY))
                     self.assertEqual(created["projection"]["research_execution_policy"], dict(RESEARCH_EXECUTION_POLICY))
                     self.assertEqual(metadata["evaluator_id"], GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID)
-                    self.assertEqual(metadata["seed_genome_template_id"], "greenhouse-baseline-aligned-default@2")
+                    self.assertEqual(metadata["seed_genome_template_id"], "greenhouse-baseline-aligned-default@3")
                     catalog = metadata["runtime_component_catalog"]["prediction_models"]
                     self.assertEqual([item["id"] for item in catalog], [BASELINE_ALIGNED_RIDGE_MODEL_ID])
                     self.assertEqual(set(catalog[0]["parameter_schemas"]), PARAMETERS)
@@ -180,7 +180,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v15",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }

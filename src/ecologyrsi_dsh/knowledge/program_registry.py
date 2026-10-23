@@ -793,7 +793,17 @@ class ProgramRegistrySnapshot:
                 for profile in profiles:
                     profile["preset_id"] = "ecology-sample-planner-v14"
                 harness_templates.append(SeedGenomeTemplate.from_dict(value))
-            templates = (*templates, *harness_templates)
+            # v15 adds the frozen arithmetic protocol. Retain @2/v14 exactly
+            # for historical genomes; only newly selected @3 seeds use v15.
+            formula_templates = []
+            for template in harness_templates:
+                value = template.to_dict()
+                value.pop("template_digest", None)
+                value["template_id"] = value["template_id"].removesuffix("@2") + "@3"
+                for profile in value["agent_program"]["candidate_execution_program"]["role_profiles"]:
+                    profile["preset_id"] = "ecology-sample-planner-v15"
+                formula_templates.append(SeedGenomeTemplate.from_dict(value))
+            templates = (*templates, *harness_templates, *formula_templates)
         identity = {
             "schema_version": REGISTRY_SCHEMA_VERSION,
             "programs": thawed,

@@ -8,6 +8,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from importlib.resources import files
@@ -21,6 +22,7 @@ from ..core.models import digest
 from .autonomous_cycle import normalize_search_queries
 from .mapping import map_catalog_entry
 from .models import KnowledgeAssessment, KnowledgeCard, KnowledgeSnapshot
+from .retrieval_policy import resolve_retrieval_policy
 
 _TARGET_TERMS = {
     "air_temperature": "greenhouse air temperature",
@@ -40,11 +42,11 @@ _OPENALEX_MAX_RETRIES = 3
 _OPENALEX_RETRY_BASE_SECONDS = 0.25
 _OPENALEX_RETRY_MAX_SECONDS = 1.0
 _OPENALEX_RETRY_AFTER_MAX_SECONDS = 5.0
-_OPENALEX_MAX_QUERIES = 6
-_OPENALEX_QUERY_MAX_CHARS = 180
+_OPENALEX_MAX_QUERIES = 12
+_OPENALEX_QUERY_MAX_CHARS = 600
 _OPENALEX_MAX_RESPONSE_BYTES = 1_000_000
 _OPENALEX_RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429})
-_DYNAMIC_SEARCH_MAX_SOURCES = 8
+_DYNAMIC_SEARCH_MAX_SOURCES = 16
 _DYNAMIC_SEARCH_CONTENT_MAX_CHARS = 4_000
 _DYNAMIC_SEARCH_TITLE_MAX_CHARS = 300
 _DYNAMIC_SEARCH_SNIPPET_MAX_CHARS = 1_200
@@ -227,10 +229,21 @@ def _merged_query_terms(
     state: Any,
     model_queries: tuple[str, ...] | list[str] | None,
 ) -> tuple[str, ...]:
-    host_queries = _query_terms(state)
+    policy = resolve_retrieval_policy(state.task_manifest.metadata)
+    host_queries = []
+    for hint in _query_terms(state):
+        if len(hint) > policy.max_query_chars:
+            hint = hint[:policy.max_query_chars]
+            if " " in hint:
+                hint = hint.rsplit(" ", 1)[0]
+        if hint.strip():
+            host_queries.append(hint.strip())
+    query_limit = policy.max_queries_per_call
     if model_queries is None:
-        return host_queries
+        return tuple(host_queries[:query_limit])
     authored = normalize_search_queries(model_queries)
+    if len(authored) > query_limit or any(len(query) > policy.max_query_chars for query in authored):
+        raise ValueError("model-authored queries exceed the configured retrieval policy")
     merged: list[str] = []
     seen: set[str] = set()
     for query in (*authored, *host_queries):
@@ -239,7 +252,7 @@ def _merged_query_terms(
             continue
         seen.add(identity)
         merged.append(query)
-        if len(merged) >= _OPENALEX_MAX_QUERIES:
+        if len(merged) >= query_limit:
             break
     return tuple(merged)
 
@@ -255,13 +268,7 @@ def _entry_matches_domain(entry: Mapping[str, Any], domain: str) -> bool:
 
 
 def _online_enabled(metadata: Mapping[str, Any]) -> bool:
-    configured = metadata.get("knowledge_online_enabled", False)
-    if not isinstance(configured, bool):
-        configured = False
-    environment = os.environ.get("ECOLOGYRSI_KNOWLEDGE_ONLINE")
-    if environment is not None:
-        return environment.strip().casefold() in {"1", "true", "yes", "on"}
-    return configured
+    return resolve_retrieval_policy(metadata).online_enabled
 
 
 def _openalex_timeout_seconds() -> float:
@@ -493,15 +500,33 @@ def _openalex_cards_for_queries(
     plan = _openalex_query_plan(queries, priority_count=priority_count)
     if not plan or limit <= 0:
         return []
+    # Give every planned question a chance to contribute. Previously the first
+    # broad query could fill the entire result budget and suppress later queries.
+    batches: list[list[KnowledgeCard]] = []
+    errors: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(plan))) as executor:
+        futures = [
+            executor.submit(
+                _openalex_cards, query, limit=limit,
+                required_title_markers=required_title_markers,
+            )
+            for query in plan
+        ]
+        for future in futures:
+            try:
+                batches.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - retain other query results
+                errors.append(exc)
+                batches.append([])
+    if len(errors) == len(plan):
+        raise errors[0]
     cards: list[KnowledgeCard] = []
     seen_ids: set[str] = set()
-    for query in plan:
-        query_cards = _openalex_cards(
-            query,
-            limit=limit,
-            required_title_markers=required_title_markers,
-        )
-        for card in query_cards:
+    for rank in range(max((len(batch) for batch in batches), default=0)):
+        for batch in batches:
+            if rank >= len(batch):
+                continue
+            card = batch[rank]
             if card.knowledge_id in seen_ids:
                 continue
             seen_ids.add(card.knowledge_id)
@@ -677,19 +702,26 @@ def merge_dynamic_search_results(
     *,
     max_sources: int = _DYNAMIC_SEARCH_MAX_SOURCES,
 ) -> dict[str, Any]:
-    """Merge normalized primary and fallback results, preferring primary order."""
+    """Interleave providers so a full primary page cannot hide the added source."""
 
     values = [item for item in (primary, fallback) if item is not None]
     sources: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     content_parts: list[str] = []
     truncated = False
-    for value in values:
-        normalized = normalize_dynamic_search_result(value, max_sources=max_sources)
+    normalized_values = [
+        normalize_dynamic_search_result(value, max_sources=max_sources)
+        for value in values
+    ]
+    for normalized in normalized_values:
         truncated = truncated or bool(normalized["truncated"])
         if normalized.get("content"):
             content_parts.append(str(normalized["content"]))
-        for source in normalized["sources"]:
+    for rank in range(max((len(value["sources"]) for value in normalized_values), default=0)):
+        for value in normalized_values:
+            if rank >= len(value["sources"]):
+                continue
+            source = value["sources"][rank]
             if source["url"] in seen_urls:
                 continue
             seen_urls.add(source["url"])
@@ -714,7 +746,7 @@ def search_openalex_metadata(
 ) -> dict[str, Any]:
     """Adapt allowlisted OpenAlex metadata into the dynamic-search result shape."""
 
-    cards = _openalex_cards_for_queries(queries, limit=min(max(limit, 0), 8))
+    cards = _openalex_cards_for_queries(queries, limit=min(max(limit, 0), 32))
     sources: list[dict[str, str]] = []
     for card in cards:
         source = {
@@ -729,7 +761,7 @@ def search_openalex_metadata(
                 f"OpenAlex metadata fallback returned {len(sources)} bounded sources."
             ),
             "sources": sources,
-            "truncated": len(cards) > limit,
+            "truncated": len(cards) >= limit,
         },
         max_sources=limit,
     )
@@ -756,27 +788,17 @@ def retrieve_generation_knowledge(
     entries = [item for item in _catalog() if _entry_matches_domain(item, domain)]
     cards = [map_catalog_entry(item, metadata) for item in entries]
     warnings: list[str] = []
-    online = _online_enabled(metadata)
+    policy = resolve_retrieval_policy(metadata)
+    online = policy.online_enabled
     online_cards: list[KnowledgeCard] = []
+    providers = ["内置核验目录"]
     status = "catalog_only"
     if online:
+        providers.append("OpenAlex 元数据")
         try:
-            markers = (
-                ("greenhouse", "controlled environment", "plant factor")
-                if "greenhouse" in domain
-                else (
-                    "soil moisture",
-                    "soil water",
-                    "crop water",
-                    "irrigation",
-                    "evapotranspiration",
-                    "aquacrop",
-                )
-            )
             online_cards = _openalex_cards_for_queries(
                 queries,
-                limit=5,
-                required_title_markers=markers,
+                limit=policy.max_results,
                 priority_count=min(len(authored_queries), len(queries)),
             )
             status = "catalog_and_online" if online_cards else "catalog_online_empty"
@@ -785,22 +807,77 @@ def retrieve_generation_knowledge(
             warnings.append(
                 f"OpenAlex 元数据检索失败，已使用内置目录：{type(exc).__name__}"
             )
+        # Import locally: the provider reuses our bounded result normalization.
+        from .deepseek_search import (
+            is_deepseek_search_configured,
+            search_deepseek_metadata,
+        )
+
+        if is_deepseek_search_configured():
+            providers.append("DeepSeek 官方搜索")
+            try:
+                result = search_deepseek_metadata(queries, limit=policy.max_results)
+                web_cards = [
+                    KnowledgeCard(
+                        knowledge_id="deepseek:" + digest(source["url"])[:24],
+                        title=source.get("title") or source["url"],
+                        summary="DeepSeek 官方搜索返回的网页线索；未经方法核验或本地执行验证。",
+                        source_url=source["url"],
+                        source_kind="网页搜索",
+                        source_authority="DeepSeek Search",
+                        execution_status="metadata_only",
+                        selection_reason="用于研究与方法比较；不能直接授权执行外部代码。",
+                        algorithm_tags=("online_metadata", "web_search"),
+                        abstract_summary=source.get("snippet"),
+                        content_digest=digest(source.get("snippet") or source["url"]),
+                    )
+                    for source in result["sources"]
+                ]
+                # Balance web and literature results before enforcing the
+                # snapshot's existing 32-card serialization contract.
+                combined: list[KnowledgeCard] = []
+                seen_urls: set[str] = set()
+                for rank in range(max(len(web_cards), len(online_cards))):
+                    for batch in (web_cards, online_cards):
+                        if rank < len(batch) and batch[rank].source_url not in seen_urls:
+                            seen_urls.add(batch[rank].source_url)
+                            combined.append(batch[rank])
+                online_cards = combined[:policy.max_results]
+            except Exception as exc:  # noqa: BLE001 - independent optional source
+                warnings.append(f"DeepSeek 官方搜索失败：{type(exc).__name__}")
+        if not online_cards:
+            # Last resort is genuine publisher metadata, never a claim of full text.
+            from .crossref_search import crossref_cards
+
+            providers.append("Crossref 元数据")
+            try:
+                online_cards = crossref_cards(queries, limit=policy.max_results)
+            except Exception as exc:  # noqa: BLE001 - preserve the offline catalog
+                warnings.append(f"Crossref 元数据检索失败：{type(exc).__name__}")
+        if online_cards:
+            status = "catalog_and_online"
+        elif warnings:
+            status = "catalog_online_fallback"
+        else:
+            status = "catalog_online_empty"
+    # Preserve curated executable mappings, then admit a diverse online set.
+    online_cards = online_cards[:max(0, 32 - len(cards))]
     cards.extend(online_cards)
     cards.sort(
         key=lambda item: (
             {"adopted": 0, "available_not_selected": 1, "research_only": 2, "metadata_only": 3}[
                 item.execution_status
             ],
-            item.knowledge_id,
+            item.knowledge_id if item.execution_status != "metadata_only" else "",
         )
     )
     return KnowledgeSnapshot(
         run_id=state.run.run_id,
         generation=state.run.generation,
         query_terms=queries,
-        cards=tuple(cards[:24]),
+        cards=tuple(cards[:32]),
         online_enabled=online,
-        provider="内置核验目录 + OpenAlex 元数据" if online else "内置核验目录",
+        provider=" + ".join(providers),
         retrieval_status=status,
         warnings=tuple(warnings),
     )

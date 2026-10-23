@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import { ROLE_CONTRACTS } from "../../../integrations/dsh_ecology_plugin/lib/runtime/contracts.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -1247,6 +1248,29 @@ assert.equal(modelSandbox.state.candidateSamplePage.rows[1].model_prediction_ava
 const legacySampleRow = modelSandbox.normalizeCandidateSampleRow({
   sample_id: "legacy-sample", observed: 10, predicted: 8, baseline: 7, error: -2,
 }, 0);
+assert.equal(modelSandbox.renderMechanismEvidence({}), "");
+assert.ok(JSON.stringify(modelSandbox.frozenRunFeatureRows({
+  frozen_feature_policies: {candidate_exploration_policy: "mechanism_evidence_search@1"},
+})).includes("三种可用机制＋自由槽"));
+assert.ok(JSON.stringify(modelSandbox.frozenRunFeatureRows({
+  frozen_feature_policies: {}, configuration: {candidate_exploration_policy: "mechanism_evidence_search@1"},
+})).includes('机制多样性","未启用'));
+assert.equal(modelSandbox.frozenRunFeatureRows({
+  frozen_feature_policies: {mutation_effect_scope_policy: "per_predicate_impact@1"},
+}).find(row => row[0] === "修改效果检查")[1], "按各项修改的实际影响单元检查");
+assert.equal(modelSandbox.frozenRunFeatureRows({
+  frozen_feature_policies: {}, configuration: {mutation_effect_scope_policy: "per_predicate_impact@1"},
+}).find(row => row[0] === "修改效果检查")[1], "按整体修改范围检查（旧协议）");
+const mechanismHtml = modelSandbox.renderMechanismEvidence(modelSandbox.normalizeCandidate({
+  mechanism_evidence: {
+    mechanism_ids: ["feature_structure"], execution_status: "inconclusive",
+    revision_id: "revision:<fixture>",
+    comparisons: [{status: "measured", near_outputs: true}, {status: "unverified"}],
+  },
+}, 0));
+for (const text of ["特征结构", "证据不足", "可比 1/2 对", "最终输出近似 1 对", "行为变化不代表性能提升", "revision:&lt;fixture&gt;"]) {
+  assert.ok(mechanismHtml.includes(text), text);
+}
 assert.equal(legacySampleRow.reward, 1);
 assert.equal(legacySampleRow.failure_message, null);
 assert.ok(modelSandbox.renderCandidateSampleRows([legacySampleRow], 0).includes("已完成"));
@@ -2795,13 +2819,15 @@ modelSandbox.loadCandidateSamples = async () => true;
 modelSandbox.refreshEventsForRun = async () => true;
 let timeoutCreateBody = null;
 let timeoutCreateRequests = 0;
+let timeoutCreateErrorName = "AbortError";
+let timeoutCreateErrorMessage = "请求超时。";
 modelSandbox.request = async (path, options = {}) => {
   if (path === "/model-preflight") { return {passed: true}; }
   timeoutCreateRequests += 1;
   if (path === "/runs" && options.method === "POST") {
     timeoutCreateBody = options.body;
-    const error = new Error("请求超时。");
-    error.name = "AbortError";
+    const error = new Error(timeoutCreateErrorMessage);
+    error.name = timeoutCreateErrorName;
     throw error;
   }
   if (path === "/runs/" + encodeURIComponent("run:recovered-after-timeout") + "?view=overview") {
@@ -2850,6 +2876,31 @@ assert.equal(modelSandbox.state.activeRun.configuration.dataset_id, "dataset-a")
 assert.notEqual(modelSandbox.state.createStatus.state, "failed");
 assert.equal(modelSandbox.state.commandError, null);
 assert.doesNotMatch(timeoutCreateToasts.join("\n"), /创建失败/);
+
+// Safari/WebKit reports a lost fetch response as TypeError("Load failed").
+// This must recover the same durable command, never create a second run.
+for (const [name, message] of [["TypeError", "Load failed"], ["TypeError", "Failed to fetch"],
+                              ["NetworkError", "Network request failed"]]) {
+  timeoutCreateErrorName = name;
+  timeoutCreateErrorMessage = message;
+  timeoutCreateRequests = 0;
+  timeoutCreateBody = null;
+  modelSandbox.state.commandError = null;
+  modelSandbox.state.createStatus = null;
+  const recovered = await modelSandbox.createRun({
+    dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
+    autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
+    rounds: 1, candidates_per_generation: 4, max_candidates: 4,
+    formal_origin_count: 500, local_batch_origin_count: 50,
+    max_local_edits_per_batch: 2, selection_holdout_origin_count: 169, fixed_seed: true,
+  });
+  assert.equal(recovered.id, "run:recovered-after-timeout", message);
+  assert.equal(timeoutCreateRequests, 3, "one POST, one same-command lookup, one overview hydration");
+  assert.equal(modelSandbox.state.commandError, null);
+  assert.notEqual(modelSandbox.state.createStatus.state, "failed");
+}
+assert.doesNotMatch(timeoutCreateToasts.join("\n"), /创建失败/);
+
 
 // Non-default execution parameters must survive all three boundaries: the
 // create request, the server projection, and the process-detail rendering.
@@ -4491,7 +4542,21 @@ const presetManifest = JSON.parse(fs.readFileSync(
 ));
 assert.equal(presetManifest.schema_version, "ecologyrsi-dsh.preset-manifest/1");
 const activePresetDirectories = presetManifest.presets.map((item) => item.preset_id);
-assert.deepEqual(presetDirectories.sort(), activePresetDirectories.sort());
+assert.equal(activePresetDirectories.length, 6);
+assert.equal(new Set(activePresetDirectories).size, 6);
+// Immutable historical presets may remain for archived runs. Only the current
+// manifest determines active roles; a retained directory must never activate it.
+const historicalPresetDirectories = new Set(["ecology-sample-planner-v14"]);
+for (const preset of activePresetDirectories) {
+  assert.ok(presetDirectories.includes(preset), `active preset is missing: ${preset}`);
+  assert.ok(!historicalPresetDirectories.has(preset), `historical preset became active: ${preset}`);
+}
+for (const preset of presetDirectories.filter((name) => !activePresetDirectories.includes(name))) {
+  assert.ok(historicalPresetDirectories.has(preset), `unexpected undeclared preset directory: ${preset}`);
+}
+assert.deepEqual(Object.values(ROLE_CONTRACTS).map((item) => item.preset_id).sort(),
+  [...activePresetDirectories].sort());
+assert.equal(ROLE_CONTRACTS["sample-planner"].preset_id, "ecology-sample-planner-v15");
 for (const field of ["rounds", "candidates_per_generation", "formal_origin_count", "local_batch_origin_count", "max_local_edits_per_batch", "selection_holdout_origin_count", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
 }
@@ -4735,7 +4800,7 @@ assert.ok(html.includes("其他已登记数据集"));
 assert.ok(html.includes("策略／预测模型／评审") || html.includes("策略模型／自主预测模型／评审"));
 assert.ok(html.includes("训练轨迹／候选方案"));
 assert.ok(html.includes("每条资产是一条完整训练轨迹"));
-assert.ok(html.includes("可交付候选版（未签名）"));
+assert.ok(html.includes("本地研究版（未签名）"));
 assert.ok(html.includes("正式监督微调（SFT）"));
 assert.ok(html.includes("追加式执行记录"));
 assert.ok(app.includes("五阶段完整训练记录"));
@@ -5247,9 +5312,11 @@ assert.equal(modelSandbox.candidateSampleEvidence(duplicateWithPreview, {}).trac
 assert.equal(modelSandbox.candidateOutcome(duplicateWithPreview, {}).text, "已标记等价版本");
 assert.doesNotMatch(modelSandbox.selectionReasonText("duplicate"), /未重复评测|已跳过/);
 
-assert.equal(modelSandbox.frozenRunFeatureRows({configuration: {
-  behavior_diagnostics_policy: "prediction_contribution@2"
-}})[1][1], "已启用，等待训练证据");
+for (const policy of ["prediction_contribution@2", "prediction_contribution@3"]) {
+  assert.equal(modelSandbox.frozenRunFeatureRows({configuration: {
+    behavior_diagnostics_policy: policy
+  }})[1][1], "已启用，等待训练证据");
+}
 assert.match(modelSandbox.frozenRunFeatureRows({configuration: {
   behavior_diagnostics_policy: "prediction_contribution@999"
 }})[1][1], /^未识别/);

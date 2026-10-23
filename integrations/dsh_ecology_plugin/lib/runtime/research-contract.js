@@ -35,7 +35,31 @@ function boundText(field, maximum) {
   field.description = `Aim for at most ${maximum} characters; this is a concise writing target. ${field.description || ""}`.trim();
 }
 
+function specializeMechanism(item, portfolio, axis = null) {
+  if (!portfolio) {
+    // Keep the submitted vocabulary of historical runs byte-compatible.
+    delete item.properties.mechanism_hypothesis;
+    return;
+  }
+  const catalog = portfolio.mechanism_catalog;
+  if (portfolio.policy !== "mechanism_evidence_search@1" || !catalog) {
+    throw new Error("invalid frozen candidate portfolio");
+  }
+  const hypothesis = item.properties.mechanism_hypothesis;
+  if (!hypothesis) throw new Error("mechanism hypothesis schema is missing");
+  item.required = [...new Set([...item.required, "mechanism_hypothesis"])];
+  hypothesis.properties.mechanism_id.enum = axis
+    ? [catalog.mechanism_by_axis[axis]] : [...new Set(Object.values(catalog.mechanism_by_axis))];
+  hypothesis.properties.input_refs.items.enum = catalog.input_refs;
+  hypothesis.properties.target_cells.items.enum = catalog.target_cells;
+  hypothesis.description = "Use the frozen candidate portfolio's assigned mechanism. This is a testable hypothesis, not a performance claim or a custom evaluator.";
+}
+
 export function specializeResearchOutputSchema(stage, schema, context) {
+  if (stage === "generation.reflect") {
+    specializeMechanism(schema.properties.candidate_directions.items, context?.candidate_portfolio);
+    return;
+  }
   if (stage !== "generation.research-synthesis") return;
   const catalog = context?.knowledge_snapshot?.evidence_catalog;
   const targets = context?.synthesis_contract?.allowed_mutation_targets;
@@ -84,6 +108,7 @@ export function specializeResearchOutputSchema(stage, schema, context) {
     variant.properties.mutation_axis = { type: "string", const: axis };
     variant.properties.mutation_target = { type: "string", enum: [...new Set(values)].sort() };
     variant.properties.mutation_direction = { type: "string", enum: allowedDirections };
+    specializeMechanism(variant, context.synthesis_contract.candidate_portfolio, axis);
     variants.push(variant);
   }
   if (!variants.length) throw new Error("research synthesis has no legal mutation targets");

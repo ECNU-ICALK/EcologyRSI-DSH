@@ -6,6 +6,8 @@ import { registerRoleTools } from "../lib/tools/roles.js";
 
 test("Host identity and labels cannot be forged recursively in model arguments", () => {
   assert.throws(() => assertModelArgumentsSafe({ nested: { run_id: "other" } }), /Host identity/);
+  assert.throws(() => assertModelArgumentsSafe({ nested: { formal_retrieval: { online_enabled: true } } }), /Host identity/);
+  assert.throws(() => assertModelArgumentsSafe({ snapshot_digest: "forged" }), /Host identity/);
   assert.throws(() => assertModelArgumentsSafe({ rows: [{ ground_truth: 5 }] }, { labelFree: true }), /label-bearing/);
   assert.doesNotThrow(() => assertModelArgumentsSafe({ rows: [{ temperature: 21.5 }] }, { labelFree: true }));
 });

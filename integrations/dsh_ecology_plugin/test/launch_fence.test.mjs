@@ -11,13 +11,13 @@ const REALISTIC_PRESET_CATALOG = Object.freeze([
   "ecology-coordinator-v6",
   "ecology-researcher-v17",
   "ecology-candidate-proposer-v9",
-  "ecology-sample-planner-v14",
+  "ecology-sample-planner-v15",
   "ecology-sample-critic-v6",
   "ecology-generation-judge-v10",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v14"
+  required_tools: preset_id === "ecology-sample-planner-v15"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));

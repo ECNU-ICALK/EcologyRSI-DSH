@@ -33,6 +33,8 @@ _RECORDED_ROLES = (
      "ecology-sample-planner-v12", "sample.plan", "ecology-sample-predictions@2"),
     ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
      "ecology-sample-planner-v13", "sample.plan", "ecology-sample-predictions@2"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
+     "ecology-sample-planner-v14", "sample.plan", "ecology-sample-predictions@2"),
 )
 
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")

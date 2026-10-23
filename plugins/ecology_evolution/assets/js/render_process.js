@@ -1025,6 +1025,15 @@
     if (requestedId) {
       var requested = candidates.find(function (candidate) { return candidate.id === requestedId || candidate.candidate_id === requestedId; });
       if (requested) { return requested; }
+      // Control arms are not included in the search-candidate list. Preserve
+      // the Host's active identity without borrowing another candidate's
+      // plan, score or sample trace while its detail is unavailable.
+      return {
+        id: requestedId,
+        candidate_id: requestedId,
+        generation: progress.current_generation,
+        execution: { current_stage: progress.current_stage }
+      };
     }
     if (executionRunIsTerminal(run)) { return null; }
     var batchStage = String(progress.current_stage || progress.phase || "").toLowerCase();
@@ -1949,7 +1958,7 @@
     if (Number.isFinite(runRemainingSeconds) && runRemainingSeconds > 0) {
       remainingText = (conditionalRecheckBudget ? "按执行上限估计剩余 " : "预计全程剩余 ") + compactDuration(runRemainingSeconds);
       if (Number.isFinite(stageRemainingSeconds) && stageRemainingSeconds > 0 && Math.abs(runRemainingSeconds - stageRemainingSeconds) > 60) {
-        remainingText += "（当前阶段 " + compactDuration(stageRemainingSeconds) + "）";
+        remainingText += (conditionalRecheckBudget ? "（本轮 " : "（当前阶段 ") + compactDuration(stageRemainingSeconds) + "）";
       }
     } else if (Number.isFinite(stageRemainingSeconds) && stageRemainingSeconds > 0) {
       remainingText = "预计剩余 " + compactDuration(stageRemainingSeconds);
@@ -2341,16 +2350,24 @@
     var diagnostics = configuration.behavior_diagnostics_policy;
     var novelty = configuration.candidate_novelty_policy;
     var executability = configuration.candidate_executability_policy;
+    var exploration = configuration.candidate_exploration_policy;
+    var effectScope = configuration.mutation_effect_scope_policy;
     var contribution = run && run.evolution_funnel && run.evolution_funnel.prediction_contribution;
     return [
       ["冻结搜索方式", searchModeLabel(configuration.targeted_search_policy)],
-      ["预测贡献诊断", ["prediction_contribution@1", "prediction_contribution@2"].indexOf(diagnostics) >= 0
+      ["预测贡献诊断", ["prediction_contribution@1", "prediction_contribution@2", "prediction_contribution@3"].indexOf(diagnostics) >= 0
         ? "已启用" + (contribution && contribution.latest_training_summary ? "，已有训练证据" : "，等待训练证据")
         : diagnostics ? "未识别的冻结策略：" + diagnostics : "未启用（冻结合同未记录）"],
       ["运行内行为去重", novelty === "run_behavior_novelty@1" ? "已启用"
         : novelty ? "未识别的冻结策略：" + novelty : "未启用（冻结合同未记录）"],
       ["策略程序输入预检", executability === "strategy_tool_input_contract@1" ? "已启用（不代表预测效果通过）"
-        : executability ? "未识别的冻结策略：" + executability : "未启用（冻结合同未记录）"]
+        : executability ? "未识别的冻结策略：" + executability : "未启用（冻结合同未记录）"],
+      ["机制多样性", exploration === "mechanism_evidence_search@1"
+        ? "已启用（三种可用机制＋自由槽，同组比较实际输出）"
+        : exploration ? "未识别的冻结策略：" + exploration : "未启用（冻结合同未记录）"],
+      ["修改效果检查", effectScope === "per_predicate_impact@1"
+        ? "按各项修改的实际影响单元检查"
+        : effectScope ? "未识别的冻结策略：" + effectScope : "按整体修改范围检查（旧协议）"]
     ];
   }
 
@@ -2436,6 +2453,18 @@
       ["原始最高观测（跨窗口不可直接比较）", rawObservedScore == null ? "尚未产生" : formatNumber(rawObservedScore)],
       ["本次运行结果", outcomeText]
     ]);
+    var repeatability = run.inference_repeatability;
+    if (repeatability) {
+      var repeatSummary = repeatability.summary;
+      values.push(["同方案重复对照", repeatSummary
+        ? "同一方案重跑 " + formatNumber(repeatSummary.paired_origin_count) + " 个时点，分数波动 " + formatNumber(repeatSummary.absolute_score_drift, 4) + "；原成绩保持不变"
+        : "已完成 " + formatNumber(repeatability.completed_origins) + " / " + formatNumber(repeatability.total_origins) + " 个时点，不增加独立样本数"]);
+      values.push(["额外重复对照预算", formatNumber(repeatability.total_origins) + " 个时点 / 轮，单独计入总进度"]);
+    }
+    if (configuration.comparison_retrieval_policy || run.frozen_feature_policies && run.frozen_feature_policies.comparison_retrieval_policy) {
+      values.push(["比较时的检索资料", "双方查询共同固定资料；研究阶段仍可随时联网"]);
+      values.push(["最终数值规则", "引用单工具原值或明确等权均值，提交后核验公式"]);
+    }
     node.innerHTML = values.map(function (item) {
       return "<div class=\"dataset-stat\"><span>" + escapeHTML(item[0]) + "</span><strong title=\"" + escapeHTML(item[1]) + "\">" + escapeHTML(item[1]) + "</strong></div>";
     }).join("") + renderDiversitySummary(run) + renderEvidenceFunnel(run) + modelContractPreflightDetails(run);
@@ -2501,16 +2530,20 @@
   function renderDiversitySummary(run) {
     var report = run && run.evolution_diversity;
     if (!report || !report.policy) { return ""; }
-    var labels = {prompt: "提示词", skill: "Skill", scientific: "参数与模型", execution: "执行策略", unknown: "历史未分类"};
+    var labels = {prompt: "提示词", skill: "Skill", scientific: "参数与模型", execution: "执行策略", joint: "联合机制修改", unknown: "历史未分类"};
     var proposed = report.proposed_by_family || {};
     var trained = report.trained_by_family || {};
     var rows = Object.keys(labels).filter(function (key) { return proposed[key] || trained[key]; }).map(function (key) {
       return labels[key] + "：提案 " + (proposed[key] || 0) + " / 已训练 " + (trained[key] || 0);
     });
     var archive = report.archive && Array.isArray(report.archive.entries) ? report.archive.entries.length : 0;
-    return "<div class=\"dataset-stat\"><span>进化多样性 · 按类型轮转训练</span><strong>" + escapeHTML(rows.join("；") || "等待首轮候选")
+    var title = report.exploration_policy ? "机制覆盖与同组行为比较" : report.policy === "joint_behavior_search@1" ? "联合候选同组训练" : "按类型轮转训练";
+    var comparison = run.behavior_comparison || report.behavior_comparison;
+    var observed = comparison && comparison.completed_generations ? "；最新同组可比 " + comparison.measured_pairs + "/" + comparison.expected_pairs
+      + " 对，输出近似 " + comparison.near_output_pairs + " 对" : "";
+    return "<div class=\"dataset-stat\"><span>进化多样性 · " + escapeHTML(title) + "</span><strong>" + escapeHTML(rows.join("；") || "等待首轮候选")
       + "</strong><span>训练侧探索档案 " + escapeHTML(String(archive)) + " 项；行为签名 " + escapeHTML(String(report.observed_signature_count || 0))
-      + " 种（描述性统计，尚非新颖性或性能认证）</span></div>";
+      + " 种" + escapeHTML(observed) + "（描述性统计，尚非新颖性或性能认证）</span></div>";
   }
 
   function renderProcess() {

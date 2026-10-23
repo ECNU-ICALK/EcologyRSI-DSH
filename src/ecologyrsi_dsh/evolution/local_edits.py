@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..core.models import canonical_json, digest
+from ..core.agent_prediction import validate_formula_profile
 from ..core.redaction import redact_sensitive_text
 from ..core.trajectory import LocalEditOutcome, LocalEditProposalDecision
 from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
@@ -328,6 +329,9 @@ def apply_local_edit_bundle(
     if child.behavior_digest == parent.behavior_digest:
         raise ValueError("local edit did not change executable behavior")
     if task is not None:
+        from .workflow_ir import resolve_candidate_agent_profile
+        validate_formula_profile(resolve_candidate_agent_profile(child, registry),
+                                 task.metadata.get("prediction_formula_policy"))
         from .program_preflight import enabled, validate_program_inputs
         if enabled(task.metadata):
             from .workflow_ir import resolve_candidate_agent_profile, _effective_parameters
@@ -351,6 +355,7 @@ def apply_local_edit_bundle(
         affected_cells=mutation_effect_cells(validated.operations, context.allowed_effect_cells),
         resolution=resolution,
         source_phase=context.evidence_phase,
+        scope_policy=task.metadata.get("mutation_effect_scope_policy") if task is not None else None,
     )
     return LocalEditResult(
         outcome=LocalEditOutcome.APPLIED,

@@ -29,6 +29,7 @@ from ..core.errors import DshNativeRuntimeUnavailableError, DshResearchOutputBud
 from .research_recovery import validate_research_checkpoint
 from ..core.model_execution_policy import research_execution_policy
 from ..core.models import Proposal, Run, TaskManifest, canonical_json, digest
+from ..core.agent_prediction import prediction_formula_contract, validate_formula_profile
 from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import public_error_summary, public_exception_summary
 from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
@@ -49,6 +50,7 @@ from ..knowledge.algorithms import (
     registered_predictor_evaluator_ids,
     resolve_predictor_adoption,
 )
+from ..knowledge.retrieval_policy import resolve_retrieval_policy
 from ..knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
     CANDIDATE_MUTATION_AXES,
@@ -74,8 +76,8 @@ from ..knowledge.autonomous_cycle import (
 )
 from ..knowledge.mapping import knowledge_focus_parameter
 from ..knowledge.models import validate_knowledge_context
-from ..knowledge.program_registry import current_program_registry
-from ..knowledge.research_iteration import ResearchIteration, validate_research_plan
+from ..knowledge.program_registry import current_program_registry, registry_for_frozen_catalog
+from ..knowledge.research_iteration import ResearchIteration, ResearchPlanSizeError, validate_research_plan
 from .context import (
     analysis_focus_parameter,
     is_sensitive_context_field,
@@ -96,12 +98,13 @@ from .genome import (
 )
 from .agent_policy import build_agent_policy
 from . import joint_policy, novelty, program_preflight
+from . import exploration_policy, mechanisms
 from ..evaluators.strategy_program import strategy_program_grammar, seed_strategy_program
 from .interventions import apply_bounded_interventions, expert_directive_context
 from .parameter_activity import (
     parameter_activity_contract,
 )
-from .research_context import compact_research_context, research_report_size_diagnostics, research_reflection_reference
+from .research_context import compact_research_context, research_report_size_diagnostics, research_reflection_reference, research_plan_size_feedback
 from .workflow_ir import (
     DEFAULT_COMPILER_SEMANTIC_DIGEST,
     EXECUTABLE_WORKFLOW_PARAMETERS,
@@ -1353,7 +1356,11 @@ class StrategyRouterDSHAdapter:
                     "stage": stage,
                     "source_genome_digest": parent.genome_digest,
                     "compiled_behavior_digest": compiled.compiled_behavior_digest,
-                    "context_digest": digest(context),
+                    "context_digest": digest({
+                        **context,
+                        **({"retrieval_policy": resolve_retrieval_policy(task.metadata, environ={}).to_dict()}
+                           if "retrieval_policy" in task.metadata else {}),
+                    }),
                 }
             ),
         }
@@ -1468,6 +1475,7 @@ class StrategyRouterDSHAdapter:
             previous_generation_reflection,
             name="search-plan previous generation reflection",
         )
+        retrieval_policy = resolve_retrieval_policy(task.metadata)
         base_context = {
             "schema_version": "ecologyrsi-dsh.search-planning-context/1",
             "generation": run.generation,
@@ -1496,9 +1504,9 @@ class StrategyRouterDSHAdapter:
                 else {}
             ),
             "retrieval_contract": {
-                "provider": "OpenAlex metadata and built-in verified catalog",
-                "maximum_queries": 6,
-                "maximum_query_characters": 180,
+                "provider": "built-in verified catalog, OpenAlex and configured DeepSeek official search",
+                "maximum_queries": retrieval_policy.max_queries_per_call,
+                "maximum_query_characters": retrieval_policy.max_query_chars,
                 "maximum_focus_areas": 8,
                 "maximum_focus_area_characters": 240,
                 "external_code_execution": False,
@@ -1556,12 +1564,16 @@ class StrategyRouterDSHAdapter:
                     raise ValueError(
                         "DSH search planner returned an unsupported schema"
                     )
+                queries = normalize_search_queries(structured.get("search_queries"))
+                if (
+                    len(queries) > retrieval_policy.max_queries_per_call
+                    or any(len(query) > retrieval_policy.max_query_chars for query in queries)
+                ):
+                    raise ValueError("search queries exceed the configured retrieval policy")
                 return GenerationSearchPlan(
                     run_id=run.run_id,
                     generation=run.generation,
-                    search_queries=normalize_search_queries(
-                        structured.get("search_queries")
-                    ),
+                    search_queries=queries,
                     focus_areas=tuple(structured.get("focus_areas") or ()),
                     rationale=structured.get("rationale"),
                     source_analysis_digest=(
@@ -1622,12 +1634,16 @@ class StrategyRouterDSHAdapter:
         mutation_catalog = _mutation_contract_catalog(task, parent)
         allowed_mutation_targets = mutation_catalog["allowed_mutation_targets"]
         allowed_evidence_refs = _frozen_evidence_refs(knowledge)
+        reflection_portfolio = mechanisms.build_candidate_portfolio(
+            task=task, parent=parent, generation=run.generation, count=direction_count,
+            targets=allowed_mutation_targets)
         base_context = {
             "schema_version": "ecologyrsi-dsh.generation-reflection-context/1",
             "generation": run.generation,
             "objective": task.objective,
             "forecast_objective": _forecast_objective_context(task),
             "direction_count": direction_count,
+            **({"candidate_portfolio": reflection_portfolio} if reflection_portfolio else {}),
             "generation_analysis": analysis,
             "predictor_semantics_scope": "generation_parent",
             "predictor_semantics": _predictor_semantics(parent),
@@ -1723,6 +1739,7 @@ class StrategyRouterDSHAdapter:
                     minimum_items=2,
                     allowed_mutation_targets=allowed_mutation_targets,
                 )
+                mechanisms.validate_direction_portfolio(directions, reflection_portfolio)
                 for direction in directions:
                     unknown = tuple(
                         reference
@@ -1839,6 +1856,9 @@ class StrategyRouterDSHAdapter:
                     "allowed_mutation_targets"
                 ]
                 family_schedule = direction_schedule(task.metadata, allowed_mutation_targets, run.generation, candidate_count)
+                portfolio = mechanisms.build_candidate_portfolio(
+                    task=task, parent=parent, generation=run.generation, count=candidate_count,
+                    targets=allowed_mutation_targets)
                 allowed_evidence_refs = _frozen_evidence_refs(knowledge)
                 evolution_reflection = _native_evolution_reflection_from_experience(
                     cross_generation_experience,
@@ -1860,6 +1880,7 @@ class StrategyRouterDSHAdapter:
                             "maximum_related_operations": mutation_policy_contract(task.metadata)["candidate_maximum_operations"],
                             **deepcopy(mutation_catalog),
                             **({"diversity_schedule": family_schedule} if family_schedule else {}),
+                            **({"candidate_portfolio": portfolio} if portfolio else {}),
                             "prior_failure_advice": deepcopy(
                                 evolution_reflection["review_behaviors"]
                             ),
@@ -1978,6 +1999,7 @@ class StrategyRouterDSHAdapter:
                             allowed_mutation_targets=allowed_mutation_targets,
                         )
                         validate_direction_schedule(normalized["candidate_directions"], family_schedule)
+                        mechanisms.validate_direction_portfolio(normalized["candidate_directions"], portfolio)
                         direction_preflight = _validate_candidate_direction_realizability(
                             normalized["candidate_directions"],
                             run=run,
@@ -2020,6 +2042,7 @@ class StrategyRouterDSHAdapter:
                             **({"exploration_archive": cross_generation_experience["exploration_archive"]}
                                if isinstance(cross_generation_experience, Mapping) and "exploration_archive" in cross_generation_experience else {}),
                             **({"diversity_schedule": family_schedule} if family_schedule else {}),
+                            **({"candidate_portfolio": portfolio} if portfolio else {}),
                             "report_size_advisories": research_report_size_diagnostics(normalized) if execution_policy is not None else [],
                             "previous_generation_reflection": (
                                 reflection_reference
@@ -2040,6 +2063,9 @@ class StrategyRouterDSHAdapter:
                         feedback = _host_validation_feedback(
                             exc, rejected_output=structured, attempt=contract_attempt,
                         )
+                        if isinstance(exc, ResearchPlanSizeError):
+                            feedback["plan_size_budget"] = research_plan_size_feedback(exc, structured)
+                            feedback["required_action"] = feedback["plan_size_budget"]["instruction"]
                         semantic_feedback = feedback
                         rejected_synthesis = deepcopy(structured)
                         continue
@@ -3102,9 +3128,15 @@ class StrategyRouterDSHAdapter:
         )
         assigned_direction = None
         family_schedule = {}
+        portfolio = {}
         if _model_search_cycle_enabled(task):
             allowed_mutation_targets = _registered_mutation_targets(task, parent)
             family_schedule = direction_schedule(task.metadata, allowed_mutation_targets, run.generation, int(batch["batch_size"]))
+            portfolio = mechanisms.build_candidate_portfolio(
+                task=task, parent=parent, generation=run.generation, count=int(batch["batch_size"]),
+                targets=allowed_mutation_targets)
+            if portfolio and canonical_json(research_plan.get("candidate_portfolio")) != canonical_json(portfolio):
+                raise ValueError("candidate portfolio differs from frozen research plan")
             raw_directions = research_plan.get("candidate_directions")
             if (
                 raw_directions is None
@@ -3128,6 +3160,7 @@ class StrategyRouterDSHAdapter:
             )
             assigned_direction = directions[slot_index]
             validate_direction_schedule([direction.to_dict() for direction in directions], family_schedule)
+            mechanisms.validate_direction_portfolio(directions, portfolio)
         assigned_direction_execution = (
             _candidate_direction_execution_view(assigned_direction)
             if assigned_direction is not None
@@ -3407,6 +3440,10 @@ class StrategyRouterDSHAdapter:
                 )
                 continue
             try:
+                validate_formula_profile(
+                    resolve_candidate_agent_profile(proposed_child, current_program_registry()),
+                    task.metadata.get("prediction_formula_policy"),
+                )
                 compile_plugin_behavior(
                     proposed_child,
                     task,
@@ -3434,6 +3471,15 @@ class StrategyRouterDSHAdapter:
                     }
                 )
                 continue
+            if portfolio:
+                try:
+                    mechanisms.realization_receipt(
+                        parent=parent, child=proposed_child, operations=mutation["operations"],
+                        direction=assigned_direction.to_dict(), portfolio=portfolio, slot=slot_index)
+                except (TypeError, ValueError) as exc:
+                    host_rejections.append({"reason": "mechanism_contract_mismatch",
+                                            "validation_detail": str(exc)[:500]})
+                    continue
             if assigned_direction is not None:
                 accepted_operation = mutation["operations"][0]
                 # Only the *identifying* fields per axis; the operation name comes
@@ -3667,7 +3713,8 @@ class StrategyRouterDSHAdapter:
             parameters=child.scientific_program["parameter_overrides"],
             previous_analysis=previous_analysis, generation=run.generation,
             joint=joint_policy.enabled(task.metadata),
-            prediction_formula_policy=("mean-referenced-tools@1"
+            prediction_formula_policy=task.metadata.get("prediction_formula_policy",
+                "mean-referenced-tools@1"
                 if task.metadata.get("optimization_schedule", {}).get("schema_version") in {EVIDENCE_GUIDED_SCHEDULE_SCHEMA, joint_policy.SCHEDULE_SCHEMA}
                 else None),
         )
@@ -3688,6 +3735,10 @@ class StrategyRouterDSHAdapter:
             metadata={
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "proposal_source": "dsh_native_agent",
+                **({"mechanism_realization": mechanisms.realization_receipt(
+                    parent=parent, child=child, operations=mutation["operations"],
+                    direction=assigned_direction.to_dict(), portfolio=portfolio, slot=slot_index)}
+                   if portfolio else {}),
                 **({"diversity_schedule": family_schedule} if family_schedule else {}),
                 "agent_policy": agent_policy,
                 "tool_experience": agent_policy["experience"]["rows"],
@@ -4210,6 +4261,70 @@ def _registered_mutation_targets(
     }
 
 
+def _frozen_search_gate_context(task: TaskManifest) -> dict[str, Any] | None:
+    """Show the same frozen selection thresholds used by Host decisions."""
+    from ..core.search_policy import local_challenger_policy
+    from ..evaluators.fitness import FitnessProfile
+
+    raw = task.metadata.get("fitness_profile")
+    fields = ("selection_minimum_score_delta", "selection_cell_regression_tolerance",
+              "selection_minimum_coverage")
+    # Older manifests may have only an objective grid. Do not invent their
+    # thresholds from today's defaults or change that historical input shape.
+    if not isinstance(raw, Mapping) or not all(name in raw for name in fields):
+        return None
+    profile = FitnessProfile(**dict(raw))
+    if task.metadata.get("fitness_profile_digest") != profile.profile_digest:
+        raise ValueError("search feedback fitness profile binding mismatch")
+    return {
+        "schema_version": "ecologyrsi-dsh.frozen-search-gate-context/1",
+        "source": "frozen_task_fitness_profile",
+        "fitness_profile_digest": profile.profile_digest,
+        "scope": "search_selection_not_independent_certification",
+        "minimum_score_delta": profile.selection_minimum_score_delta,
+        "cell_regression_tolerance": profile.selection_cell_regression_tolerance,
+        "minimum_coverage": profile.selection_minimum_coverage,
+        "local_comparison": local_challenger_policy(task.metadata),
+        "additional_host_gates_required": True,
+        "interpretation": (
+            "Use these exact frozen thresholds; do not invent numeric gate values. "
+            "A final-score change alone does not establish a causal predictor effect. "
+            "Independent certification has its own locked evaluation and statistical gates."
+        ),
+    }
+
+
+def _predictor_selection_options(
+    task: TaskManifest, genome: EcologyEvolutionPluginGenome,
+) -> list[dict[str, Any]]:
+    """Expose the defaults a pipeline selection actually installs."""
+    registry = registry_for_frozen_catalog(
+        current_program_registry(), genome.to_dict()["runtime_binding"]["registry_catalog_digest"])
+    options = []
+    for item in task.metadata.get("runtime_component_catalog", {}).get("prediction_models", []):
+        option = {"id": item["id"], "label": item.get("label"),
+                  "description": item.get("description"),
+                  "parameter_schemas": item.get("parameter_schemas", {})}
+        if item["id"] in registry.program_ids("predictors"):
+            parameters = {name: contract["default"] for name, contract in
+                          registry.program("predictors", item["id"])["parameters"].items()}
+            option["on_selection"] = {
+                "schema_version": "ecologyrsi-dsh.predictor-selection-defaults/1",
+                "registry_catalog_digest": registry.catalog_digest,
+                "predictor_ref": registry.program_ref("predictors", item["id"]),
+                "installed_parameters": parameters,
+                "default_tool_usage": prediction_usage(item["id"], parameters),
+                "semantics": (
+                    "Selecting this pipeline installs these exact catalog defaults. "
+                    "It does not inherit the parent's parameter values or optimize residual scales. "
+                    "Baseline-only defaults do not activate residual fitting. "
+                    "This describes the optional default tool, not the Agent's final prediction."
+                ),
+            }
+        options.append(option)
+    return options
+
+
 def _mutation_contract_catalog(
     task: TaskManifest,
     genome: EcologyEvolutionPluginGenome,
@@ -4286,15 +4401,13 @@ def _mutation_contract_catalog(
                 str(genome.scientific_program["predictor_ref"]["id"]), genome.scientific_program["parameter_overrides"]),
             "baseline_only_choice": BASELINE_REFERENCE_PREDICTOR_ID,
             "instructions": "Research evolves the optional default model and Agent policy. Each sample Agent decides whether to use that model, invoke other registered tools with bounded parameters, combine evidence or predict directly. Evaluate the final Agent numbers; evaluator, data and gates remain fixed.",
-            "predictor_options": [
-                {"id": item["id"], "label": item.get("label"), "description": item.get("description"),
-                 "parameter_schemas": item.get("parameter_schemas", {})}
-                for item in task.metadata.get("runtime_component_catalog", {}).get("prediction_models", [])
-            ],
+            "predictor_options": _predictor_selection_options(task, genome),
         }} if task.metadata.get("prediction_selection_policy") == RUNTIME_PREDICTION_POLICY else {}),
         "mutation_axis_effects": axis_contract["mutation_axis_effects"],
         "evaluation_evidence_contract": {
             "schema_version": "ecologyrsi-dsh.evaluation-evidence-contract/1",
+            **({"frozen_search_gates": gates}
+               if (gates := _frozen_search_gate_context(task)) is not None else {}),
             "sample_budget_class": sample_budget_class,
             "samples_per_update": samples_per_update,
             "prediction_cells_per_origin": prediction_cells_per_origin,
@@ -4343,7 +4456,9 @@ def _mutation_contract_catalog(
         # same slot: a proposer choosing between selecting and authoring needs
         # to see both, and one that authors without the grammar can only guess
         # at the enumerations its text will be rejected against.
-        "directive_grammar": _directive_authoring_contract(genome),
+        "directive_grammar": _directive_authoring_contract(genome, metadata=task.metadata),
+        **({"prediction_formula_contract": formula}
+           if (formula := prediction_formula_contract(task.metadata)) else {}),
         **({"strategy_program_grammar": strategy_program_grammar()} if joint_policy.enabled(task.metadata) else {}),
         **({"skill_grammar": skill_grammar(), "current_skill_program": resolve_candidate_agent_profile(genome, registry).get("skill_program")}
            if targets.get("skill_program") else {}),
@@ -4352,6 +4467,7 @@ def _mutation_contract_catalog(
 
 def _directive_authoring_contract(
     genome: EcologyEvolutionPluginGenome,
+    *, metadata=None,
 ) -> dict[str, Any]:
     """The authoring grammar, narrowed to what this candidate may actually write.
 
@@ -4374,7 +4490,7 @@ def _directive_authoring_contract(
         None,
     )
     enabled_tools = list((profile or {}).get("enabled_tool_ids") or ())
-    return {
+    grammar = {
         **deepcopy(dict(policy["grammar"])),
         "policy_id": AUTHORED_DIRECTIVE_POLICY_ID,
         "policy_digest": registry.program_ref(
@@ -4389,6 +4505,11 @@ def _directive_authoring_contract(
             genome, "sample-planner"
         ),
     }
+    if formula := prediction_formula_contract(metadata):
+        grammar["blend_rule"]["choices"] = ["mean", "none"]
+        grammar["blend_rule.allowed_methods"] = {"none": ["model"], "mean": ["model", "blend"]}
+        grammar["prediction_formula_contract"] = formula
+    return grammar
 
 
 def _inherited_strategy_context(parent, task):
@@ -4421,6 +4542,8 @@ def _candidate_direction_execution_view(
         "mutation_direction": direction.mutation_direction,
         "evidence_refs": list(direction.evidence_refs),
         "research_prose": "audit_only_not_executable",
+        **({"mechanism_hypothesis": direction.identity_dict()["mechanism_hypothesis"]}
+           if direction.mechanism_hypothesis is not None else {}),
     }
 
 
@@ -4515,7 +4638,7 @@ def _parameter_preflight_values(
 
 
 def _directive_preflight_operations(
-    parent: EcologyEvolutionPluginGenome, mutation_direction: str
+    parent: EcologyEvolutionPluginGenome, mutation_direction: str, *, metadata=None,
 ) -> tuple[dict[str, Any], ...]:
     """Witness directives proving the authoring axis is realizable.
 
@@ -4558,7 +4681,7 @@ def _directive_preflight_operations(
     current = profile.get("authored_directive") or {}
     witnesses: list[dict[str, Any]] = []
     for anchor in sorted(ALLOWED_DIRECTIVE_ANCHORS):
-        for blend_rule in sorted(BLEND_RULE_METHODS):
+        for blend_rule in _directive_authoring_contract(parent, metadata=metadata)["blend_rule"]["choices"]:
             directive = {
                 "anchor": anchor,
                 "blend_rule": blend_rule,
@@ -4747,7 +4870,7 @@ def _validate_candidate_direction_realizability(
             # witnesses are whole directives, and the preflight proves the axis
             # is reachable at all by building ones that differ from the parent.
             operations = _directive_preflight_operations(
-                parent, str(direction.mutation_direction)
+                parent, str(direction.mutation_direction), metadata=task.metadata,
             )
             if not operations:
                 had = _has_authored_directive(parent, "sample-planner")
@@ -4816,6 +4939,8 @@ def _validate_candidate_direction_realizability(
                     registry,
                     parameter_schemas=parameter_schemas,
                 )
+                validate_formula_profile(resolve_candidate_agent_profile(child, registry),
+                                         task.metadata.get("prediction_formula_policy"))
                 compile_plugin_behavior(
                     child,
                     task,

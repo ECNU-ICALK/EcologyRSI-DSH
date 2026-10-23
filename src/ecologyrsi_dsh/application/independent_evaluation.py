@@ -4,8 +4,10 @@ import logging
 import threading
 import time
 from typing import Any
+from uuid import uuid4
 
-from ..core.exposure_registry import ScientificExposureRegistry
+from ..core.exposure_registry import ScientificExposureRegistry, raw_holdout_exposure_key
+from ..core.errors import DshNativeRuntimeUnavailableError
 from ..core.models import digest
 from ..core.immutable import thaw_json
 from ..core.trajectory import EvaluationPhase, EvaluationScope
@@ -14,6 +16,10 @@ from ..evaluators.epoch_cohorts import PlannedCohort, _eligible_origins
 from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
 from ..evaluators.fitness import FitnessProfile
 from ..evaluators.formal_evidence import assess_independent_replica, certification_policy
+from ..knowledge.formal_retrieval import (
+    build_formal_retrieval_snapshot,
+    validate_formal_retrieval_snapshot,
+)
 
 
 class IndependentEvaluationService:
@@ -23,6 +29,8 @@ class IndependentEvaluationService:
         self.jobs: dict[tuple[str, str], dict[str, Any]] = {}
         self.workers: list[threading.Thread] = []
         self.stopping = threading.Event()
+        self._active_formal_runtimes: dict[str, dict[str, Any]] = {}
+        self._formal_close_states: dict[str, dict[str, Any]] = {}
 
     def recover_interrupted(self):
         registry = ScientificExposureRegistry(self.server.ledger)
@@ -53,8 +61,130 @@ class IndependentEvaluationService:
             worker.join(max(0, deadline - time.monotonic()))
         return not any(worker.is_alive() for worker in self.workers)
 
+    def _retrieval_snapshot(self, run_id, *, create=False, persist=True, prepared=None):
+        events = self.server.ledger.events(run_id)
+        frozen = [e.payload["snapshot"] for e in events if e.kind == "FormalRetrievalSnapshotFrozen"]
+        if len(frozen) > 1:
+            raise ValueError("正式评测资料快照不唯一")
+        if frozen:
+            snapshot = validate_formal_retrieval_snapshot(thaw_json(frozen[0]))
+            if prepared is not None and snapshot != prepared:
+                raise ValueError("正式评测资料快照与原生执行准备不一致")
+            return snapshot
+        if not create or any(e.kind == "FormalStageFrozen" for e in events):
+            raise ValueError("正式评测缺少已冻结的检索资料快照")
+        task = self.server.director.state(run_id).task_manifest
+        snapshot = (validate_formal_retrieval_snapshot(prepared) if prepared is not None
+                    else build_formal_retrieval_snapshot(task.metadata))
+        if persist:
+            self.server.ledger.append(run_id, "FormalRetrievalSnapshotFrozen", {"snapshot": snapshot},
+                                      event_id=f"{run_id}:formal:retrieval-snapshot")
+        return snapshot
+
+    def _formal_runtime_request(self, state, stage, candidate_id, artifact, snapshot, protocol):
+        """Build control-plane authority only from the completed durable run."""
+        run_id, metadata = state.run.run_id, state.task_manifest.metadata
+        selected = (state.run.selection_incumbent_id if stage == "validation"
+                    else state.run.validated_candidate_id)
+        if state.run.status.value != "completed" or selected != candidate_id:
+            raise ValueError("正式原生执行要求训练已完成并使用冻结候选")
+        if (artifact.run_id != run_id or artifact.candidate_id != candidate_id
+                or not artifact.candidate_revision_id
+                or state.revision(artifact.candidate_revision_id).candidate_id != candidate_id):
+            raise ValueError("正式原生执行的候选版本或模型产物绑定无效")
+        if any(e.kind == "FormalStageFrozen" and e.payload.get("stage") == stage for e in state.events):
+            raise ValueError("该正式评测分区已经锁定，不能重新准备执行")
+        exposure_key = raw_holdout_exposure_key(
+            dataset_digest=metadata["dataset_digest"],
+            split_manifest_digest=metadata["split_manifest_digest"],
+            episode_id=metadata["episode_id"], stage=stage,
+            stage_partition_digest=protocol.partition_digests[stage])
+        if ScientificExposureRegistry(self.server.ledger).formal_exposure(exposure_key) is not None:
+            raise ValueError("该正式评测分区已经消耗，不能重新准备执行")
+        execution = {"stage": stage, "candidate_id": candidate_id,
+                     "candidate_revision_id": artifact.candidate_revision_id,
+                     "artifact_digest": artifact.digest, "snapshot_digest": snapshot["snapshot_digest"]}
+        # Each preparation lifecycle needs a fresh control identity, including
+        # retries after a pre-exposure failure. A delayed close from the previous
+        # lifecycle must never match its replacement. The prepared request is
+        # retained unchanged for HTTP retries; the nonce does not enter the
+        # scientific snapshot, analysis plan, candidate or holdout identity.
+        execution_id = digest({"run_id": run_id, "run_created_seq": state.events[0].seq,
+                               "preparation_nonce": uuid4().hex, **execution})
+        binding = {name: metadata.get(name) for name in (
+            "execution_protocol", "data_protocol_digest", "preset_content_digest",
+            "standing_tool_surface_digest", "resolved_policy_route_config_digest",
+            "resolved_review_route_config_digest", "strategy_model_id", "review_model_id")}
+        binding.update(task_manifest_digest=state.task_manifest.digest,
+                       preset_catalog_digest=metadata.get("dsh_preset_catalog_digest"))
+        return {"run_id": run_id, "run_state_revision": self.server.ledger.latest_run_seq(run_id),
+                "stage_attempt": 0, "ledger_expected_revision": self.server.ledger.latest_seq(),
+                "idempotency_key": f"formal-prepare:{execution_id}", "binding": binding,
+                "formal_execution": {"execution_id": execution_id, **execution}}
+
+    def _close_formal_runtime(self, prepared):
+        execution_id = prepared["formal_execution"]["execution_id"]
+        run_id = prepared["run_id"]
+        with self.lock:
+            state = self._formal_close_states.setdefault(
+                execution_id, {"lock": threading.Lock(), "closed": False, "request": None})
+        # A sample failure and worker finalization may both request cleanup.
+        # Serialize only this generation, reusing the exact receipt identity on
+        # an unknown transport outcome; never call ordinary training controls.
+        with state["lock"]:
+            if state["closed"]:
+                return
+            if state["request"] is None:
+                state["request"] = {
+                    "run_id": run_id, "run_state_revision": self.server.ledger.latest_run_seq(run_id),
+                    "stage_attempt": 0, "ledger_expected_revision": self.server.ledger.latest_seq(),
+                    "idempotency_key": f"formal-close:{execution_id}", "formal_execution_id": execution_id}
+            self.server.dsh_native_runtime.close_formal_run(state["request"])
+            state["closed"] = True
+
+    def abort_native_evaluation(self, run_id: str) -> bool:
+        """Route a fatal formal sample to its own native generation."""
+        with self.lock:
+            prepared = self._active_formal_runtimes.get(run_id)
+        if prepared is None:
+            return False
+        try:
+            try:
+                self.server.dsh_tools.close_run_admissions(run_id)
+            finally:
+                self._close_formal_runtime(prepared)
+        except Exception:
+            # The worker's finally retries the same close request. Returning
+            # handled keeps training pause/cancel out of this formal generation.
+            logging.getLogger(__name__).exception("Formal sample abort cleanup failed for %s", run_id)
+        return True
+
+    def _forget_formal_runtime(self, prepared):
+        run_id = prepared["run_id"]
+        with self.lock:
+            if self._active_formal_runtimes.get(run_id) is prepared:
+                self._active_formal_runtimes.pop(run_id, None)
+            execution_id = prepared["formal_execution"]["execution_id"]
+            self._formal_close_states.pop(execution_id, None)
+
+    @staticmethod
+    def _retrieval_manifest(snapshot):
+        return {"mode": "frozen_snapshot", "snapshot_digest": snapshot["snapshot_digest"],
+                "document_count": len(snapshot["documents"]), "online_enabled": False,
+                "source": snapshot["source"], "scope": snapshot["scope"]}
+
+    @staticmethod
+    def _validate_plan(token, plan):
+        if (plan.get("stage") != token.stage
+                or type(plan.get("inference_replicas")) is not int
+                or plan["inference_replicas"] != 2
+                or digest(plan) != token.analysis_plan_digest):
+            raise ValueError("正式评测分析计划或两次独立推理约束与冻结身份不一致")
+
     def status(self, run_id):
         state = self.server.director.state(run_id)
+        snapshots = [e.payload["snapshot"] for e in state.events if e.kind == "FormalRetrievalSnapshotFrozen"]
+        retrieval = self._retrieval_manifest(validate_formal_retrieval_snapshot(thaw_json(snapshots[0]))) if snapshots else None
         stages = []
         for stage, label in (("validation", "独立验证"), ("final_test", "最终测试")):
             completed = next((e.payload for e in state.events if e.kind == "FormalStageCompleted"
@@ -84,7 +214,8 @@ class IndependentEvaluationService:
                            "progress": live.get("progress", {}),
                            "error": live.get("error")})
         return {"schema_version": "ecologyrsi-dsh.independent-evaluation/1", "run_id": run_id,
-                "stages": stages, "feedback_to_evolution": False}
+                "stages": stages, "feedback_to_evolution": False,
+                "formal_retrieval": retrieval}
 
     def start(self, run_id: str, stage: str):
         if stage not in {"validation", "final_test"}:
@@ -92,6 +223,7 @@ class IndependentEvaluationService:
         with self.lock:
             reservation = self.server.reserve_run_work(run_id)
             worker_started = False
+            prepared = None
             try:
                 if self.stopping.is_set():
                     raise ValueError("服务正在关闭，请稍后重试")
@@ -107,7 +239,6 @@ class IndependentEvaluationService:
                 task = state.task_manifest
                 if task.metadata.get("sample_agent_mode") != "dsh_native_agent":
                     raise ValueError("独立评测要求已冻结的逐样本 Agent 运行")
-                self.server.validate_frozen_runtime_bindings(task, run_id=run_id)
                 protocol = self.server.datasets.data_protocol(task.dataset, task.metadata["episode_id"])
                 if protocol.protocol_digest != task.metadata.get("data_protocol_digest"):
                     raise ValueError("时间分区已变化，请完成当前协议下的新训练运行")
@@ -118,7 +249,19 @@ class IndependentEvaluationService:
                 adapter = dataset_adapter(task.dataset)
                 profile = FitnessProfile.from_task(task)
                 selected_evaluation = state.evaluation_for(candidate_id)
-                plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/2", "stage": stage,
+                # Pure construction is safe before readiness. No formal event,
+                # exposure reservation or dataset view exists until preparation
+                # and the complete frozen-binding validation have succeeded.
+                snapshot = self._retrieval_snapshot(run_id, create=True, persist=False)
+                native = getattr(self.server, "dsh_native_runtime", None)
+                if native is None:
+                    raise DshNativeRuntimeUnavailableError()
+                prepared = self._formal_runtime_request(state, stage, candidate_id, artifact, snapshot, protocol)
+                native.prepare_formal_run(prepared)
+                self._active_formal_runtimes[run_id] = prepared
+                self.server.validate_frozen_runtime_bindings(task, run_id=run_id)
+                snapshot = self._retrieval_snapshot(run_id, create=True, prepared=snapshot)
+                plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/3", "stage": stage,
                         "dataset_task": adapter.contract(), "partition_digest": protocol.partition_digests[stage],
                         "certification_policy": certification_policy(profile),
                         "baseline_profile_digest": (selected_evaluation.metrics.get("baseline_profile_digest")
@@ -126,13 +269,14 @@ class IndependentEvaluationService:
                         "sampling": "all_eligible_origins_in_time_order", "inference_replicas": 2,
                         "fit_policy": "original_calibration_fit_only_verify_frozen_coefficients",
                         "candidate_updates": False, "raw_results_exposed": False,
-                        "post_score_agent_feedback": False}
+                        "post_score_agent_feedback": False,
+                        "formal_retrieval": self._retrieval_manifest(snapshot)}
                 token = self.server.director.reserve_formal_stage(run_id, stage=stage,
                     candidate_id=candidate_id, objective_family_digest=adapter.contract()["contract_digest"],
                     analysis_plan_digest=digest(plan), partition_digest=protocol.partition_digests[stage],
                     idempotency_key=f"{run_id}:independent:{stage}")
                 self.jobs[(run_id, stage)] = {"status": "running", "progress": {}}
-                worker = threading.Thread(target=self._execute, args=(run_id, token, plan, reservation), daemon=True,
+                worker = threading.Thread(target=self._execute, args=(run_id, token, plan, reservation, prepared), daemon=True,
                                           name=f"independent-{stage}")
                 self.workers = [worker]
                 try:
@@ -147,13 +291,36 @@ class IndependentEvaluationService:
                 return self.status(run_id)
             finally:
                 if not worker_started:
-                    reservation.release()
+                    try:
+                        if prepared is not None:
+                            try:
+                                self._close_formal_runtime(prepared)
+                            except Exception:
+                                logging.getLogger(__name__).exception(
+                                    "Formal runtime preparation cleanup failed for %s/%s", run_id, stage)
+                    finally:
+                        if prepared is not None:
+                            self._forget_formal_runtime(prepared)
+                        reservation.release()
 
-    def _execute(self, run_id, token, plan, reservation):
+    def _execute(self, run_id, token, plan, reservation, prepared):
+        admissions_closed = False
         def evaluate():
-            self.server.sample_admission.forget(run_id)
-            self.server.dsh_tools.open_run_admissions(run_id)
-            return self._evaluate(run_id, token, plan)
+            nonlocal admissions_closed
+            self._validate_plan(token, plan)
+            snapshot = self._retrieval_snapshot(run_id)
+            if self._retrieval_manifest(snapshot) != plan["formal_retrieval"]:
+                raise ValueError("正式评测资料快照与冻结分析计划不一致")
+            # Bind before any dataset view or Agent invocation. Keep the binding
+            # until all admissions are closed, including exceptional exits.
+            with self.server.dsh_tools.bind_formal_retrieval(run_id, snapshot):
+                self.server.sample_admission.forget(run_id)
+                self.server.dsh_tools.open_run_admissions(run_id)
+                try:
+                    return self._evaluate(run_id, token, plan)
+                finally:
+                    self.server.dsh_tools.close_run_admissions(run_id)
+                    admissions_closed = True
         try:
             self.server.director.execute_formal_stage(run_id, token, evaluate)
             with self.lock:
@@ -164,12 +331,25 @@ class IndependentEvaluationService:
                 self.jobs[(run_id, token.stage)].update(status="failed", error="评测中断，当前分区已封存。详情见服务日志。")
         finally:
             try:
-                self.server.dsh_tools.close_run_admissions(run_id)
+                # Also close when binding failed before the inner admission
+                # scope was entered, or the formal worker raised unexpectedly.
+                try:
+                    if not admissions_closed:
+                        self.server.dsh_tools.close_run_admissions(run_id)
+                finally:
+                    self._close_formal_runtime(prepared)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Formal runtime cleanup failed for %s/%s", run_id, token.stage)
+                with self.lock:
+                    self.jobs[(run_id, token.stage)]["error"] = "正式执行会话清理失败；未重新开放评测分区。"
             finally:
+                self._forget_formal_runtime(prepared)
                 reservation.release()
 
     def _evaluate(self, run_id, token, plan):
         from .formal_trajectory import _revision_evaluation_inputs
+        self._validate_plan(token, plan)
         state = self.server.director.state(run_id)
         task = state.task_manifest
         candidate = state.candidate(token.candidate_id)
@@ -238,6 +418,8 @@ class IndependentEvaluationService:
                     "mae", "rmse", "bias", "baseline_rmse", "skill_score", "sample_execution_coverage",
                     "constraint_violations")} for row in metrics["targets"]],
                 "prediction_trace_digest": metrics.get("sample_execution_trace_digest")})
+        if len(replicas) != 2:
+            raise ValueError("独立评测必须完成两次冻结推理")
         coverage_ok = all(r["coverage"] >= adapter.selection_minimum_coverage for r in replicas)
         certificates = [row["certification"] for row in replicas]
         outcome = ("inconclusive" if not coverage_ok or any(c["outcome"] == "inconclusive" for c in certificates)

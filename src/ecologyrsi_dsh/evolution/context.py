@@ -35,6 +35,7 @@ _BLOCKED_FIELDS = frozenset(
         "sample_execution",
         "sample_execution_records",
         "sample_execution_trace_archive",
+        "execution_behavior",
         "script",
         "source_code",
         "prediction_records",

@@ -4,14 +4,47 @@ One row is one scoring cell, not one billable API/tool call. Missing receipts
 remain unknown. Equality is descriptive and does not establish causal use.
 """
 from collections.abc import Mapping
+import json
 from math import isfinite, isclose
 from ..core.models import digest
 from ..core.immutable import thaw_json
-from ..core.prediction_policy import CONTRIBUTION_POLICY, LEGACY_CONTRIBUTION_POLICY
+from ..core.prediction_policy import CONTRIBUTION_POLICY, LEGACY_CONTRIBUTION_POLICY, PREVIOUS_CONTRIBUTION_POLICY
 
 LEGACY_SCHEMA = 'ecologyrsi-dsh.prediction-contribution/1'
-SCHEMA = 'ecologyrsi-dsh.prediction-contribution/2'
-_SCHEMAS = {LEGACY_CONTRIBUTION_POLICY: LEGACY_SCHEMA, CONTRIBUTION_POLICY: SCHEMA}
+PREVIOUS_SCHEMA = 'ecologyrsi-dsh.prediction-contribution/2'
+SCHEMA = 'ecologyrsi-dsh.prediction-contribution/3'
+_SCHEMAS = {LEGACY_CONTRIBUTION_POLICY: LEGACY_SCHEMA, PREVIOUS_CONTRIBUTION_POLICY: PREVIOUS_SCHEMA,
+            CONTRIBUTION_POLICY: SCHEMA}
+
+
+def compiled_candidate_identity(metadata, parameters, *, policy=CONTRIBUTION_POLICY):
+    """Identify the Host-compiled model; never infer identity from tool names."""
+    if policy != CONTRIBUTION_POLICY:
+        return None
+    raw = metadata.get('evolution_genome_canonical_json') if isinstance(metadata, Mapping) else None
+    if not isinstance(raw, str) or not isinstance(parameters, Mapping):
+        return None
+    scientific = json.loads(raw)['scientific_program']
+    return {'predictor_id': scientific['predictor_ref']['id'],
+            'parameters_digest': digest(thaw_json(
+                {'feature_recipe': scientific['feature_recipe']} if 'feature_recipe' in scientific else parameters))}
+
+
+def _equivalent_candidate_tool(tool, accepted, identity):
+    if not isinstance(identity, Mapping) or tool.get('tool_id') != identity.get('predictor_id'):
+        return False
+    if not tool.get('call_id') or not identity.get('parameters_digest'):
+        return False
+    # Scoring rows deliberately contain a small tool view. Join it back to the
+    # accepted attempt's Host-normalized receipt by sample/call/value, so an
+    # alternate parameterization or an earlier abandoned attempt cannot count.
+    return any(receipt.get('tool_id') == tool.get('tool_id')
+               and receipt.get('call_id') == tool['call_id']
+               and receipt.get('status') == 'completed'
+               and receipt.get('dsh_tool_event_id')
+               and receipt.get('effective_parameters_digest') == identity['parameters_digest']
+               and _number(receipt.get('tool_predicted')) == _number(tool.get('tool_predicted'))
+               for receipt in (accepted or {}).get('model_evidence', ()) if isinstance(receipt, Mapping))
 
 
 def _input_identities(context):
@@ -43,10 +76,11 @@ def _number(value):
 
 
 def summarize_contribution(records, rows, *, cohort_digest=None, source_phase=None, review_policy=None,
-                           policy=CONTRIBUTION_POLICY):
+                           policy=CONTRIBUTION_POLICY, candidate_identity=None):
     if policy not in _SCHEMAS:
         raise ValueError('unsupported prediction contribution policy')
     legacy = policy == LEGACY_CONTRIBUTION_POLICY
+    identity = candidate_identity if policy == CONTRIBUTION_POLICY else None
     threshold = _number(review_policy.get("min_planner_confidence")) if isinstance(review_policy, Mapping) else None
     by_id = {r.get('sample_id'): r for r in records}
     groups = {}
@@ -63,9 +97,12 @@ def summarize_contribution(records, rows, *, cohort_digest=None, source_phase=No
         group['cells'] += 1
         group['final_equals_baseline'] += isclose(final, baseline, rel_tol=0, abs_tol=1e-12)
         info = row.get('agent_prediction', {})
+        accepted = [a for a in by_id.get(row.get('sample_id'), {}).get('attempt_trace', ())
+                    if isinstance(a, Mapping) and a.get('outcome') == 'accepted']
         tools = [t for t in info.get('tools', ()) if isinstance(t, Mapping)
-                 and t.get('tool_id') == 'candidate-model' and t.get('status') == 'completed'
-                 and _number(t.get('tool_predicted')) is not None]
+                 and t.get('status') == 'completed' and _number(t.get('tool_predicted')) is not None
+                 and (t.get('tool_id') == 'candidate-model'
+                      or _equivalent_candidate_tool(t, accepted[-1] if accepted else None, identity))]
         confidence = _number(info.get('confidence'))
         if confidence is not None:
             group['_confidence'].append(confidence)
@@ -94,8 +131,6 @@ def summarize_contribution(records, rows, *, cohort_digest=None, source_phase=No
                     group['_outputs'].append((ident, value))
                 if treatment_digest is not None:
                     group['_treatments'].append((ident, treatment_digest))
-        accepted = [a for a in by_id.get(row.get('sample_id'), {}).get('attempt_trace', ())
-                    if isinstance(a, Mapping) and a.get('outcome') == 'accepted']
         if accepted:
             trace = accepted[-1]
             group['trace_available_cells'] += 1
@@ -126,6 +161,8 @@ def summarize_contribution(records, rows, *, cohort_digest=None, source_phase=No
         'source_phase': source_phase, 'cohort_digest': cohort_digest, 'cells': cells,
         'unit': 'scored_cell', 'scientific_gain_established': False,
         'interpretation': 'output_equality_is_not_causal_attribution; absent_trace_is_unknown'}
+    if identity is not None:
+        body['candidate_model_identity'] = thaw_json(identity)
     return {**body, 'summary_digest': digest(body)}
 
 
@@ -137,8 +174,9 @@ def paired_tool_effect(parent, child):
         return {'status': 'unverified', 'reason': 'same_cohort_required'}
     if parent['schema_version'] != child['schema_version']:
         return {'status': 'unverified', 'reason': 'same_diagnostic_version_required'}
-    if parent['schema_version'] == SCHEMA and (
-            parent.get('policy') != CONTRIBUTION_POLICY or child.get('policy') != CONTRIBUTION_POLICY):
+    expected_policy = next(policy for policy, schema in _SCHEMAS.items() if schema == parent['schema_version'])
+    if parent['schema_version'] != LEGACY_SCHEMA and (
+            parent.get('policy') != expected_policy or child.get('policy') != expected_policy):
         return {'status': 'unverified', 'reason': 'same_diagnostic_version_required'}
     before = {(c['target'], c['horizon_hours']): c for c in parent['cells']}
     after = {(c['target'], c['horizon_hours']): c for c in child['cells']}
@@ -147,7 +185,7 @@ def paired_tool_effect(parent, child):
     changed = []
     for key, cell in before.items():
         other = after[key]
-        if parent['schema_version'] == SCHEMA and (
+        if parent['schema_version'] != LEGACY_SCHEMA and (
                 cell.get('observation_vector_digest') != cell.get('input_vector_digest')
                 or other.get('observation_vector_digest') != other.get('input_vector_digest')):
             return {'status': 'unverified', 'reason': 'complete_matching_inputs_required'}

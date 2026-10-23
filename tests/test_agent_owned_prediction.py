@@ -79,6 +79,24 @@ class AdmittedAgent:
 
 
 class AgentOwnedPredictionTests(unittest.TestCase):
+    def test_actual_critic_routing_survives_validated_attempt_trace(self):
+        from ecologyrsi_dsh.evaluators.sample_execution import _attempt_trace_entry, _validated_result
+        for confidence, required in ((0.55, True), (0.8, False)):
+            with self.subTest(confidence=confidence):
+                def policy(context, call):
+                    output = result(context)
+                    output["decisions"][0]["confidence"] = confidence
+                    return output
+                adapter, plan, native, _ = self.setup_agent(policy)
+                outcome = self.predict(adapter, plan)
+                self.assertIsNone(outcome.error)
+                validated = _validated_result(outcome.result)
+                trace = _attempt_trace_entry(1, validated["agent_decisions"], validated["tool_calls"], outcome="accepted")
+                self.assertEqual(trace["critic_routing"], {"policy_version": "uncertain_or_failure@1",
+                    "planner_confidence": confidence, "threshold": 0.8, "enabled": True, "required": required})
+                self.assertEqual(bool(trace["critic_decisions"]), required)
+                self.assertEqual(sum(r["stage"] == "sample.critic" for r in native.requests), int(required))
+
     def test_critic_recovery_reuses_accepted_planner_and_tools_after_service_recreation(self):
         from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
         from unittest.mock import patch

@@ -33,7 +33,7 @@
       "model_route": "policy"
     },
     {
-      "preset_id": "ecology-sample-planner-v14",
+      "preset_id": "ecology-sample-planner-v15",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": [
         "skill",

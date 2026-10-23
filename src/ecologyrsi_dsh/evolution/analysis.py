@@ -21,7 +21,7 @@ from ..core.models import (
 )
 from ..core.protocols import is_strict_origin_protocol
 from .promotion import assess_promotion_improvement
-from .agent_policy import prior_candidate_tool_experience
+from .agent_policy import prior_candidate_tool_experience, prior_candidate_attribution
 from ..evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
     FitnessProfile,
@@ -900,6 +900,9 @@ def _candidate_row(state: Any, candidate: Any, parent_id: str | None) -> dict[st
         if tool_performance:
             row["tool_performance"] = tool_performance
     row["agent_tool_performance"] = prior_candidate_tool_experience(state, candidate, metrics)
+    attribution = prior_candidate_attribution(state, candidate)
+    if attribution is not None:
+        row["candidate_agent_attribution"] = attribution
     from .diversity import enabled as diversity_enabled, candidate_family
     if diversity_enabled(state.task_manifest.metadata):
         row["evolution_family"] = candidate_family(proposal)
@@ -1266,11 +1269,47 @@ def _experience_plan_changes(
     return changed
 
 
+def _experience_candidate_rows(
+    state: Any,
+    analysis: GenerationAnalysis,
+) -> list[Mapping[str, Any]]:
+    """Keep trained candidates before slot order when compressing experience.
+
+    A sealed adaptation batch is evidence depth, not evidence of improvement.
+    In particular neither holdout scores nor independent evaluation are used
+    to choose which candidate identities survive the bounded summary.
+    """
+    adapted = {
+        evaluation.scope.candidate_id
+        for evaluation in getattr(state, "formal_batch_evaluations", ())
+        if evaluation.scope.generation == analysis.generation
+        and getattr(evaluation.scope.phase, "value", evaluation.scope.phase)
+        == "formal_batch"
+        and isinstance(evaluation.scope.batch_index, int)
+        and evaluation.scope.batch_index > 0  # batch zero imports screening
+    }
+    return sorted(
+        analysis.ranking,
+        key=lambda row: row.get("candidate_id") not in adapted,
+    )
+
+
 def _experience_parameter_sets(
     state: Any,
     analysis: GenerationAnalysis,
 ) -> list[dict[str, int | float | bool]]:
-    raw_sets: list[Any] = [row.get("parameters") for row in analysis.ranking]
+    raw_sets: list[Any] = []
+    candidate_for = getattr(state, "candidate", None)
+    proposal_for = getattr(state, "proposal", None)
+    for row in _experience_candidate_rows(state, analysis):
+        parameters = row.get("parameters")
+        if not isinstance(parameters, Mapping) and callable(candidate_for) and callable(proposal_for):
+            try:
+                candidate = candidate_for(row.get("candidate_id"))
+                parameters = proposal_for(candidate.proposal_id).changes
+            except (KeyError, ValueError):
+                pass
+        raw_sets.append(parameters)
     if not any(isinstance(item, Mapping) for item in raw_sets):
         raw_sets.extend(
             proposal.changes
@@ -1308,7 +1347,7 @@ def _experience_candidate_behaviors(
     proposal_for = getattr(state, "proposal", None)
     if not callable(candidate_for) or not callable(proposal_for):
         return result
-    for row in analysis.ranking:
+    for row in _experience_candidate_rows(state, analysis):
         candidate_id = row.get("candidate_id")
         if not isinstance(candidate_id, str) or not candidate_id:
             continue
@@ -1331,6 +1370,11 @@ def _experience_candidate_behaviors(
             "behavior_digest": behavior_digest,
             "parameters_digest": digest(dict(proposal.changes)),
         }
+        # Keep identity and parameters together: separate truncated arrays do
+        # not establish which configuration a surviving behavior actually used.
+        parameters = _experience_parameter_set(proposal.changes)
+        if parameters:
+            behavior["initial_proposal_parameters"] = parameters
         predictor_id = state.task_manifest.metadata.get("prediction_model_id")
         raw_genome = metadata.get("evolution_genome_canonical_json")
         if isinstance(raw_genome, str):
@@ -2328,6 +2372,12 @@ def _history_generation_projection(
     modifications = projected.get("modifications")
     if isinstance(modifications, dict):
         modifications.pop("adoption_reason", None)
+        modifications["candidate_inventory_complete"] = False
+        modifications["interpretation"] = (
+            "Bounded examples, not a complete inventory of tried candidates. "
+            "Missing configurations or diagnostics do not imply absence. "
+            "Adaptation-tested candidates are retained first, without a gain claim."
+        )
     projected["gate_result"] = {
         "candidate_count": analysis.candidate_count,
         "eligible_count": analysis.eligible_count,
@@ -3132,6 +3182,10 @@ def build_cross_generation_experience(
     archive = exploration_archive(state, generation)
     if archive:
         result["exploration_archive"] = archive
+    from . import exploration_policy
+    if exploration_policy.enabled(state.task_manifest.metadata):
+        from .branch_archive import comparison_summary
+        result["behavior_comparison"] = comparison_summary(state)
     result = _fit_cross_generation_experience(result)
     result.update(
         _historical_experience_payload(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecologyrsi-dsh"
-version = "0.10.11"
+version = "0.10.29"
 description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
@@ -82,6 +82,9 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9" = [
     "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/*.yml",
 ]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/*.yml",
+]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/*.yml",
 ]
@@ -100,6 +103,9 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment" = [
     "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment/SKILL.md",
 ]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/skills/origin-vector-forecasting" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/skills/origin-vector-forecasting/SKILL.md",
+]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting/SKILL.md",
 ]
@@ -113,7 +119,7 @@ where = ["src"]
     "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.11.tgz",
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.29.tgz",
 ]
 "share/ecologyrsi-dsh/scripts" = [
     "scripts/install_dsh_ecology_runtime.mjs",

@@ -173,6 +173,12 @@ class FrozenIdentityBaselineTests(unittest.TestCase):
                 profile["preset_id"] = "ecology-sample-planner-v14"
             self.assertEqual(current.seed_template(expected["template_id"]).to_dict(),
                              SeedGenomeTemplate.from_dict(expected).to_dict())
+            # The formula release adds @3/v15; it must not rewrite @2/v14.
+            expected["template_id"] = old.template_id.removesuffix("@1") + "@3"
+            for profile in expected["agent_program"]["candidate_execution_program"]["role_profiles"]:
+                profile["preset_id"] = "ecology-sample-planner-v15"
+            self.assertEqual(current.seed_template(expected["template_id"]).to_dict(),
+                             SeedGenomeTemplate.from_dict(expected).to_dict())
 
     def test_dataset_admission_is_not_part_of_evaluator_identity(self):
         source = inspect.getsource(EvaluatorRegistry.catalog)

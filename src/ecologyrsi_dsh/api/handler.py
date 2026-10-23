@@ -20,6 +20,7 @@ from ..core.prediction_policy import (
     RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, TARGETED_SEARCH_POLICY, CONTRIBUTION_POLICY,
     BASELINE_REFERENCE_PREDICTOR_ID,
 )
+from ..knowledge.retrieval_policy import DEFAULT_RETRIEVAL_POLICY, validate_retrieval_policy
 
 from ..application.runtime import initialize_runtime
 from ..execution.ownership import RuntimeOwnerLease as _SidecarOwnerLease
@@ -256,13 +257,13 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "content_digest",
 )
 _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
-    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@2",
-    "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@2",
-    "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@2",
-    "greenhouse-baseline-aligned-ridge@2": "greenhouse-baseline-aligned-cellwise-default@2",
-    "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@2",
-    "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@2",
-    "toy-rolling-water@1": "toy-default@2",
+    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@3",
+    "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@3",
+    "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@3",
+    "greenhouse-baseline-aligned-ridge@2": "greenhouse-baseline-aligned-cellwise-default@3",
+    "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@3",
+    "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@3",
+    "toy-rolling-water@1": "toy-default@3",
 }
 
 
@@ -308,6 +309,7 @@ PLUGIN_MANIFEST = {
             "model_workflow",
             "research_domain",
             "knowledge_online_enabled",
+            "retrieval_policy",
             "auto_progress",
             "allow_host_fallback",
             "optimization_protocol",
@@ -1118,11 +1120,8 @@ class EvolutionRequestHandler(
             if not self._authorize_dsh_tool():
                 return
             try:
-                result = self.server.dsh_tools.replay_retrieval(self._body())
-                self._send(
-                    HTTPStatus.OK,
-                    {"found": result is not None, "result": result},
-                )
+                result = self.server.dsh_tools.prepare_retrieval(self._body())
+                self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
                 self._send(HTTPStatus.FORBIDDEN, public_error_payload(exc, status=HTTPStatus.FORBIDDEN))
             except (RuntimeError, TypeError, ValueError) as exc:
@@ -1929,6 +1928,8 @@ class EvolutionRequestHandler(
     ) -> TaskManifest:
         """Accept a full manifest or the compact Chinese workbench payload."""
 
+        if "retrieval_policy" in body:
+            validate_retrieval_policy(body["retrieval_policy"])
         if "samples_per_update" in body:
             raise ValueError(
                 "samples_per_update is not supported; use optimization_schedule "
@@ -1937,6 +1938,8 @@ class EvolutionRequestHandler(
         supplied_manifest = body.get("task_manifest")
         if isinstance(supplied_manifest, dict):
             supplied_metadata = supplied_manifest.get("metadata")
+            if isinstance(supplied_metadata, dict) and "retrieval_policy" in supplied_metadata:
+                validate_retrieval_policy(supplied_metadata["retrieval_policy"])
             if isinstance(supplied_metadata, dict) and "samples_per_update" in supplied_metadata:
                 raise ValueError(
                     "samples_per_update is not supported; use optimization_schedule "
@@ -1950,10 +1953,19 @@ class EvolutionRequestHandler(
             raw = dict(body["task_manifest"])
             metadata = dict(raw.get("metadata", {}))
             for name in ("execution_protocol", "prediction_selection_policy", "targeted_search_policy", "prediction_model_id",
-                         "evaluator_id", "seed_genome_template_id", CANDIDATE_NOVELTY_POLICY_KEY):
+                         "evaluator_id", "seed_genome_template_id", CANDIDATE_NOVELTY_POLICY_KEY,
+                         "knowledge_online_enabled", "retrieval_policy"):
                 value = self._request_binding(body, name)
                 if name in body or name in metadata:
                     metadata[name] = value
+            if "knowledge_online_enabled" in metadata:
+                metadata["knowledge_online_enabled"] = _request_boolean(
+                    metadata["knowledge_online_enabled"], "knowledge_online_enabled"
+                )
+            metadata["retrieval_policy"] = {
+                **DEFAULT_RETRIEVAL_POLICY,
+                **validate_retrieval_policy(metadata.get("retrieval_policy", {})),
+            }
             raw["metadata"] = metadata
             if "domain_pack" not in raw:
                 supplied_domain = body.get(
@@ -2359,6 +2371,10 @@ class EvolutionRequestHandler(
                 body.get("knowledge_online_enabled", autonomous_requested),
                 "knowledge_online_enabled",
             ),
+            "retrieval_policy": {
+                **DEFAULT_RETRIEVAL_POLICY,
+                **validate_retrieval_policy(body.get("retrieval_policy", {})),
+            },
             "episode_id": (
                 str(body.get("episode_id")).strip()
                 if body.get("episode_id")
@@ -2616,6 +2632,46 @@ class EvolutionRequestHandler(
             metadata[CANDIDATE_NOVELTY_POLICY_KEY] = CANDIDATE_NOVELTY_POLICY
         elif novelty_policy is not None:
             raise ValueError("candidate novelty requires a native autonomous greenhouse run")
+        from ..evolution import exploration_policy, local_edit_memory
+        from ..evolution.effect_contracts import EFFECT_SCOPE_POLICY, EFFECT_SCOPE_POLICY_KEY, validate_effect_scope_policy
+        exploration_policy.enabled(metadata)
+        local_edit_memory.enabled(metadata)
+        from ..evolution.agent_policy import (
+            ADAPTIVE_TOOL_FEEDBACK_KEY, ADAPTIVE_TOOL_FEEDBACK_POLICY,
+            adaptive_tool_feedback_enabled,
+        )
+        adaptive_tool_feedback_enabled(metadata)
+        validate_effect_scope_policy(metadata.get(EFFECT_SCOPE_POLICY_KEY))
+        from ..evaluators.execution_validity import (
+            EXECUTION_OUTCOME_POLICY, EXECUTION_OUTCOME_POLICY_KEY, execution_outcome_policy_enabled,
+        )
+        execution_outcome_policy_enabled(metadata)
+        if native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID:
+            metadata[exploration_policy.POLICY_KEY] = exploration_policy.POLICY
+            metadata["behavior_diagnostics_policy"] = CONTRIBUTION_POLICY
+            metadata[EFFECT_SCOPE_POLICY_KEY] = EFFECT_SCOPE_POLICY
+            metadata[EXECUTION_OUTCOME_POLICY_KEY] = EXECUTION_OUTCOME_POLICY
+            metadata[local_edit_memory.POLICY_KEY] = local_edit_memory.POLICY
+            metadata[ADAPTIVE_TOOL_FEEDBACK_KEY] = ADAPTIVE_TOOL_FEEDBACK_POLICY
+            from ..knowledge.comparison_retrieval import freeze_comparison_retrieval_metadata, COMPARISON_RETRIEVAL_POLICY as comparison_policy
+            from ..evaluators.candidate_attribution import POLICY_KEY as attribution_key, POLICY as attribution_policy
+            # Creation owns these policies and the trusted document body.
+            # Never accept user-authored text masquerading as a Host snapshot.
+            metadata.pop("comparison_retrieval_snapshot", None)
+            metadata["comparison_retrieval_policy"] = comparison_policy
+            metadata = freeze_comparison_retrieval_metadata(metadata)
+            metadata["prediction_formula_policy"] = "evidence-mean-or-model@1"
+            metadata[attribution_key] = attribution_policy
+        elif metadata.get(EXECUTION_OUTCOME_POLICY_KEY) is not None:
+            raise ValueError("execution outcome policy requires a native autonomous greenhouse run")
+        elif metadata.get(exploration_policy.POLICY_KEY) is not None:
+            raise ValueError("mechanism exploration requires a native autonomous greenhouse run")
+        elif metadata.get(EFFECT_SCOPE_POLICY_KEY) is not None:
+            raise ValueError("scoped mutation effects require a native autonomous greenhouse run")
+        elif metadata.get(local_edit_memory.POLICY_KEY) is not None:
+            raise ValueError("local edit memory requires a native autonomous greenhouse run")
+        elif metadata.get(ADAPTIVE_TOOL_FEEDBACK_KEY) is not None:
+            raise ValueError("adaptive tool feedback requires a native autonomous greenhouse run")
         targeted_policy = metadata.get("targeted_search_policy")
         if targeted_policy not in (None, TARGETED_SEARCH_POLICY):
             raise ValueError("unsupported targeted_search_policy")
@@ -3183,6 +3239,18 @@ class EvolutionRequestHandler(
             raise ValueError(
                 "任务清单中的 Host 进化运行协议与当前服务不兼容"
             )
+        from ..evaluators.repeatability import POLICY_KEY as repeatability_key, POLICY as repeatability_policy
+        if native_protocol and autonomous_mode and schedule is not None and schedule.race:
+            metadata[repeatability_key] = repeatability_policy
+            metadata["inference_repeatability_budget"] = {
+                "additional_origins_per_generation": schedule.screening_origin_count,
+                "additional_origins_for_run": schedule.screening_origin_count * manifest.max_generations,
+                "additional_scoring_cells_for_run": schedule.screening_origin_count * manifest.max_generations * prediction_cells_per_origin,
+                "additional_unique_observations": 0,
+                "scope": "same_incumbent_same_screening_cohort_one_extra_inference",
+            }
+        elif metadata.get(repeatability_key) is not None:
+            raise ValueError("inference repeatability requires the native five-arm training race")
         metadata.update(
             {
                 "host_runtime_build": _host_runtime_build(),

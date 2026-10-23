@@ -4310,6 +4310,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             "reason_code",
             "response_digest",
             "confidence",
+            "critic_routing",
         }
         if kind == "agent"
         else {
@@ -4346,7 +4347,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                     f"sample response {kind} step {field_name} must be non-empty text"
                 )
             projected[field_name] = raw.strip()[:160]
-        for field_name in allowed - set(required) - {"confidence", "parameters", "used_as_evidence", "candidate_model_consumed", "tool_predicted", "elapsed_ms"}:
+        for field_name in allowed - set(required) - {"confidence", "critic_routing", "parameters", "used_as_evidence", "candidate_model_consumed", "tool_predicted", "elapsed_ms"}:
             if field_name not in item:
                 continue
             raw = item[field_name]
@@ -4378,6 +4379,22 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                     raise SampleExecutionContractError("tool duration must not be negative")
             if "tool_predicted" in item:
                 projected["tool_predicted"] = _finite_float(item["tool_predicted"], "tool prediction")
+        if "critic_routing" in item:
+            routing = item["critic_routing"]
+            if (not isinstance(routing, Mapping)
+                    or set(routing) != {"policy_version", "planner_confidence", "threshold", "required", "enabled"}
+                    or routing["policy_version"] not in {"always@1", "uncertain_or_failure@1"}
+                    or any(type(routing[k]) is not bool for k in ("required", "enabled"))
+                    or type(routing["planner_confidence"]) not in (int, float)
+                    or not math.isfinite(routing["planner_confidence"])
+                    or not 0 <= routing["planner_confidence"] <= 1):
+                raise SampleExecutionContractError("invalid Host critic routing evidence")
+            threshold = routing["threshold"]
+            if ((routing["policy_version"] == "always@1" and threshold is not None)
+                    or (routing["policy_version"] == "uncertain_or_failure@1" and
+                        (type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1))):
+                raise SampleExecutionContractError("invalid Host critic routing threshold")
+            projected["critic_routing"] = dict(routing)
         if "confidence" in item:
             confidence = item["confidence"]
             if (
@@ -4608,6 +4625,10 @@ def _attempt_trace_entry(
     if skills:
         result["skill_evidence"] = skills
     result["critic_decisions"] = critic_decisions
+    planner = next((item for item in reversed(remote_decisions)
+                    if item.get("role") == "remote_planner_agent"), None)
+    if planner is not None and isinstance(planner.get("critic_routing"), Mapping):
+        result["critic_routing"] = dict(planner["critic_routing"])
     if isinstance(requested_tool_id, str) and requested_tool_id.strip():
         result["requested_repair_tool"] = requested_tool_id.strip()[:160]
     return result

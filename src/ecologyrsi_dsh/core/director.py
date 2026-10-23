@@ -1443,6 +1443,8 @@ class EvolutionDirector:
                 "diagnostic_report_id": diagnostic.report_id,
                 **({"research_evidence": evidence} if evidence is not None else {}),
             })
+        from ..evolution.mechanisms import validate_state_proposal
+        validate_state_proposal(current, proposal)
         entries = [("ProposalSubmitted", {
             "proposal": proposal.to_dict(), "intervention_receipts": durable_receipts,
         }, None)]
@@ -1875,6 +1877,8 @@ class EvolutionDirector:
             parent = state.candidate(proposal.parent_candidate_id)
             if parent.run_id != proposal.run_id:
                 raise ValueError("parent candidate belongs to another run")
+        from ..evolution.mechanisms import validate_state_proposal
+        validate_state_proposal(state, proposal)
         self.ledger.append(proposal.run_id, "ProposalSubmitted", {"proposal": proposal.to_dict()},
                            expected_run_seq=state.events[-1].seq)
         return proposal
@@ -2090,7 +2094,8 @@ class EvolutionDirector:
         seed_policy = build_agent_policy(genome_digest=seed.genome_digest, profile=seed_profile,
             parameters=seed.scientific_program["parameter_overrides"], previous_analysis=None, generation=0,
             joint=state.task_manifest.metadata.get("optimization_protocol") in {"joint_plugin_epoch@1", "joint_plugin_epoch@2"},
-            prediction_formula_policy=("mean-referenced-tools@1"
+            prediction_formula_policy=state.task_manifest.metadata.get("prediction_formula_policy",
+                "mean-referenced-tools@1"
                 if state.task_manifest.metadata.get("optimization_protocol") in {"evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}
                 else None))
         proposal = Proposal(
@@ -2470,6 +2475,25 @@ class EvolutionDirector:
         )
         return self.ledger.append_many(run_id, entries)[0]
 
+    def record_screening_repeatability(self, run_id, scope, metrics, score, sample_results):
+        """Seal the extra inference without replacing/ranking the first score."""
+        from ..evaluators.repeatability import EVENT, build_payload
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        self._validate_evaluation_scope(state, state.candidate(scope.candidate_id), scope)
+        payload = build_payload(state, scope, metrics, score)
+        event_id = f"{run_id}:generation:{scope.generation}:screening-repeatability"
+        existing = next((e for e in state.events if e.event_id == event_id), None)
+        if existing is not None:
+            if existing.payload != payload:
+                raise ValueError("repeatability evidence already sealed differently")
+            return existing
+        completion = self._scoped_sample_results_completion_entry(
+            state, scope=scope, evaluation_id=event_id, payload=sample_results)
+        if completion is None:
+            raise ValueError("repeatability result checkpoint must be sealed atomically")
+        return self.ledger.append_many(run_id, ((EVENT, payload, event_id), completion))[0]
+
     def freeze_run_adaptation_cohort(
         self,
         run_id: str,
@@ -2595,6 +2619,24 @@ class EvolutionDirector:
             event_id=f"{run_id}:generation:{planned.generation}:cohorts:frozen",
         )
         return planned
+
+    def record_generation_behavior_comparison(self, run_id: str, *, generation: int) -> Event:
+        from ..evolution.behavior_comparison import compare_generation_behaviors
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING)
+        if generation != state.run.generation:
+            raise ValueError("behavior comparison is outside the current generation")
+        planned = state.generation_cohort_for(generation)
+        records = [e.payload for e in state.candidate_screening_events if e.payload["generation"] == generation]
+        payload = compare_generation_behaviors(planned, records, metadata=state.task_manifest.metadata)
+        existing = next((e for e in state.generation_behavior_events if e.payload["generation"] == generation), None)
+        if existing:
+            if canonical_json(existing.payload) != canonical_json(payload):
+                raise ValueError("conflicting generation behavior comparison")
+            return existing
+        return self.ledger.append(run_id, "GenerationBehaviorCompared", payload,
+            event_id=f"{run_id}:generation:{generation}:behavior-compared",
+            expected_run_seq=state.events[-1].seq)
 
     def freeze_formal_selection_cohort(
         self,
@@ -3318,6 +3360,7 @@ class EvolutionDirector:
                 )
             validate_local_effect_event(
                 payload, revision=revision, proposal=proposal,
+                scope_policy=state.task_manifest.metadata.get("mutation_effect_scope_policy"),
                 parent_revision=state.revision(revision.parent_revision_id) if revision.parent_revision_id else None,
                 allowed_effect_cells=tuple(f"{target}@{horizon}h"
                     for target in state.task_manifest.metadata.get("fitness_profile", {}).get("expected_targets", ())
@@ -5858,8 +5901,8 @@ class EvolutionDirector:
                 replica = checkpoint["inference_replica"]
                 if type(replica) is not int or replica not in (0, 1):
                     raise ValueError("sample checkpoint inference_replica must be 0 or 1")
-                if replica and phase is not EvaluationPhase.HOLDOUT:
-                    raise ValueError("inference replicas require a holdout checkpoint")
+                if replica and phase not in {EvaluationPhase.HOLDOUT, EvaluationPhase.SCREENING}:
+                    raise ValueError("inference replicas require a holdout or screening checkpoint")
                 projected["inference_replica"] = replica
             if formal_batch_index is not None and (
                 isinstance(formal_batch_index, bool)
@@ -5976,6 +6019,13 @@ class EvolutionDirector:
                 or scope.origin_count != planned.screening.origin_count
             ):
                 raise ValueError("screening EvaluationScope is not frozen R0 evidence")
+            if scope.inference_replica:
+                from ..evaluators.repeatability import enabled, sealed_reference
+                if not enabled(state.task_manifest.metadata):
+                    raise ValueError("screening replica requires the frozen repeatability policy")
+                control_id, control_revision, _reference = sealed_reference(state, scope.generation)
+                if (scope.candidate_id, scope.candidate_revision_id) != (control_id, control_revision):
+                    raise ValueError("screening replica must repeat the sealed incumbent")
         elif scope.phase is EvaluationPhase.FORMAL_BATCH:
             assert scope.batch_index is not None
             batch = state.formal_batch_for(candidate.candidate_id, scope.batch_index)

@@ -14,12 +14,51 @@ from ..evaluators.catalog import TOY_DATASET_ID
 from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 
 
+def build_repeatability_projection(state: Any, generation: int | None = None) -> dict[str, object] | None:
+    from ..evaluators.repeatability import enabled, summary_for
+    from ..core.sample_results import decode_sample_result_batch
+    metadata = state.task_manifest.metadata
+    if not enabled(metadata):
+        return None
+    if generation is None:
+        generation = state.run.generation
+        if state.run.status.value in {"completed", "cancelled", "failed"}:
+            finished = [e.payload["generation"] for e in state.events if e.kind == "ScreeningRepeatabilityRecorded"]
+            if finished:
+                generation = max(finished)
+    total = int(metadata.get("inference_repeatability_budget", {}).get("additional_origins_per_generation", 0))
+    summary = summary_for(state, generation)
+    starts = [e for e in state.events if e.kind == "EvaluationSampleResultsStarted"
+              and e.payload.get("generation") == generation
+              and e.payload.get("checkpoint", {}).get("evaluation_phase") == "screening"
+              and e.payload.get("checkpoint", {}).get("inference_replica") == 1]
+    completed = 0
+    if summary is not None:
+        completed = int(summary["paired_origin_count"])
+    elif starts:
+        revision = starts[-1].payload["revision"]
+        origins = {}
+        for event in state.events:
+            if event.kind != "EvaluationSampleResultBatchRecorded" or event.payload.get("revision") != revision:
+                continue
+            for row in decode_sample_result_batch(event.payload):
+                origins.setdefault(row["origin_timestamp"], set()).add((row["target"], row["horizon_hours"]))
+        cells = int(metadata.get("prediction_cells_per_origin", 9))
+        completed = sum(len(items) == cells for items in origins.values())
+    return {"generation": generation, "status": "completed" if summary else "running" if starts else "pending",
+            "completed_origins": min(total, completed), "total_origins": total,
+            "additional_unique_observations": 0, "summary": summary}
+
+
 def build_frozen_feature_policies(task: Any) -> dict[str, object]:
     """Small creation-time policy snapshot for detail and compact views."""
     metadata = getattr(task, "metadata", {}) or {}
     return {key: metadata.get(key) for key in (
         "targeted_search_policy", "behavior_diagnostics_policy", "candidate_novelty_policy",
-        "candidate_executability_policy")}
+        "candidate_executability_policy", "candidate_exploration_policy", "mutation_effect_scope_policy",
+        "execution_outcome_policy", "local_edit_memory_policy", "adaptive_tool_feedback_policy",
+        "comparison_retrieval_policy", "prediction_formula_policy", "candidate_attribution_policy",
+        "inference_repeatability_policy")}
 
 
 def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[str, object]:
@@ -49,6 +88,7 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         **build_frozen_feature_policies(task),
         "local_comparison_policy": metadata.get("local_comparison_policy"),
         "derived_execution_budget": metadata.get("derived_execution_budget"),
+        "inference_repeatability_budget": metadata.get("inference_repeatability_budget"),
         "execution_plan": metadata.get("execution_plan"),
         "derived_run_execution_budget": metadata.get("derived_run_execution_budget"),
         "cohort_capacity_report": metadata.get("cohort_capacity_report"),

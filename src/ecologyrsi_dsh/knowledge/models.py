@@ -28,7 +28,7 @@ _EVIDENCE_CATALOG_FIELDS = frozenset(
         "evidence_digest",
     }
 )
-_EVIDENCE_CATALOG_MAX_ITEMS = 24
+_EVIDENCE_CATALOG_MAX_ITEMS = 32
 _EVIDENCE_CATALOG_MAX_BYTES = 48_000
 _EVIDENCE_SUMMARY_MAX_CHARS = 1_600
 _EVIDENCE_CAPABILITY_IDS_MAX_ITEMS = 16
@@ -60,12 +60,14 @@ def _optional_text(value: Any, name: str, *, maximum: int = 4000) -> str | None:
     return _text(value, name, maximum=maximum)
 
 
-def _text_tuple(value: Any, name: str, *, maximum_items: int = 64) -> tuple[str, ...]:
+def _text_tuple(
+    value: Any, name: str, *, maximum_items: int = 64, maximum_length: int = 500,
+) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise TypeError(f"{name} must be an array")
     if len(value) > maximum_items:
         raise ValueError(f"{name} contains too many items")
-    return tuple(_text(item, f"{name} item", maximum=500) for item in value)
+    return tuple(_text(item, f"{name} item", maximum=maximum_length) for item in value)
 
 
 def _truncated_text(value: str, maximum: int) -> str:
@@ -232,7 +234,9 @@ class KnowledgeSnapshot:
             or self.generation < 0
         ):
             raise ValueError("generation must be a non-negative integer")
-        object.__setattr__(self, "query_terms", _text_tuple(self.query_terms, "query_terms"))
+        object.__setattr__(
+            self, "query_terms", _text_tuple(self.query_terms, "query_terms", maximum_length=600)
+        )
         if not isinstance(self.cards, (list, tuple)) or len(self.cards) > 32:
             raise ValueError("cards must contain at most 32 items")
         object.__setattr__(

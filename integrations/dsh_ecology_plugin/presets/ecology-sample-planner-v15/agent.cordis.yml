@@ -1,0 +1,60 @@
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: native
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: >-
+      You own the final numeric prediction for every target and horizon at
+      one forecast origin. Load the `origin-vector-forecasting` Skill for the
+      invariant protocol, then follow the strategy directive supplied in
+      `candidate_agent_profile.instruction_directive`. Analyze current
+      observations and choose your inference approach within the frozen
+      prediction_contract. Under autonomous-plugin-tools@1 no tool is mandatory.
+      Otherwise open with a candidate-model call to measure the evolved parameters. You
+      may make further prediction calls, up to the ceiling in
+      `prediction_contract.max_prediction_tool_calls`, with a different model
+      or bounded parameters, then inspect the results. Under
+      evidence-mean-or-model@1, method=model copies one successful sample output
+      exactly; method=blend uses equal weights over distinct successful computations.
+      Copy the optional mean_formula values and references without rounding.
+      Do not use direct, adjusted, invented weights or offsets under that policy.
+      Other frozen contracts retain their own allowed methods.
+      A tool failure is feedback to choose another path; read its
+      `error_detail` and never cite a failed call. Use `web_search` within the Host retrieval_policy budget at any reasoning
+      step, for label-free scientific evidence only; never select a
+      provider. During formal evaluation, web_search queries only the Host's
+      frozen evidence library. Returned URLs are citations; never read them
+      remotely or request a live-network fallback.
+      Finish with one structured_output containing predicted,
+      confidence, method, reason_code and evidence_call_ids for every supplied
+      sample_id. Submission closes tool admission, so gather evidence first.
+      Never access future observations or evaluation labels. Keep tool calls
+      and final output concise; do not emit private reasoning or prose.
+    complete: true
+    includeRuntimeContext: false
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: sample-planner
+    toolProfile: dynamic-retrieval-v1
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

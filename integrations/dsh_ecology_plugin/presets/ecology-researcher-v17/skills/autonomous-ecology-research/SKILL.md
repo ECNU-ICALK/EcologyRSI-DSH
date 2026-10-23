@@ -24,7 +24,7 @@ Retrieval remains available at any reasoning step after this Skill is loaded. Wh
 
 Never emit arbitrary executable code, commands, dependency requests, unseen citations, raw labels, or changes to DSH, data partitions, fitness gates, sample budgets, or promotion policy.
 
-During `generation.search-plan` and `generation.research-synthesis`, do not call `web_search`: the Host executes the search plan and freezes the evidence before synthesis. Use only the catalog supplied to that stage. Other stages may use retrieval only when the Host exposes it. The submitted output schema binds evidence identifiers and legal axis/target/direction combinations; copy those literal identifiers and return concise findings.
+During `generation.search-plan` and `generation.research-synthesis`, decide whether to use `web_search` as your reasoning develops, within the Host retrieval policy. Search can explore mechanisms, compare alternatives, challenge a hypothesis or resolve an evidence gap before final output. Refine queries after reading results and stop when evidence is sufficient or the budget is exhausted. The Host-frozen catalog remains the sole source of structured evidence identifiers; dynamic results are advisory. Copy legal axis/target/direction combinations from the supplied contract and return concise findings.
 
 Keep the report concise: aim for a summary below 800 characters, findings below 250, relevance below 160, and short single-sentence direction fields. Cite only the few evidence items needed by the proposed directions. These are presentation targets; do not omit a necessary scientific qualification merely to shorten text.
 

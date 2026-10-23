@@ -6,7 +6,7 @@ const ids = [
   "ecology-coordinator-v6",
   "ecology-researcher-v17",
   "ecology-candidate-proposer-v9",
-  "ecology-sample-planner-v14",
+  "ecology-sample-planner-v15",
   "ecology-sample-critic-v6",
   "ecology-generation-judge-v10",
 ];

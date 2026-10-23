@@ -380,6 +380,62 @@ def _guardrail_analysis(
 
 
 class ResearchIterationTests(unittest.TestCase):
+    def test_compressed_history_retains_adaptation_candidate_parameters(self) -> None:
+        task = _historical_experience_task(samples_per_update=25)
+        historical = []
+        for index in range(8):
+            run_id = f"run:bounded-adaptation:{index}"
+            analysis = GenerationAnalysis(
+                run_id=run_id, generation=0, candidate_count=4,
+                eligible_count=0, outcome="no_improvement",
+                ranking=tuple({"candidate_id": f"c{i}", "score": 100 - i,
+                               "classification": "screening_gate_failed" if i < 3
+                               else "holdout_gate_failed"} for i in range(4)),
+            )
+            state = _historical_state(task, run_id, (analysis,), created_seq=index * 10 + 1)
+            proposals = tuple(SimpleNamespace(
+                proposal_id=f"p{i}", generation=0, created_at=str(i),
+                changes={"history_steps": 6 + i, "ridge_alpha": 0.1,
+                         "co2_concentration_6h_residual_scale": 0.08 if i == 3 else 0},
+                metadata={"behavior_digest": digest({"run": run_id, "candidate": i})},
+            ) for i in range(4))
+            candidates = {f"c{i}": SimpleNamespace(proposal_id=f"p{i}") for i in range(4)}
+            state.proposals = proposals
+            state.candidate = candidates.__getitem__
+            state.proposal = {p.proposal_id: p for p in proposals}.__getitem__
+            state.formal_batch_evaluations = tuple(SimpleNamespace(scope=SimpleNamespace(
+                generation=generation, candidate_id=candidate_id,
+                phase=phase, batch_index=batch,
+            )) for candidate_id, phase, batch, generation in (
+                ("c0", "holdout", None, 0),  # no priority from holdout
+                ("c1", "formal_batch", 0, 0),  # imported screening is not adaptation
+                ("c2", "formal_batch", 1, 1),  # no future-generation evidence
+                ("c3", "formal_batch", 1, 0),
+            ))
+            historical.append(state)
+        current_task = _historical_experience_task(samples_per_update=500)
+        current = _historical_state(current_task, "run:bounded-current", (), created_seq=1000)
+        experience = build_cross_generation_experience(
+            current, 0, historical_states=historical, history_cutoff_seq=1000,
+        )
+        sources = experience["historical_generations"]
+        self.assertTrue(sources)
+        self.assertGreater(experience["historical_provenance"]["omitted_detail_count"], 0)
+        for source in sources:
+            modifications = source["modifications"]
+            self.assertFalse(modifications["candidate_inventory_complete"])
+            self.assertEqual(modifications["candidate_parameter_sets"][0][
+                "co2_concentration_6h_residual_scale"], 0.08)
+            behavior = modifications["candidate_behaviors"][0]
+            self.assertEqual(behavior["initial_proposal_parameters"][
+                "co2_concentration_6h_residual_scale"], 0.08)
+            self.assertEqual(behavior["parameters_digest"], digest(behavior["initial_proposal_parameters"]))
+            self.assertEqual(behavior["classification"], "holdout_gate_failed")
+            self.assertNotIn("best_score", source)  # directional-only cross-run context
+        self.assertLessEqual(len(canonical_json({key: experience[key] for key in (
+            "historical_generations", "historical_parameter_guardrails", "historical_provenance",
+        )}).encode()), 8192)
+
     def test_deterministic_fallback_plan_is_bounded_and_digest_stable(self) -> None:
         current_plan = {
             "prediction_model": {"id": "toy-rolling-water@1"},
@@ -2842,6 +2898,7 @@ class ResearchIterationTests(unittest.TestCase):
             )
         state = SimpleNamespace(
             generation_analyses=tuple(analyses),
+            task_manifest=SimpleNamespace(metadata={}),
             research_iterations=(),
             proposals=(),
         )
@@ -2922,6 +2979,7 @@ class ResearchIterationTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             generation_analyses=analyses,
+            task_manifest=SimpleNamespace(metadata={}),
             research_iterations=(),
             proposals=(),
             algorithm_attempts=(),

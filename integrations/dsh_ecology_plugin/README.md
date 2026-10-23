@@ -1,6 +1,6 @@
 # EcologyRSI DSH 原生插件
 
-**版本 0.10.11，固定适配 DeepSeek Harness 0.2.0-rc.2。** 本插件属于本地研究交付，尚未签名或发布到官方插件市场。完整安装、数据准备、实验协议与验收状态以[仓库 README](../../README.md)为准；此文说明宿主集成合同。
+**版本 0.10.29，固定适配 DeepSeek Harness 0.2.0-rc.2。** 本插件属于本地研究交付，尚未签名或发布到官方插件市场。完整安装、数据准备、实验协议与验收状态以[仓库 README](../../README.md)为准；此文说明宿主集成合同。当前机制多样性改动及实跑状态见[验证记录](../../docs/mechanism-exploration-2026-10-21.md)。
 
 ## 组件与请求链路
 
@@ -32,7 +32,7 @@ export ECOLOGYRSI_DSH_CREDENTIALS_FILE="$DSH_HOME/.credentials.yaml"
 | 协调 | `ecology-coordinator-v6` |
 | 研究 | `ecology-researcher-v17` |
 | 提案 | `ecology-candidate-proposer-v9` |
-| 样本预测 | `ecology-sample-planner-v14` |
+| 样本预测 | `ecology-sample-planner-v15` |
 | 条件样本评审 | `ecology-sample-critic-v6` |
 | 候选评审与批次反思 | `ecology-generation-judge-v10` |
 
@@ -77,7 +77,7 @@ export ECOLOGYRSI_DSH_CREDENTIALS_FILE="$DSH_HOME/.credentials.yaml"
 
 ## 样本提交前校验
 
-样本 Planner 的 `structured_output` 在一次性捕获前调用认证的 Host 预校验。Host 复用最终写入的预测合同，检查冻结样本集合、候选允许的方法、会话已收到的成功工具证据，以及已冻结的均值公式。已知可纠正问题只返回有界的错误代码和字段路径，由模型在原有两次提交上限内自行修正。
+样本 Planner 的 `structured_output` 在一次性捕获前调用认证的 Host 预校验。Host 复用最终写入的预测合同，检查冻结样本集合、候选允许的方法、会话已收到的成功工具证据，以及已冻结的均值公式。已知可纠正问题只返回有界的错误代码和字段路径；JS 在既有 `instruction` 中明确数组类型错误，并按冻结合同列出缺失样本 ID，不回传模型的错误值。全部反馈限制为 4096 字节，由模型在原有两次提交上限内自行修正，Host 不代填科学输出。
 
 0.10.8 在原提交次数与工具预算内支持一次有界的补证据修正：仅当样本 Planner 的首次提交收到认证 Host 的 `blend_requires_two_results` 反馈时，才允许在第二次提交前继续调用既有预测工具。运行时以会话内私有授权记录绑定首次拒绝和第二次有效提交，最终轨迹校验检查同一身份、允许的工具顺序及总工具次数；模型构造的错误文本不能授予修正权限。其他角色、普通模式校验错误和权限错误不获得此权限。
 
@@ -85,7 +85,35 @@ export ECOLOGYRSI_DSH_CREDENTIALS_FILE="$DSH_HOME/.credentials.yaml"
 
 ## 研究与评审
 
-六个活动角色均可使用 `web_search`，在必需 Skill 之后、阶段终端工具之前按需检索。默认使用 Harness `ctx.web.search`；技术失败或定量证据不足时，sidecar 可回退到 OpenAlex 元数据检索。结果与路由记入账本，外部内容只能作为研究线索，不能覆盖冻结规则或替代登记工具。
+六个活动角色均可使用 `web_search`，在必需 Skill 之后、阶段终端工具之前按需检索，包括检索规划和研究综合阶段。模型可以在生成方案、比较方法、分析预测结果时追加问题、搜索后继续推理，再决定是否继续搜索；额度是上限，不是必须完成的调用次数。
+
+研究阶段的每次搜索先由 sidecar 校验统一联网开关和阶段额度，再调用 Harness `ctx.web.search`。配置官方凭据后，sidecar 同时补充 [DeepSeek 官方 Search API](https://api-docs.deepseek.com/zh-cn/guides/search/) 的网页结果；合并后的证据不足时再补查 OpenAlex。各查询和各来源的结果交错选取并按 URL 去重，避免第一条查询占满来源。原生 Harness 搜索不可用时仍可使用 sidecar 的来源。DeepSeek 固定调用 `https://api.deepseek.com/v1/tools/search`，优先保留供模型阅读的长摘要；不使用模型网关地址替代搜索接口。
+
+正式 validation / final-test 评测保留 `web_search` 名称及中途自主查询能力，但仅检索 Host 绑定的冻结资料库。上下文的 `formal_retrieval` 包含固定的 `snapshot_digest`、`document_count` 和 `online_enabled:false`；两个推理副本使用同一资料快照，查询可以不同。返回 URL 仅作为引用，不得远端读取。JS 将该策略绑定到真实子会话；Host 必须直接返回匹配摘要的 `frozen_snapshot` 结果（无匹配时返回空数组）。缺少正式评测策略、旧 Host 返回未命中、摘要不匹配或错误路由均会拒绝执行，不会调用 Harness 搜索或外部回退。研究阶段的联网开关不能把正式评测切换到实时搜索。
+
+训练原生会话关闭后，正式评测由 Host 先调用专用 `/runs/{run_id}/formal/prepare`，使用冻结模型、预设、候选版本及资料摘要创建新的原生运行代次和角色会话。只有角色创建完成、原生状态为 `running`，且 Host 再次校验全部冻结绑定后，才可锁定和打开正式数据。普通 start/resume 不会复活已关闭训练。正式代次仅接受匹配 `evaluation_scope.phase` 和资料摘要的 `sample.plan`、`sample.critic`；数值内核使用的 `training_feedback` 槽位本身不授予正式评测权限。结束或失败时 `/formal/close` 仅关闭匹配 `formal_execution_id` 的代次，保留训练的完成状态与账本身份。
+
+`knowledge_online_enabled=false` 禁止初始和动态检索产生新的联网请求；`ECOLOGYRSI_KNOWLEDGE_ONLINE` 保留为研究阶段的服务端覆盖开关。已保存的同键、同查询、同阶段结果仍可回放；正式评测的固定资料库查询无需联网。创建运行时可传入以下 `retrieval_policy`（也支持 task manifest metadata），配置在运行中冻结：
+
+```json
+{
+  "knowledge_online_enabled": true,
+  "retrieval_policy": {
+    "dynamic_max_calls_per_stage": 8,
+    "max_queries_per_call": 8,
+    "max_query_chars": 320,
+    "max_results": 16
+  }
+}
+```
+
+这四项依次为每次阶段执行的动态调用上限、每次查询数、每条查询字符数和返回来源数；上例也是默认值，硬上限分别为 24、12、600、32。并发未完成调用也占额度，重试同一个检索键不重复计数。同键更换查询会被拒绝。
+
+DeepSeek 凭据优先使用 `ECOLOGYRSI_DEEPSEEK_SEARCH_API_KEY`，其次 `DEEPSEEK_API_KEY`；也支持现有私有 DSH 凭据文件中的这两个固定名称，以及明确指向官方 `api.deepseek.com` 的模型连接凭据。独立 Harness 目录通过 `ECOLOGYRSI_DSH_CREDENTIALS_FILE` 和 `ECOLOGYRSI_DSH_SETTINGS_FILE` 指定。密钥不进入工具参数、日志或账本。未配置时继续使用已有来源。可用 `ECOLOGYRSI_DEEPSEEK_SEARCH_TIMEOUT` 设置单次请求超时秒数，默认 20。
+
+官方单条查询限制为 128 个 Unicode 字符；较长自然语言查询会按词界分段，含操作符或引号的过长查询需要缩短。DeepSeek 每次工具调用最多发出 12 次 HTTP 请求（含重试），并发上限 4。可使用 `site:`、`-site:`、`lang:`、`after:`、`before:` 等官方查询语法。
+
+每代初始证据快照继续用于稳定回放，但不会限制阶段中途检索。OpenAlex 初始检索按查询覆盖收集结果，不再以固定领域标题词排除通用建模方法。检索结果与路由记入账本，外部内容只能作为研究线索，不能覆盖冻结规则或替代登记工具；动态结果不能伪造成冻结目录中的结构化 `evidence_ref`。
 
 Judge preset 包含职责隔离的 `candidate-scientific-review` 与 `batch-scientific-reflection`：前者审查单候选冻结证据，后者消费 Host 生成的排名与候选映射。0.9.0 评审还绑定搜索或认证用途；模型建议不拥有选择、晋级或放宽门槛的权限。
 

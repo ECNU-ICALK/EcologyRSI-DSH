@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 PRESET_ROOT = ROOT / "integrations" / "dsh_ecology_plugin" / "presets"
 MANIFEST_PATH = PRESET_ROOT / "preset-manifest.json"
+HISTORICAL_PRESETS = frozenset({"ecology-sample-planner-v14"})
 
 # Mirrors the managed-preset patterns already enforced by scripts/verify_artifacts.py
 # and scripts/install_dsh_ecology_runtime.mjs, so a retired role still gets noticed.
@@ -35,11 +36,10 @@ class PresetRosterConsistencyTests(unittest.TestCase):
             self.assertRegex(preset_id, MANAGED_PRESET_ID)
 
     def test_installed_preset_directories_match_the_manifest(self):
-        # A rename that leaves the retired directory behind (v8 next to v9) ships two
-        # rosters in one archive; the manifest and the tree must agree exactly.
+        # Only explicitly retained historical resources may coexist with active roles.
         directories = sorted(entry.name for entry in PRESET_ROOT.iterdir() if entry.is_dir())
-        self.assertEqual(directories, sorted(self.roster))
-        for preset_id in self.roster:
+        self.assertEqual(directories, sorted(set(self.roster) | HISTORICAL_PRESETS))
+        for preset_id in directories:
             self.assertTrue((PRESET_ROOT / preset_id / "preset.yml").is_file(), preset_id)
             self.assertTrue((PRESET_ROOT / preset_id / "agent.cordis.yml").is_file(), preset_id)
 
@@ -54,7 +54,7 @@ class PresetRosterConsistencyTests(unittest.TestCase):
         # verify_delivery.sh checks a fixed file list. Assert the set, not the order.
         for relative_path in ("pyproject.toml", "scripts/verify_delivery.sh"):
             with self.subTest(path=relative_path):
-                self.assertEqual(_mentioned_ids(relative_path), frozenset(self.roster))
+                self.assertEqual(_mentioned_ids(relative_path), frozenset(self.roster) | HISTORICAL_PRESETS)
 
     def test_new_run_seed_bindings_use_current_presets(self):
         from ecologyrsi_dsh.api.handler import _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR
@@ -63,15 +63,15 @@ class PresetRosterConsistencyTests(unittest.TestCase):
         registry = current_program_registry()
         for template_id in _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR.values():
             with self.subTest(template=template_id):
-                self.assertTrue(template_id.endswith("@2"))
+                self.assertTrue(template_id.endswith("@3"))
                 template = registry.seed_template(template_id).to_dict()
                 profiles = template["agent_program"]["candidate_execution_program"]["role_profiles"]
                 self.assertTrue(profiles)
                 self.assertLessEqual({item["preset_id"] for item in profiles}, set(self.roster))
-        # The sole historical reference belongs to the byte-preserved @1 seeds.
-        # Active bindings above must never select it.
+        # Byte-preserved @1/@2 seeds retain their old planner references.
+        # Active @3 bindings above must never select either historical planner.
         mentioned = _mentioned_ids("src/ecologyrsi_dsh/knowledge/program_registry.py")
-        self.assertEqual(mentioned - set(self.roster), {"ecology-sample-planner-v11"})
+        self.assertEqual(mentioned - set(self.roster), {"ecology-sample-planner-v11", "ecology-sample-planner-v14"})
 
     def test_node_installer_stages_and_python_canaries_share_the_contract(self):
         import subprocess

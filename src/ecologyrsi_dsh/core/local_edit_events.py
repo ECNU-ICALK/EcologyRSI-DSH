@@ -48,7 +48,8 @@ def validate_local_edit_event(payload, *, evaluation, schedule, trajectory, comp
             "decision": decision.value, "operations": operations}
 
 
-def validate_local_effect_event(payload, *, revision, parent_revision, proposal, allowed_effect_cells=()):
+def validate_local_effect_event(payload, *, revision, parent_revision, proposal, allowed_effect_cells=(),
+                                scope_policy=None):
     """Bind persisted effect evidence to the immutable parent, child and edit.
 
     Older/manual producers may omit both fields. A partially supplied contract
@@ -56,11 +57,17 @@ def validate_local_effect_event(payload, *, revision, parent_revision, proposal,
     """
     from .models import canonical_json
     from .immutable import thaw_json
-    from ..evolution.effect_contracts import build_edit_effect_contract, resolve_mutation_effects, mutation_effect_cells
+    from ..evolution.effect_contracts import (
+        build_edit_effect_contract, resolve_mutation_effects, mutation_effect_cells,
+        validate_effect_scope_policy,
+    )
     from ..evolution.genome import EcologyEvolutionPluginGenome
     from ..knowledge.program_registry import current_program_registry
 
+    validate_effect_scope_policy(scope_policy)
     if not ({"effect_contract", "effect_resolution"} & set(payload)):
+        if scope_policy and payload.get("outcome") == "applied":
+            raise ValueError("scoped edit requires frozen effect evidence")
         return
     if (not {"effect_contract", "effect_resolution"}.issubset(payload)
             or payload["outcome"] != "applied" or parent_revision is None):
@@ -84,6 +91,7 @@ def validate_local_effect_event(payload, *, revision, parent_revision, proposal,
         evidence_refs=source["evidence_refs"],
         affected_cells=mutation_effect_cells(proposal["operations"], allowed_effect_cells),
         resolution=resolved,
+        scope_policy=scope_policy,
     )
     if (revision.parent_revision_id != parent_revision.revision_id
             or canonical_json(payload["effect_contract"]) != canonical_json(expected)):

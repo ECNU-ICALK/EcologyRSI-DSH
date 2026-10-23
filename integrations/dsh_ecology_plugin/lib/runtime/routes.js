@@ -161,10 +161,12 @@ export function registerRuntimeRoutes(ctx, controller, config) {
         return;
       }
       const create = req.method === "POST" && ["/runs", "/runs/start"].includes(relative);
+      const formal = req.method === "POST"
+        ? relative.match(/^\/runs\/([^/]+)\/formal\/(prepare|close)$/) : null;
       const mutation = req.method === "POST"
         ? relative.match(/^\/runs\/([^/]+)\/(stages|start|pause|cancel|resume)$/)
         : null;
-      if (!create && !mutation) {
+      if (!create && !mutation && !formal) {
         safeJsonError(res, 404, "unknown_runtime_route");
         return;
       }
@@ -175,13 +177,16 @@ export function registerRuntimeRoutes(ctx, controller, config) {
         safeJsonError(res, 400, "invalid_request_body");
         return;
       }
-      const extra = create
+      const extra = formal
+        ? new Set(formal[2] === "prepare" ? ["binding", "formal_execution"] : ["formal_execution_id"])
+        : create
         ? new Set(["binding"])
         : mutation?.[2] === "stages"
           ? new Set(["stage", "request", "admission_id"])
           : new Set();
       if (!validIdentityBody(body, extra)
         || (mutation && decodeURIComponent(mutation[1]) !== body.run_id)
+        || (formal && decodeURIComponent(formal[1]) !== body.run_id)
         || (mutation?.[2] === "stages" && (
           typeof body.stage !== "string"
           || !body.stage
@@ -193,7 +198,9 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       }
       try {
         let result;
-        if (create) result = await controller.startRun(body);
+        if (formal) result = formal[2] === "prepare"
+          ? await controller.prepareFormalRun(body) : await controller.closeFormalRun(body);
+        else if (create) result = await controller.startRun(body);
         else if (mutation[2] === "stages") result = await controller.runStage(body);
         else if (mutation[2] === "start") result = await controller.activate(body);
         else if (mutation[2] === "pause") result = await controller.pause(body);

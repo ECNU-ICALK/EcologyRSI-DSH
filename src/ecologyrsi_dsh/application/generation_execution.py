@@ -474,7 +474,7 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
         return
 
     from ..evaluators.execution_validity import require_valid_execution
-    require_valid_execution(bundle.evaluation.metrics, screening_cohort.origin_count, phase="screening")
+    require_valid_execution(bundle.evaluation.metrics, screening_cohort.origin_count, phase="screening", metadata=screening_task.metadata)
     summary = bundle.evaluation.metrics.get("sample_execution")
     attempted_origins = (
         int(summary.get("attempted_origin_samples", 0))
@@ -562,7 +562,15 @@ def _prepare_formal_finalists(
         state = services.director.state(run_id)
         if state.run.status is not RunStatus.RUNNING:
             return ()
+        from .screening_repeatability import ensure_screening_repeatability
+        if not ensure_screening_repeatability(services, run_id, generation):
+            return ()
+        state = services.director.state(run_id)
         screening = _screening_records(state, generation)
+        from ..evolution import exploration_policy
+        if exploration_policy.enabled(state.task_manifest.metadata):
+            _director_mutation(services, "record_generation_behavior_comparison", run_id, generation=generation)
+            state = services.director.state(run_id)
         refreshed = tuple(state.candidate(item.candidate_id) for item in candidates)
         finalists = _select_screening_finalists(
             refreshed,
@@ -679,7 +687,7 @@ def _bounded_control_evaluation(
         metrics["sample_execution"] = {
             name: item
             for name, item in sample_execution.items()
-            if name not in {"action_catalog", "failure_preview"}
+            if name not in {"action_catalog", "failure_preview", "execution_behavior"}
         }
     value["metrics"] = metrics
     return {
@@ -2778,7 +2786,7 @@ def _execute_adaptive_holdout_arm(
     )
     metrics = dict(bundle.evaluation.metrics)
     from ..evaluators.execution_validity import require_valid_execution
-    require_valid_execution(metrics, cohort.origin_count, phase="holdout")
+    require_valid_execution(metrics, cohort.origin_count, phase="holdout", metadata=task.metadata)
     schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
     if task.metadata.get("sample_agent_mode") == "dsh_native_agent" and not schedule.quick:
         replicas = [replica_summary(scope, bundle.evaluation)]
@@ -2792,7 +2800,7 @@ def _execute_adaptive_holdout_arm(
                 task, candidate, proposal, scope=replica_scope, cohort=cohort,
                 algorithm_spec=spec, **replica_callbacks.evaluation_kwargs(),
             )
-            require_valid_execution(replica_bundle.evaluation.metrics, cohort.origin_count, phase="holdout_replica")
+            require_valid_execution(replica_bundle.evaluation.metrics, cohort.origin_count, phase="holdout_replica", metadata=task.metadata)
             replicas.append(replica_summary(replica_scope, replica_bundle.evaluation))
         metrics["agent_inference_stability"] = stability_evidence(replicas)
     summary = metrics.get("sample_execution")
@@ -2900,7 +2908,7 @@ def _execute_joint_holdout_recheck(services, run_id, original, cohort):
     bundle = services.evaluators.evaluate_scientific(task, candidate, proposal,
         scope=scope, cohort=cohort, algorithm_spec=spec, **callbacks.evaluation_kwargs())
     from ..evaluators.execution_validity import require_valid_execution
-    require_valid_execution(bundle.evaluation.metrics, cohort.origin_count, phase="holdout_recheck")
+    require_valid_execution(bundle.evaluation.metrics, cohort.origin_count, phase="holdout_recheck", metadata=task.metadata)
     if bundle.sample_results is None:
         raise RuntimeError("joint recheck is missing its durable sample-result checkpoint")
     evaluation = HoldoutEvaluation(
@@ -3425,6 +3433,11 @@ def _build_adaptive_analysis(
 ) -> Any:
     """Create one gate-derived analysis with bounded adaptive lineage evidence."""
 
+    from ..evolution.agent_policy import (
+        adaptive_tool_feedback_enabled, prior_candidate_tool_experience,
+    )
+    include_tool_feedback = adaptive_tool_feedback_enabled(state.task_manifest.metadata)
+
     formal_selection_getter = getattr(state, "formal_selection_for", None)
     formal_selection = (
         formal_selection_getter(generation)
@@ -3662,6 +3675,19 @@ def _build_adaptive_analysis(
                     },
                 }
             )
+        if include_tool_feedback:
+            # Holdout determines selection, but only sealed adaptation metrics
+            # may teach the next generation how its tools performed.
+            ranking[-1]["agent_tool_performance"] = deep_thaw_json(
+                prior_candidate_tool_experience(state, candidate, {}))
+        from ..evaluators.repeatability import summary_for as repeatability_summary
+        noise = repeatability_summary(state, generation)
+        if noise is not None:
+            ranking[-1]["same_genome_repeatability"] = noise
+        from ..evolution.agent_policy import prior_candidate_attribution
+        attribution = prior_candidate_attribution(state, candidate)
+        if attribution is not None:
+            ranking[-1]["candidate_agent_attribution"] = attribution
     ranking.sort(
         key=lambda row: (
             row["rank"] is None,

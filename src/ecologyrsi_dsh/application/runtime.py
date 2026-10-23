@@ -30,6 +30,9 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
     self.dsh_tools = DshToolService(self.ledger, activation_attestor=attest_activation)
     def abort_failed_evaluation(run_id: str) -> None:
         self.dsh_tools.close_run_admissions(run_id)
+        independent = getattr(self, "independent_evaluation", None)
+        if independent is not None and independent.abort_native_evaluation(run_id):
+            return
         manager = getattr(self, "auto_progress", None)
         if manager is not None:
             manager.abort_native_evaluation(

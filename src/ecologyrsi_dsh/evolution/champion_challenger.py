@@ -201,6 +201,10 @@ def _metric_contract(evaluation: BatchEvaluation) -> dict[str, Any] | None:
         "split_manifest_digest_sha256": metrics[
             "split_manifest_digest_sha256"
         ],
+        **({"comparison_retrieval_snapshot_digest": metrics["comparison_retrieval_snapshot_digest"]}
+           if "comparison_retrieval_snapshot_digest" in metrics else {}),
+        **({"prediction_formula_policy": metrics["prediction_formula_policy"]}
+           if "prediction_formula_policy" in metrics else {}),
     }
 
 

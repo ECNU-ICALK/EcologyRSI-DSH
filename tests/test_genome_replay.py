@@ -559,7 +559,9 @@ class GenomeReplayTests(unittest.TestCase):
         )
         self.assertEqual(reflection["avoid_behaviors"], [])
 
-    def test_dynamic_retrieval_event_replays_and_rejects_digest_tampering(self) -> None:
+    @patch.dict("os.environ", {"ECOLOGYRSI_KNOWLEDGE_ONLINE": "true"})
+    @patch("ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured", return_value=False)
+    def test_dynamic_retrieval_event_replays_and_rejects_digest_tampering(self, _configured) -> None:
         run_id = self._start_new("run:retrieval-replay")
         service = DshToolService(
             self.ledger,

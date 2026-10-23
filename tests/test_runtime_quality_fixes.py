@@ -251,6 +251,36 @@ class RuntimeProjectionTests(TestCase):
         self.assertIsNone(failure["provider_status"])
         self.assertTrue(failure["retryable"])
 
+    def test_pause_cause_survives_abort_of_other_inflight_children(self):
+        quota = event(1, "DshChildExecutionFailed", {
+            "error_code": "model_provider_quota_exhausted", "identity": {"stage": "sample.plan"},
+            "runtime_failure": {"error_code": "model_provider_quota_exhausted",
+                "provider_status": 429, "retryable": False, "failure_domain": "provider"}})
+        abort = event(3, "DshChildExecutionFailed", {
+            "error_code": "structured_child_aborted", "identity": {"stage": "sample.critic"}})
+        state = NS(task_manifest=NS(metadata={"strategy_model_id": "planner", "review_model_id": "critic"}),
+            events=(quota, event(2, "RunPaused", {"code": "model_provider_quota_exhausted"}), abort))
+        failure = _runtime_failure_projection(state)
+        self.assertEqual(failure["error_code"], "model_provider_quota_exhausted")
+        self.assertEqual(failure["model_route"], "planner")
+        self.assertEqual(failure["provider_status"], 429)
+        self.assertFalse(failure["retryable"])
+        self.assertEqual(failure["selection_reason"], "active_pause_cause")
+        # A fresh execution must not inherit the earlier pause diagnosis.
+        state.events += (event(4, "RunResumed", {}), event(5, abort.kind, abort.payload))
+        self.assertEqual(_runtime_failure_projection(state)["error_code"], "structured_child_aborted")
+        # Even another pause with the same code cannot borrow a prior execution's cause.
+        state.events += (event(6, "RunPaused", {"code": "model_provider_quota_exhausted"}),
+                         event(7, abort.kind, abort.payload))
+        self.assertEqual(_runtime_failure_projection(state)["error_code"], "structured_child_aborted")
+
+    def test_new_substantive_failure_is_not_hidden_by_pause_cause(self):
+        state = NS(task_manifest=NS(metadata={"strategy_model_id": "route"}), events=(
+            event(1, "RunPaused", {"code": "model_provider_quota_exhausted"}),
+            event(2, "DshChildExecutionFailed", {"error_code": "provider_queue_timeout",
+                "identity": {"stage": "sample.plan"}})))
+        self.assertEqual(_runtime_failure_projection(state)["error_code"], "provider_queue_timeout")
+
     def test_stage_usage_deduplicates_snapshots_and_sums_to_total(self):
         def usage(seq, session, stage, total, kind="DshSessionUsageRecorded"):
             return event(seq, kind, {"identity": {"session_id": session, "stage": stage, "child_reservation_id": session},

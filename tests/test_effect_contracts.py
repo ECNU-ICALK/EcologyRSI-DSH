@@ -39,6 +39,63 @@ def accepted_trace(*, tools=(), skills=(), attempt=1):
 
 
 class EffectContractTests(unittest.TestCase):
+    def test_confidence_branch_records_actual_threshold_crossing(self):
+        for old, new in ((0.5, 0.6), (0.6, 0.5)):
+            with self.subTest(old=old, new=new):
+                base = _seed_genome()
+                operation = {"op": "set_instruction_parameter", "role": "sample-planner",
+                             "name": "confidence_threshold", "value": new}
+                parent = mutate(base, {**operation, "value": old}) if old != 0.5 else base
+                runtime = {"remote_critic_policy": {
+                    "version": "uncertain_or_failure@1", "min_planner_confidence": old}}
+                child = mutate(parent, operation, runtime_constraints=runtime)
+                resolution = resolve_mutation_effects(parent, child, [operation], current_program_registry(),
+                                                     runtime_constraints=runtime)
+                metadata = {"genome_digest": child.genome_digest, "effect_resolution": resolution,
+                            "mutation_operations": [operation]}
+                common = dict(scope_digest="b" * 64, phase="screening", parameters={})
+                record = accepted_trace()
+                attempt = record["attempt_trace"][0]
+                required = 0.55 < new
+                attempt["critic_routing"] = {"policy_version": "uncertain_or_failure@1",
+                    "planner_confidence": 0.55, "threshold": new, "enabled": True, "required": required}
+                attempt["critic_decisions"] = ([{"status": "completed", "response_digest": "c" * 64}]
+                                               if required else [])
+                receipt = observe_edit_effects(metadata, [record], **common)
+                self.assertEqual(receipt["status"], "passed")
+                self.assertEqual(receipt["checks"][0]["eligible"], 1)
+                # The same confidence under both thresholds does not exercise a changed branch.
+                attempt["critic_routing"]["planner_confidence"] = 0.8
+                attempt["critic_routing"]["required"] = False
+                attempt["critic_decisions"] = []
+                self.assertEqual(observe_edit_effects(metadata, [record], **common)["status"], "not_exercised")
+                # Legacy traces lack the Host routing receipt: absence is not proof of no effect.
+                del attempt["critic_routing"]
+                self.assertEqual(observe_edit_effects(metadata, [record], **common)["status"], "inconclusive")
+
+    def test_confidence_branch_requires_consistent_host_routing_and_critic_evidence(self):
+        parent = _seed_genome()
+        op = {"op": "set_instruction_parameter", "role": "sample-planner",
+              "name": "confidence_threshold", "value": 0.6}
+        child = mutate(parent, op)
+        resolution = resolve_mutation_effects(parent, child, [op], current_program_registry())
+        metadata = {"genome_digest": child.genome_digest, "effect_resolution": resolution,
+                    "mutation_operations": [op]}
+        common = dict(scope_digest="b" * 64, phase="screening", parameters={})
+        record = accepted_trace()
+        attempt = record["attempt_trace"][0]
+        route = {"policy_version": "uncertain_or_failure@1", "planner_confidence": 0.55,
+                 "threshold": 0.6, "enabled": True, "required": True}
+        attempt["critic_routing"] = route
+        for critics in ([], [{"status": "failed", "response_digest": "c" * 64}]):
+            attempt["critic_decisions"] = critics
+            self.assertEqual(observe_edit_effects(metadata, [record], **common)["status"], "failed")
+        attempt["critic_decisions"] = [{"status": "completed", "response_digest": "c" * 64}]
+        for change in ({"threshold": 0.7}, {"planner_confidence": float("nan")},
+                       {"planner_confidence": True}, {"enabled": False}, {"policy_version": "always@1"}):
+            attempt["critic_routing"] = {**route, **change}
+            self.assertEqual(observe_edit_effects(metadata, [record], **common)["status"], "inconclusive")
+
     def test_outer_mutation_rechecks_actual_host_floor_before_inference(self):
         parent = _seed_genome()
         operation = {"op": "set_bounded_workflow_parameter", "name": "max_attempts", "value": 4}
@@ -192,6 +249,141 @@ class EffectContractTests(unittest.TestCase):
         self.assertEqual(mutation_effect_cells([{"op": "set_bounded_parameter", "name": "residual_scale_24h"}], cells),
                          ("air_temperature@24h", "co2_concentration@24h"))
         self.assertEqual(mutation_effect_cells([{"op": "author_role_directive"}], cells), tuple(sorted(cells)))
+
+    def test_joint_guidance_does_not_expand_numeric_effect_scope(self):
+        parent = mutate(_seed_genome(), {"op": "select_registered_pipeline",
+                                        "predictor_id": "greenhouse-baseline-aligned-ridge@1"})
+        operations = [
+            {"op": "set_bounded_parameter", "name": "residual_scale_24h", "value": 0.1},
+            {"op": "author_skill_program", "role": "sample-planner",
+             "skill_program": skill_preflight_programs()[0]},
+        ]
+        child = apply_genome_mutation(parent, {
+            "schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": operations,
+        }, _mutation_context(parent), current_program_registry())
+        resolution = resolve_mutation_effects(parent, child, operations, current_program_registry())
+        metadata = {"genome_digest": child.genome_digest, "effect_resolution": resolution,
+                    "mutation_operations": operations}
+        tool = {"tool_id": "candidate-model", "status": "completed",
+                "used_as_evidence": True, "dsh_tool_event_id": "event:changed-model"}
+        skill = {"trigger_status": "triggered", "output_digest": "c" * 64}
+        records = [
+            {"target": "co2_concentration", "horizon_hours": 6,
+             **accepted_trace(skills=[skill])},
+            {"target": "co2_concentration", "horizon_hours": 24,
+             **accepted_trace(tools=[tool], skills=[skill])},
+        ]
+        common = dict(scope_digest="b" * 64, phase="formal_batch",
+                      parameters=child.scientific_program["parameter_overrides"])
+        legacy = observe_edit_effects(metadata, records, **common)
+        self.assertEqual(legacy["checks"][0]["eligible"], 2)
+        self.assertEqual(hard_effect_failure({"sample_execution": {
+            "mutation_effect_receipt": legacy}}), "hard_mutation_effect_failed")
+
+        receipt = observe_edit_effects(metadata, records, **common,
+                                      scope_policy="per_predicate_impact@1")
+        checks = {row["predicate_id"]: row for row in receipt["checks"]}
+        self.assertEqual(checks["candidate_model_evidence"]["affected_cells"], ["co2_concentration@24h"])
+        self.assertEqual(checks["candidate_model_evidence"]["eligible"], 1)
+        self.assertEqual(checks["candidate_model_evidence"]["matched"], 1)
+        self.assertEqual(checks["skill_triggered"]["eligible"], 2)
+        self.assertIsNone(hard_effect_failure({"sample_execution": {"mutation_effect_receipt": receipt}}))
+        # Consumption remains mandatory on the cell actually changed.
+        records[1] = {"target": "co2_concentration", "horizon_hours": 24,
+                      **accepted_trace(skills=[skill])}
+        failed = observe_edit_effects(metadata, records, **common,
+                                     scope_policy="per_predicate_impact@1")
+        self.assertEqual(hard_effect_failure({"sample_execution": {
+            "mutation_effect_receipt": failed}}), "hard_mutation_effect_failed")
+
+    def test_pipeline_binds_effect_cells_by_host_sample_identity(self):
+        from copy import deepcopy
+        from ecologyrsi_dsh.evaluators.pipeline import EvaluationPipeline
+        parent = mutate(_seed_genome(), {"op": "select_registered_pipeline",
+                                        "predictor_id": "greenhouse-baseline-aligned-ridge@1"})
+        operation = {"op": "set_bounded_parameter", "name": "residual_scale_24h", "value": .1}
+        child = mutate(parent, operation)
+        proposal = SimpleNamespace(
+            proposal_id="proposal:effect-cells",
+            changes=child.scientific_program["parameter_overrides"],
+            metadata={"genome_digest": child.genome_digest, "mutation_operations": [operation],
+                      "mutation_effect_resolution": resolve_mutation_effects(
+                          parent, child, [operation], current_program_registry())})
+        task = SimpleNamespace(metadata={"mutation_effect_scope_policy": "per_predicate_impact@1"},
+                               digest="a" * 64)
+        records = [
+            {"sample_id": "six-hours", **accepted_trace()},
+            {"sample_id": "day-ahead", **accepted_trace(tools=[{
+                "tool_id": "candidate-model", "status": "completed",
+                "used_as_evidence": True, "dsh_tool_event_id": "event:model"}])},
+        ]
+        # Scoring order deliberately differs from the execution order.
+        rows = [{"sample_id": "day-ahead", "target": "co2_concentration", "horizon_hours": 24},
+                {"sample_id": "six-hours", "target": "co2_concentration", "horizon_hours": 6}]
+        before = deepcopy(records)
+        result = EvaluationPipeline._observed_edit_effects(task, proposal, records, rows)
+        self.assertEqual((result["checks"][0]["eligible"], result["checks"][0]["matched"]), (1, 1))
+        self.assertEqual(records, before)
+        for bad_records, bad_rows in (
+            (records, rows[:1]), (records, [*rows, rows[0]]),
+            ([*records, records[0]], rows), (records[:1], rows),
+            ([{**records[0], "horizon_hours": 24}, records[1]], rows),
+        ):
+            with self.subTest(records=bad_records, rows=bad_rows), self.assertRaises(ValueError):
+                EvaluationPipeline._observed_edit_effects(task, proposal, bad_records, bad_rows)
+
+    def test_scoped_local_contract_is_bound_to_frozen_policy_and_host_domains(self):
+        from copy import deepcopy
+        parent, proposal, context, legacy = local_result()
+        policy = "per_predicate_impact@1"
+        result = apply_local_edit_bundle(parent, proposal, context, current_program_registry(),
+                                        task=SimpleNamespace(metadata={"mutation_effect_scope_policy": policy}))
+        self.assertEqual(result.effect_contract["schema_version"], "ecologyrsi-dsh.edit-effect-contract/2")
+        # ridge_alpha affects all cells, regardless of model-declared expected cells.
+        self.assertEqual(result.effect_contract["effect_checks"][0]["affected_cells"],
+                         sorted(context.allowed_effect_cells))
+        payload = {"outcome": "applied", "effect_contract": result.effect_contract,
+                   "effect_resolution": result.effect_resolution}
+        args = dict(
+            revision=SimpleNamespace(parent_revision_id=context.candidate_revision_id, genome=result.child.to_dict()),
+            parent_revision=SimpleNamespace(revision_id=context.candidate_revision_id, genome=parent.to_dict()),
+            proposal={"operations": list(proposal.operations), "proposal": proposal.to_dict(),
+                      "evidence_scope_digest": context.evidence_scope_digest},
+            allowed_effect_cells=context.allowed_effect_cells,
+        )
+        validate_local_effect_event(payload, **args, scope_policy=policy)
+        with self.assertRaisesRegex(ValueError, "persisted effect contract"):
+            validate_local_effect_event(payload, **args)
+        with self.assertRaisesRegex(ValueError, "persisted effect contract"):
+            validate_local_effect_event({**payload, "effect_contract": legacy.effect_contract},
+                                        **args, scope_policy=policy)
+        forged = deepcopy(result.effect_contract)
+        forged["effect_checks"][0]["affected_cells"] = []
+        forged["contract_id"] = digest({k: v for k, v in forged.items() if k != "contract_id"})
+        with self.assertRaisesRegex(ValueError, "persisted effect contract"):
+            validate_local_effect_event({**payload, "effect_contract": forged}, **args, scope_policy=policy)
+        with self.assertRaisesRegex(ValueError, "frozen effect evidence"):
+            validate_local_effect_event({"outcome": "applied"}, **args, scope_policy=policy)
+
+        tool = {"tool_id": "candidate-model", "status": "completed",
+                "used_as_evidence": True, "dsh_tool_event_id": "event:model"}
+        records = [{"target": cell.rsplit("@", 1)[0], "horizon_hours": int(cell.rsplit("@", 1)[1][:-1]),
+                    **accepted_trace(tools=[tool] if index else [])}
+                   for index, cell in enumerate(context.allowed_effect_cells)]
+        metadata = {"genome_digest": result.child.genome_digest, "effect_contract": result.effect_contract,
+                    "effect_resolution": result.effect_resolution, "mutation_operations": list(result.operations)}
+        common = dict(scope_digest="b" * 64, phase="formal_batch",
+                      parameters=result.child.scientific_program["parameter_overrides"])
+        receipt = observe_edit_effects(metadata, records, **common, scope_policy=policy)
+        self.assertEqual(receipt["checks"][0]["eligible"], len(context.allowed_effect_cells))
+        self.assertEqual(hard_effect_failure({"sample_execution": {
+            "mutation_effect_receipt": receipt}}), "hard_mutation_effect_failed")
+        with self.assertRaisesRegex(ValueError, "frozen run"):
+            observe_edit_effects(metadata, records, **common)
+        with self.assertRaisesRegex(ValueError, "exact target and horizon"):
+            observe_edit_effects(metadata, [accepted_trace(tools=[tool])], **common, scope_policy=policy)
+        with self.assertRaisesRegex(ValueError, "unsupported mutation_effect_scope_policy"):
+            observe_edit_effects(metadata, records, **common, scope_policy="unknown")
 
     def test_native_proposer_retries_host_masked_edit_before_freezing_candidate(self):
         from ecologyrsi_dsh import EventLedger, EvolutionDirector

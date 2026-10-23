@@ -125,7 +125,7 @@
           </section>
 
           <section id="workspace-evaluation" class="workspace-panel" data-panel="evaluation" role="tabpanel" aria-labelledby="tab-evaluation" tabindex="0" hidden>
-            <header class="page-heading"><div><span>07</span><h1>独立评测</h1><p>完成进化后冻结候选版本，依次进行独立验证和最终测试。评测使用后续时间的数据，不修改候选，也不回流训练。</p></div></header>
+            <header class="page-heading"><div><span>07</span><h1>独立评测</h1><p>完成进化后冻结候选版本，依次进行独立验证和最终测试。两个阶段使用同一份固定方法资料，可在推理中途按需查询，禁止实时联网；后续时间的评测数据不回流训练。</p></div></header>
             <div class="panel settings-form">
               <p>两个阶段分别执行，每个预测时点仍由 Agent 分析。每个阶段进行两次独立推理，只展示汇总报告；同一评测分区只允许锁定一个候选。</p>
               <div class="form-actions"><button id="independent-evaluation-refresh" class="button button-quiet" type="button">读取评测状态</button></div>
@@ -168,7 +168,7 @@
                 </div>
                 <div class="parameter-switches">
                   <label class="checkbox-row"><input id="fixed-seed" name="fixed_seed" form="start-form" type="checkbox" checked><span><strong>固定随机种子</strong><small>保存运行种子；评测时点按冻结时间划分。相同种子不保证远程模型输出相同。</small></span></label>
-                  <label class="checkbox-row"><input id="knowledge-online-enabled" name="knowledge_online_enabled" form="start-form" type="checkbox" checked><span><strong>在线知识检索</strong><small>每轮检索公开论文元数据并冻结结果；网络失败时使用内置知识目录。</small></span></label>
+                  <label class="checkbox-row"><input id="knowledge-online-enabled" name="knowledge_online_enabled" form="start-form" type="checkbox" checked><span><strong>在线知识检索</strong><small>模型在研究、生成方案和评审中按需补查网页与论文；关闭后各阶段均不发起新联网检索。默认每阶段最多 8 次，每次最多 16 条来源。</small></span></label>
                 </div>
               </section>
               <aside class="parameter-aside">
@@ -334,7 +334,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.10.11 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.10.29 · 本地研究版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

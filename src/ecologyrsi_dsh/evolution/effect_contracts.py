@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
+import math
 from typing import Any
 
 from ..core.models import canonical_json, digest
@@ -14,6 +15,9 @@ from ..core.immutable import thaw_json
 from .mutation_specs import mutation_spec
 
 EFFECT_CONTRACT_SCHEMA = "ecologyrsi-dsh.edit-effect-contract/1"
+SCOPED_EFFECT_CONTRACT_SCHEMA = "ecologyrsi-dsh.edit-effect-contract/2"
+EFFECT_SCOPE_POLICY = "per_predicate_impact@1"
+EFFECT_SCOPE_POLICY_KEY = "mutation_effect_scope_policy"
 TRAINING_EVIDENCE_PHASES = frozenset({"screening", "formal_batch", "training_feedback"})
 _PREDICATES = {
     "candidate_model_evidence": "hard",
@@ -22,6 +26,11 @@ _PREDICATES = {
     "skill_triggered": "soft",
     "execution_branch_exercised": "hard",
 }
+
+def validate_effect_scope_policy(value):
+    if value not in (None, EFFECT_SCOPE_POLICY):
+        raise ValueError("unsupported mutation_effect_scope_policy")
+    return value
 
 
 def _sha(value: Any, name: str) -> str:
@@ -177,7 +186,8 @@ def resolve_mutation_effects(parent, child, operations, registry, *, runtime_con
     return {**body, "resolution_digest": digest(thaw_json(body))}
 
 
-def _effect_checks(resolution: Mapping) -> list[dict]:
+def _effect_checks(resolution: Mapping, *, scope_policy=None, affected_cells=()) -> list[dict]:
+    validate_effect_scope_policy(scope_policy)
     checks = {}
     for row in resolution["operations"]:
         predicate = ("strategy_program_evidence" if row["operation"] == "author_strategy_program" else "candidate_model_evidence" if row["effect_kind"] == "prediction" else
@@ -189,16 +199,25 @@ def _effect_checks(resolution: Mapping) -> list[dict]:
                 # A guidance-only revision is not measured merely by running
                 # unchanged arithmetic. Its effect needs paired observations.
                 predicate = "guidance_behavior_changed"
-        checks[predicate] = {"predicate_id": predicate, "semantics": _PREDICATES[predicate]}
+        predicates = [predicate]
         if row["operation"] == "author_skill_program":
-            checks["skill_triggered"] = {"predicate_id": "skill_triggered", "semantics": "soft"}
+            predicates.append("skill_triggered")
+        for predicate in predicates:
+            check = checks.setdefault(predicate, {"predicate_id": predicate, "semantics": _PREDICATES[predicate]})
+            if scope_policy:
+                # A numeric edit's consumption domain must not expand merely
+                # because a joint prompt/Skill edit affects other cells.
+                operation = {"op": row["operation"], **thaw_json(row["requested"])}
+                check["affected_cells"] = sorted(set(check.get("affected_cells", ()))
+                    | set(mutation_effect_cells([operation], affected_cells)))
     return list(checks.values())
 
 
 def build_edit_effect_contract(*, parent_revision_id: str, evidence_scope_digest: str,
                               evidence_refs, affected_cells, resolution: Mapping,
                               source_phase="formal_batch", hypothesis_ref=None,
-                              evaluation_policy_ref="frozen_host_scientific_gates") -> dict:
+                              evaluation_policy_ref="frozen_host_scientific_gates",
+                              scope_policy=None) -> dict:
     """Freeze a Host-built contract without adding model-authored score gates."""
     if source_phase not in TRAINING_EVIDENCE_PHASES:
         raise ValueError("mutation effects require completed training evidence")
@@ -211,14 +230,19 @@ def build_edit_effect_contract(*, parent_revision_id: str, evidence_scope_digest
     body = {key: value for key, value in resolution.items() if key != "resolution_digest"}
     if resolution.get("resolution_digest") != digest(thaw_json(body)):
         raise ValueError("effect resolution digest mismatch")
-    contract = {"schema_version": EFFECT_CONTRACT_SCHEMA, "parent_revision_id": parent_revision_id,
+    validate_effect_scope_policy(scope_policy)
+    contract = {"schema_version": SCOPED_EFFECT_CONTRACT_SCHEMA if scope_policy else EFFECT_CONTRACT_SCHEMA,
+                "parent_revision_id": parent_revision_id,
                 "parent_genome_digest": resolution["parent_genome_digest"],
                 "child_genome_digest": resolution["child_genome_digest"],
                 "operation_digest": resolution["operation_digest"], "resolution_digest": resolution["resolution_digest"],
                 "evidence_scope_digest": evidence_scope_digest, "source_phase": source_phase,
                 "evidence_refs": refs, "affected_cells": cells, "hypothesis_ref": hypothesis_ref,
-                "evaluation_policy_ref": evaluation_policy_ref, "effect_checks": _effect_checks(resolution),
+                "evaluation_policy_ref": evaluation_policy_ref,
+                "effect_checks": _effect_checks(resolution, scope_policy=scope_policy, affected_cells=cells),
                 "qualification": "behavior_effect_only_not_scientific_improvement"}
+    if scope_policy:
+        contract["scope_policy"] = scope_policy
     return {**contract, "contract_id": digest(contract)}
 
 
@@ -261,7 +285,9 @@ def check_edit_effect_contract(contract: Mapping, *, scope_digest: str, child_ge
     The caller resolves references against the frozen evaluation's receipts.
     """
     body = {key: value for key, value in contract.items() if key != "contract_id"}
-    if contract.get("schema_version") != EFFECT_CONTRACT_SCHEMA or contract.get("contract_id") != digest(thaw_json(body)):
+    scope_policy = validate_effect_scope_policy(contract.get("scope_policy"))
+    expected_schema = SCOPED_EFFECT_CONTRACT_SCHEMA if scope_policy else EFFECT_CONTRACT_SCHEMA
+    if contract.get("schema_version") != expected_schema or contract.get("contract_id") != digest(thaw_json(body)):
         raise ValueError("effect contract identity mismatch")
     if phase not in TRAINING_EVIDENCE_PHASES or contract["source_phase"] not in TRAINING_EVIDENCE_PHASES:
         raise ValueError("effect checks must not consume independent evaluation")
@@ -299,12 +325,13 @@ def verify_runtime_effects(resolution: Mapping, runtime_constraints: Mapping) ->
 
 
 def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope_digest: str,
-                        phase: str, parameters: Mapping) -> dict | None:
+                        phase: str, parameters: Mapping, scope_policy=None) -> dict | None:
     """Measure execution from complete Host traces; no labels or score are read.
 
     Soft instruction compliance stays inconclusive without a paired behavioral
     reference. A delivered prompt or a generated skill receipt is not success.
     """
+    validate_effect_scope_policy(scope_policy)
     if phase not in TRAINING_EVIDENCE_PHASES:
         return None
     operations = metadata.get("mutation_operations", ())
@@ -312,6 +339,8 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
     resolution = metadata.get("effect_resolution", metadata.get("mutation_effect_resolution"))
     if not operations and not isinstance(contract, Mapping):
         return None
+    if scope_policy and not isinstance(resolution, Mapping):
+        raise ValueError("scoped effects require Host-resolved operations")
     genome_json = metadata.get("evolution_genome_canonical_json")
     scientific = json.loads(genome_json)["scientific_program"] if isinstance(genome_json, str) else {}
     expected_predictor = scientific.get("predictor_ref", {}).get("id")
@@ -323,9 +352,23 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
         cells = {f"{record['target']}@{record['horizon_hours']}h" for record in records
                  if "target" in record and "horizon_hours" in record}
         affected_cells = set(mutation_effect_cells(operations, cells))
+    if isinstance(contract, Mapping) and contract.get("scope_policy") != scope_policy:
+        raise ValueError("effect scope policy differs from the frozen run")
+    checks = (thaw_json(contract["effect_checks"]) if isinstance(contract, Mapping) else
+              _effect_checks(resolution, scope_policy=scope_policy, affected_cells=affected_cells)
+              if isinstance(resolution, Mapping) else [])
+    domains = {check["predicate_id"]: set(check["affected_cells"]) for check in checks} if scope_policy else {}
+
+    def applies(predicate, record):
+        if not scope_policy:
+            return True
+        if "target" not in record or "horizon_hours" not in record:
+            raise ValueError("scoped effect observation requires an exact target and horizon")
+        return f"{record['target']}@{record['horizon_hours']}h" in domains.get(predicate, ())
 
     model_refs, skill_refs, branch_refs = set(), set(), set()
     eligible, model_matches, skill_eligible, triggered, branch_eligible, branches = 0, 0, 0, 0, 0, 0
+    model_eligible = program_eligible = 0
     trace_missing = False
     formula_observed = formula_matched = 0
     program_matches = 0
@@ -336,8 +379,35 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
             if f"{record['target']}@{record['horizon_hours']}h" not in affected_cells:
                 continue
         attempts = record.get("attempt_trace", ())
-        if isinstance(resolution, Mapping):
+        if isinstance(resolution, Mapping) and applies("execution_branch_exercised", record):
             for row in resolution["operations"]:
+                if row["axis"] == "instruction_parameter" and row["target"] == "confidence_threshold":
+                    old, new = row["before_effective_value"], row["after_effective_value"]
+                    for attempt in attempts:
+                        routing = attempt.get("critic_routing")
+                        if not isinstance(routing, Mapping):
+                            trace_missing = True
+                            continue
+                        confidence = routing.get("planner_confidence")
+                        numbers = (old, new, confidence)
+                        if (routing.get("policy_version") != "uncertain_or_failure@1"
+                                or routing.get("enabled") is not True
+                                or any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in numbers)
+                                or routing.get("threshold") != new
+                                or type(routing.get("required")) is not bool):
+                            trace_missing = True
+                            continue
+                        if (confidence < old) == (confidence < new):
+                            continue
+                        branch_eligible += 1
+                        branch_refs.add("trace:" + digest(attempt))
+                        expected = confidence < new
+                        critics = attempt.get("critic_decisions", ())
+                        observed = (any(c.get("status") == "completed" and c.get("response_digest")
+                                        for c in critics) if expected else not critics)
+                        if routing["required"] == expected and observed:
+                            branches += 1
+                    continue
                 if row["axis"] != "workflow_parameter" or row["target"] != "max_attempts":
                     continue
                 old, new = row["before_effective_value"], row["after_effective_value"]
@@ -353,6 +423,10 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
             trace_missing = True
             continue
         eligible += 1
+        model_applies = applies("candidate_model_evidence", record)
+        program_applies = applies("strategy_program_evidence", record)
+        model_eligible += int(model_applies)
+        program_eligible += int(program_applies)
         matched = False
         for tool in accepted.get("model_evidence", ()):
             ref = tool.get("dsh_tool_event_id")
@@ -364,8 +438,8 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
                          or (expected_predictor is not None and tool.get("tool_id") == expected_predictor
                              and tool.get("effective_parameters_digest") == expected_parameters))):
                 matched = True
-        model_matches += int(matched)
-        program_matches += int(any(tool.get("status") == "completed" and tool.get("used_as_evidence") is True
+        model_matches += int(model_applies and matched)
+        program_matches += int(program_applies and any(tool.get("status") == "completed" and tool.get("used_as_evidence") is True
             and tool.get("tool_id") == "candidate-program" and tool.get("program_digest") in program_digests
             for tool in accepted.get("model_evidence", ())))
         # A final-prediction digest also proves an observed direct/no-tool case.
@@ -377,14 +451,16 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
             model_refs.add("prediction:" + final_ref)
         skills = accepted.get("skill_evidence", ())
         for skill in skills:
+            if not applies("skill_triggered", record):
+                continue
             if skill.get("trigger_status") not in {"triggered", "not_triggered"}:
                 continue
             skill_eligible += 1
             triggered += int(skill["trigger_status"] == "triggered")
             skill_refs.add("skill:" + skill["output_digest"])
     observations = {
-        "strategy_program_evidence": {"eligible": eligible, "matched": program_matches, "evidence_refs": sorted(model_refs)},
-        "candidate_model_evidence": {"eligible": eligible, "matched": model_matches, "evidence_refs": sorted(model_refs)},
+        "strategy_program_evidence": {"eligible": program_eligible, "matched": program_matches, "evidence_refs": sorted(model_refs)},
+        "candidate_model_evidence": {"eligible": model_eligible, "matched": model_matches, "evidence_refs": sorted(model_refs)},
         "skill_triggered": {"eligible": skill_eligible, "matched": triggered, "evidence_refs": sorted(skill_refs)},
         "execution_branch_exercised": {"eligible": branch_eligible, "matched": branches, "evidence_refs": sorted(branch_refs)},
     }
@@ -404,7 +480,6 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
         # An outer proposal already binds immutable parent/child effects, but
         # has no local-parent revision contract. Measure the same registered
         # checks directly without fabricating such a contract or source scope.
-        checks = _effect_checks(resolution) if isinstance(resolution, Mapping) else []
         expected = {item["predicate_id"] for item in checks}
         checked, status = _checked_observations(checks, {k: v for k, v in observations.items() if k in expected})
         result = {"schema_version": "ecologyrsi-dsh.edit-effect-receipt/1", "contract_id": None,
@@ -420,5 +495,7 @@ def observe_edit_effects(metadata: Mapping, records: Sequence[Mapping], *, scope
                                   "status": "passed" if formula_matched else "not_exercised"}
     if isinstance(resolution, Mapping):
         result["resolution_digest"] = resolution["resolution_digest"]
+    if scope_policy:
+        result["scope_policy"] = scope_policy
     result.pop("receipt_digest", None)
     return {**result, "receipt_digest": digest(result)}

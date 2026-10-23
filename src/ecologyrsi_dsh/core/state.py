@@ -49,6 +49,7 @@ from ..evolution.schedule import (
 )
 from ..evaluators.epoch_cohorts import GenerationCohorts, RunAdaptationCohort
 from ..knowledge.algorithms import AlgorithmAttempt
+from ..knowledge.retrieval_policy import RETRIEVAL_POLICY_LIMITS
 from ..knowledge.autonomous_cycle import (
     GenerationReflection,
     GenerationSearchPlan,
@@ -223,8 +224,23 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
         "result",
         "result_digest",
     }
-    if not isinstance(value, Mapping) or set(value) != fields:
+    if (
+        not isinstance(value, Mapping)
+        or not fields.issubset(value)
+        or set(value) - fields - {"provider_diagnostics", "frozen_snapshot_digest"}
+    ):
         raise ValueError("DshRetrievalExecuted payload is invalid")
+    diagnostics = value.get("provider_diagnostics", {})
+    if (
+        not isinstance(diagnostics, Mapping)
+        or set(diagnostics) - {"primary_error_code", "additional_error_code", "fallback_error_code", "last_resort_error_code"}
+        or any(
+            not isinstance(code, str) or not code or len(code) > 80
+            or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in code)
+            for code in diagnostics.values()
+        )
+    ):
+        raise ValueError("DshRetrievalExecuted provider diagnostics are invalid")
     identity = value.get("identity")
     identity_fields = {
         "run_id",
@@ -283,9 +299,11 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
         or not retrieval_key
         or len(retrieval_key) > 120
         or not isinstance(queries, list)
-        or not 1 <= len(queries) <= 4
+        or not 1 <= len(queries) <= RETRIEVAL_POLICY_LIMITS["max_queries_per_call"][1]
         or not all(
-            isinstance(item, str) and item and len(item) <= 180 for item in queries
+            isinstance(item, str) and item
+            and len(item) <= RETRIEVAL_POLICY_LIMITS["max_query_chars"][1]
+            for item in queries
         )
         or value.get("query_digest") != digest(queries)
     ):
@@ -301,6 +319,16 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
     }
     fallback_reason = value.get("fallback_reason")
     route = value.get("provider_route")
+    snapshot_digest = value.get("frozen_snapshot_digest")
+    if route == "frozen_snapshot":
+        if (
+            not isinstance(snapshot_digest, str)
+            or len(snapshot_digest) != 64
+            or any(character not in "0123456789abcdef" for character in snapshot_digest)
+        ):
+            raise ValueError("DshRetrievalExecuted frozen snapshot digest is invalid")
+    elif "frozen_snapshot_digest" in value:
+        raise ValueError("DshRetrievalExecuted online route cannot claim a frozen snapshot")
     if (
         not isinstance(quality, Mapping)
         or set(quality) != quality_fields
@@ -321,8 +349,13 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
         or route not in {
             "dsh_primary",
             "dsh_primary_then_openalex_fallback",
+            "dsh_primary_with_deepseek",
+            "dsh_primary_with_deepseek_then_openalex_fallback",
+            "dsh_primary_then_openalex_then_crossref_fallback",
+            "dsh_primary_with_deepseek_then_openalex_then_crossref_fallback",
+            "frozen_snapshot",
         }
-        or (route == "dsh_primary") != (fallback_reason is None)
+        or (route in {"dsh_primary", "dsh_primary_with_deepseek", "frozen_snapshot"}) != (fallback_reason is None)
         or quality["sufficient"] != (fallback_reason is None)
     ):
         raise ValueError("DshRetrievalExecuted quality contract is invalid")
@@ -331,7 +364,7 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
         not isinstance(result, Mapping)
         or set(result) - {"content", "sources", "truncated"}
         or not isinstance(result.get("sources"), list)
-        or len(result["sources"]) > 8
+        or len(result["sources"]) > RETRIEVAL_POLICY_LIMITS["max_results"][1]
         or not isinstance(result.get("truncated"), bool)
         or (
             "content" in result
@@ -1577,6 +1610,7 @@ class RunState:
     candidate_identity_bindings: tuple[Mapping[str, Any], ...] = ()
     formal_stage_seals: tuple[Mapping[str, Any], ...] = ()
     candidate_screening_events: tuple[Event, ...] = ()
+    generation_behavior_events: tuple[Event, ...] = ()
     formal_selection_events: tuple[Event, ...] = ()
     screened_out_events: tuple[Event, ...] = ()
     candidate_revisions: tuple[CandidateRevision, ...] = ()
@@ -2112,6 +2146,14 @@ class RunStateReducer:
         if self.created.kind != "RunCreated":
             raise ValueError("run event stream must start with RunCreated")
         self.task = TaskManifest.from_dict(self.created.payload["task_manifest"])
+        from ..knowledge.comparison_retrieval import comparison_retrieval_snapshot
+        comparison_retrieval_snapshot(self.task.metadata)
+        from ..evaluators.repeatability import enabled as repeatability_enabled
+        repeatability_enabled(self.task.metadata)
+        from ..evolution.effect_contracts import validate_effect_scope_policy
+        validate_effect_scope_policy(self.task.metadata.get("mutation_effect_scope_policy"))
+        from ..evaluators.execution_validity import execution_outcome_policy_enabled
+        execution_outcome_policy_enabled(self.task.metadata)
         self.run = Run.from_dict(self.created.payload["run"])
         self.expected_seed_canonical = _expected_seed_canonical(self.created.payload, self.task)
         self.materialized_seed_canonical: str | None = None
@@ -2139,6 +2181,7 @@ class RunStateReducer:
         self.artifact_revision_bindings: dict[str, dict[str, Any]] = {}
         self.formal_stage_seals: dict[str, dict[str, Any]] = {}
         self.candidate_screening_events: dict[tuple[int, str], Event] = {}
+        self.generation_behavior_events: dict[int, Event] = {}
         self.formal_selection_events: dict[int, Event] = {}
         self.screened_out_events: dict[tuple[int, str], Event] = {}
         self.candidate_revisions: dict[str, CandidateRevision] = {}
@@ -2167,6 +2210,7 @@ class RunStateReducer:
         self.generation_selection_cohorts: dict[int, GenerationCohorts] = {}
         self.dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
         self.formal_stage_started = False
+        self.formal_retrieval_snapshot: dict[str, Any] | None = None
         self.active_gateway_circuit_pause: Event | None = None
         self.gateway_retry_last_by_scope: dict[tuple[int, int, str, str], Event] = {}
         self.gateway_retry_first_by_scope: dict[tuple[int, int, str, str], Event] = {}
@@ -2577,6 +2621,8 @@ class RunStateReducer:
                         raise ValueError("first-generation proposal parent genome mismatch")
                 elif not seed_control and item.parent_candidate_id is None:
                     raise ValueError("later DSH-native proposal requires a parent candidate")
+            from ..evolution.mechanisms import validate_state_proposal
+            validate_state_proposal(self, item)
             self.proposals[item.proposal_id] = item
         elif event.kind == "CandidateSpawned":
             item = Candidate.from_dict(payload["candidate"])
@@ -2744,6 +2790,13 @@ class RunStateReducer:
         the next group try. Cut verbatim out of the single chain ``apply``
         used to carry inline; the branches and their order are unchanged.
         """
+        if event.kind == "ScreeningRepeatabilityRecorded":
+            from ..evaluators.repeatability import validate_payload
+            if any(e.kind == event.kind and e.seq < event.seq
+                   and e.payload.get("generation") == payload.get("generation") for e in self.events):
+                raise ValueError("repeatability can be sealed only once per generation")
+            validate_payload(self.snapshot(), payload)
+            return True
         if event.kind == "CandidateScreeningRecorded":
             schema_version = payload.get("schema_version")
             expected_fields = {
@@ -2882,6 +2935,22 @@ class RunStateReducer:
                 if candidate.status is not CandidateStatus.SPAWNED and not race:
                     raise ValueError("only a new candidate can be screened")
                 self.candidate_screening_events[key] = event
+        elif event.kind == "GenerationBehaviorCompared":
+            from ..evolution.behavior_comparison import compare_generation_behaviors
+            generation = payload.get("generation")
+            if type(generation) is not int or generation != self.run.generation:
+                raise ValueError("behavior comparison is outside the current generation")
+            planned = self.generation_selection_cohorts.get(generation)
+            if planned is None:
+                raise ValueError("behavior comparison requires frozen cohorts")
+            records = [e.payload for (g, _), e in self.candidate_screening_events.items() if g == generation]
+            expected = compare_generation_behaviors(planned, records, metadata=self.task.metadata)
+            if canonical_json(payload) != canonical_json(expected):
+                raise ValueError("generation behavior comparison does not match executed evidence")
+            existing = self.generation_behavior_events.get(generation)
+            if existing is not None and canonical_json(existing.payload) != canonical_json(payload):
+                raise ValueError("conflicting generation behavior comparison")
+            self.generation_behavior_events.setdefault(generation, event)
         elif event.kind == "FormalSelectionCohortFrozen":
             if payload.get("schema_version") not in {
                 FORMAL_SELECTION_SCHEMA_V1,
@@ -2906,6 +2975,14 @@ class RunStateReducer:
             if set(payload) != expected_formal_fields:
                 raise ValueError("formal selection payload is invalid")
             generation = payload["generation"]
+            from ..evaluators.repeatability import enabled as repeatability_enabled, EVENT as repeatability_event
+            if repeatability_enabled(self.task.metadata) and not any(
+                    e.kind == repeatability_event and e.seq < event.seq
+                    and e.payload.get("generation") == generation for e in self.events):
+                raise ValueError("formal selection requires the sealed repeatability diagnostic")
+            from ..evolution import exploration_policy
+            if exploration_policy.enabled(self.task.metadata) and generation not in self.generation_behavior_events:
+                raise ValueError("formal selection requires the frozen behavior comparison")
             selected = payload["selected_candidate_ids"]
             schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
             if schedule.quick and not schedule.race:
@@ -3487,7 +3564,19 @@ class RunStateReducer:
         the next group try. Cut verbatim out of the single chain ``apply``
         used to carry inline; the branches and their order are unchanged.
         """
-        if event.kind == "FormalStageFrozen":
+        if event.kind == "FormalRetrievalSnapshotFrozen":
+            from ..knowledge.formal_retrieval import validate_formal_retrieval_snapshot
+
+            if not isinstance(payload, Mapping) or set(payload) != {"snapshot"}:
+                raise ValueError("FormalRetrievalSnapshotFrozen payload is invalid")
+            if not is_dsh_native_protocol(self.task):
+                raise ValueError("formal retrieval snapshot requires a native run")
+            if self.formal_stage_started:
+                raise ValueError("formal retrieval snapshot cannot be added after formal evaluation starts")
+            if self.formal_retrieval_snapshot is not None:
+                raise ValueError("run has multiple formal retrieval snapshot events")
+            self.formal_retrieval_snapshot = validate_formal_retrieval_snapshot(payload["snapshot"])
+        elif event.kind == "FormalStageFrozen":
             required = {
                 "stage",
                 "candidate_id",
@@ -3770,6 +3859,38 @@ class RunStateReducer:
             self.gateway_retry_dsh_success_seq[int(self.run.generation)] = event.seq
         elif event.kind == "DshRetrievalExecuted":
             _validate_dsh_retrieval_event(payload, run_id=self.run.run_id)
+            from ..knowledge.comparison_retrieval import (
+                COMPARISON_RETRIEVAL_STAGES, comparison_retrieval_snapshot,
+            )
+            comparison_snapshot = (
+                comparison_retrieval_snapshot(self.task.metadata)
+                if payload["identity"]["stage"] in COMPARISON_RETRIEVAL_STAGES else None
+            )
+            if (
+                (self.formal_retrieval_snapshot is not None or comparison_snapshot is not None)
+                and payload["provider_route"] != "frozen_snapshot"
+            ):
+                raise ValueError("DshRetrievalExecuted cannot use online evidence after snapshot freezing")
+            if payload["provider_route"] == "frozen_snapshot":
+                from ..knowledge.formal_retrieval import search_formal_retrieval_snapshot
+
+                snapshot = self.formal_retrieval_snapshot or comparison_snapshot
+                if (
+                    snapshot is None
+                    or payload["frozen_snapshot_digest"] != snapshot["snapshot_digest"]
+                ):
+                    raise ValueError("DshRetrievalExecuted frozen snapshot binding mismatch")
+                policy = snapshot["retrieval_policy"]
+                if (
+                    len(payload["queries"]) > policy["max_queries_per_call"]
+                    or any(len(query) > policy["max_query_chars"] for query in payload["queries"])
+                ):
+                    raise ValueError("DshRetrievalExecuted queries exceed the frozen snapshot policy")
+                expected_result = search_formal_retrieval_snapshot(
+                    snapshot, tuple(payload["queries"]), limit=policy["max_results"]
+                )
+                if payload["result"] != expected_result:
+                    raise ValueError("DshRetrievalExecuted frozen snapshot result mismatch")
         elif event.kind == "DshPredictionToolExecuted":
             from .agent_prediction import validate_tool_event
             validate_tool_event(payload)
@@ -4384,6 +4505,7 @@ class RunStateReducer:
                 raise ValueError("local edit outcome reason is invalid")
             validate_local_effect_event(
                 payload, revision=revision, proposal=proposal,
+                scope_policy=self.task.metadata.get("mutation_effect_scope_policy"),
                 parent_revision=self.candidate_revisions.get(revision.parent_revision_id),
                 allowed_effect_cells=tuple(f"{target}@{horizon}h"
                     for target in self.task.metadata.get("fitness_profile", {}).get("expected_targets", ())
@@ -4963,6 +5085,7 @@ class RunStateReducer:
             candidate_identity_bindings=tuple(self.candidate_identity_bindings.values()),
             formal_stage_seals=tuple(self.formal_stage_seals.values()),
             candidate_screening_events=tuple(self.candidate_screening_events.values()),
+            generation_behavior_events=tuple(self.generation_behavior_events.values()),
             formal_selection_events=tuple(self.formal_selection_events.values()),
             screened_out_events=tuple(self.screened_out_events.values()),
             candidate_revisions=tuple(self.candidate_revisions.values()),

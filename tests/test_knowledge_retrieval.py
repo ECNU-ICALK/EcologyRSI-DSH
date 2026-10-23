@@ -117,6 +117,19 @@ def _refresh_evidence_digest(item: dict) -> None:
 
 
 class KnowledgeRetrievalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests own their network fixtures; never discover a developer key.
+        patcher = mock.patch(
+            "ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured",
+            return_value=False,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        last_resort = mock.patch(
+            "ecologyrsi_dsh.knowledge.crossref_search.crossref_cards", return_value=[])
+        last_resort.start()
+        self.addCleanup(last_resort.stop)
+
     def test_tool_performance_without_sample_failures_preserves_metric_focus(
         self,
     ) -> None:
@@ -370,7 +383,10 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             )
 
         self.assertEqual(snapshot.retrieval_status, "catalog_online_fallback")
-        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(
+            urlopen.call_count,
+            len(knowledge_retrieval._openalex_query_plan(snapshot.query_terms)),
+        )
         sleep.assert_not_called()
         self.assertNotIn("sensitive upstream detail", " ".join(snapshot.warnings))
         ledger.close()
@@ -399,7 +415,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             "crop water prediction",
             "evapotranspiration model",
             "time series validation",
-            "unused seventh query",
+            *(f"extra method query {index}" for index in range(10)),
         )
 
         first = knowledge_retrieval._openalex_query_plan(queries)
@@ -567,7 +583,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
                 required_title_markers=("soil moisture",),
             )
 
-        self.assertEqual(calls, ["weak target query", "horizon query", "broad domain query"])
+        self.assertCountEqual(calls, ["weak target query", "horizon query", "broad domain query"])
         self.assertEqual([card.knowledge_id for card in cards], ["openalex:W1", "openalex:W2"])
 
     def test_model_authored_queries_run_before_host_fallbacks(self) -> None:
@@ -591,7 +607,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
                 priority_count=1,
             )
 
-        self.assertEqual(
+        self.assertCountEqual(
             calls,
             [
                 "model-authored weak CO2 query",
@@ -599,6 +615,67 @@ class KnowledgeRetrievalTests(unittest.TestCase):
                 "broad domain query",
             ],
         )
+
+    def test_all_queries_contribute_before_first_query_fills_budget(self) -> None:
+        def search(query, **_kwargs):
+            return [
+                KnowledgeCard(
+                    knowledge_id=f"openalex:{query}-{rank}", title=f"{query} {rank}",
+                    summary="metadata", source_url=f"https://example.org/{query}/{rank}",
+                    source_kind="paper", source_authority="OpenAlex",
+                    execution_status="metadata_only", selection_reason="research",
+                )
+                for rank in range(8)
+            ]
+        with mock.patch.object(knowledge_retrieval, "_openalex_cards", side_effect=search):
+            cards = knowledge_retrieval._openalex_cards_for_queries(
+                ("architecture", "calibration", "uncertainty"), limit=3, priority_count=3,
+            )
+        self.assertEqual(
+            [card.knowledge_id for card in cards],
+            ["openalex:architecture-0", "openalex:calibration-0", "openalex:uncertainty-0"],
+        )
+
+    def test_added_provider_survives_full_primary_page(self) -> None:
+        result = knowledge_retrieval.merge_dynamic_search_results(
+            {"sources": [{"url": f"https://primary.test/{n}"} for n in range(16)]},
+            {"sources": [{"url": f"https://additional.test/{n}"} for n in range(16)]},
+            max_sources=16,
+        )
+        self.assertEqual(len(result["sources"]), 16)
+        self.assertEqual(
+            sum("additional.test" in source["url"] for source in result["sources"]), 8,
+        )
+        self.assertTrue(result["truncated"])
+
+    def test_bootstrap_keeps_general_methods_and_adds_official_web_evidence(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
+        director.start_evolution(_task(online=True), run_id="run:broad-evidence")
+        with (
+            mock.patch.object(knowledge_retrieval, "_openalex_cards_for_queries", return_value=[]) as papers,
+            mock.patch(
+                "ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured",
+                return_value=True,
+            ),
+            mock.patch(
+                "ecologyrsi_dsh.knowledge.deepseek_search.search_deepseek_metadata",
+                return_value={"sources": [{
+                    "url": "https://example.org/uncertainty",
+                    "title": "Conformal prediction",
+                    "snippet": "Method applicability and assumptions.",
+                }], "truncated": False},
+            ),
+        ):
+            snapshot = retrieve_generation_knowledge(director.state("run:broad-evidence"))
+        self.assertNotIn("required_title_markers", papers.call_args.kwargs)
+        self.assertEqual(papers.call_args.kwargs["limit"], 16)
+        card = next(card for card in snapshot.cards if card.knowledge_id.startswith("deepseek:"))
+        self.assertFalse(card.executable)
+        self.assertEqual(card.abstract_summary, "Method applicability and assumptions.")
+        self.assertEqual(snapshot.retrieval_status, "catalog_and_online")
+        self.assertEqual(KnowledgeSnapshot.from_dict(snapshot.to_dict()), snapshot)
 
     def test_proposal_context_exposes_digest_bound_frozen_evidence(self) -> None:
         context = _evidence_snapshot().proposal_context()
@@ -694,7 +771,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
         too_many = copy.deepcopy(original)
         too_many["evidence_catalog"] = []
-        for index in range(25):
+        for index in range(33):
             item = copy.deepcopy(original["evidence_catalog"][0])
             item["knowledge_id"] = f"knowledge:{index}"
             _refresh_evidence_digest(item)

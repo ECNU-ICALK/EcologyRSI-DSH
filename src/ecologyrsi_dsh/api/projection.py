@@ -5,6 +5,7 @@ from __future__ import annotations
 from .shared import public_fields
 
 from ..evolution.diversity import enabled as diversity_enabled, diversity_report
+from ..evolution.branch_archive import comparison_summary
 
 from ..core.errors import safe_binding_diagnostics
 
@@ -82,7 +83,7 @@ from ..execution.sample_admission import (
     HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     MAX_SAMPLE_CONCURRENCY,
 )
-from .run_projection import build_configuration, build_frozen_feature_policies
+from .run_projection import build_configuration, build_frozen_feature_policies, build_repeatability_projection
 from .evidence_projection import candidate_score_evidence, evidence_funnel
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
@@ -455,8 +456,15 @@ def _rounds_projection(state: Any) -> list[dict[str, Any]]:
 
 
 def _runtime_failure_projection(state: Any) -> dict[str, Any] | None:
-    """Latest durable diagnostic, not an inference of current route health."""
+    """Durable failure, preserving a pause cause over shutdown cancellations."""
+    boundary = next((event for event in reversed(state.events) if event.kind in {
+        "RunPaused", "RunResumed", "RunStarted", "RunCompleted", "RunCancelled",
+    }), None)
+    pause_code = boundary.payload.get("code") if boundary and boundary.kind == "RunPaused" else None
+    latest = None
     for event in reversed(state.events):
+        if latest is not None and event.kind in {"RunResumed", "RunStarted"}:
+            break
         if event.kind == "DshChildExecutionFailed":
             failure = event.payload.get("runtime_failure")
             if not isinstance(failure, Mapping):
@@ -470,9 +478,16 @@ def _runtime_failure_projection(state: Any) -> dict[str, Any] | None:
             stage = event.payload["identity"]["stage"]
             metadata = state.task_manifest.metadata
             route = metadata.get("review_model_id" if stage in {"sample.critic", "sample.reflect", "generation.reflect"} else "strategy_model_id")
-            return {**dict(failure), "recorded_at": event.created_at,
+            projected = {**dict(failure), "recorded_at": event.created_at,
                     "stage": stage, "model_route": route, "source": "child_failure_ledger"}
-    return None
+            if latest is None:
+                latest = projected
+                if not pause_code or failure.get("error_code") != "structured_child_aborted":
+                    return latest
+            if event.seq < boundary.seq and failure.get("error_code") == pause_code:
+                return {**projected, "selection_reason": "active_pause_cause",
+                        "secondary_failure_code": latest["error_code"]}
+    return latest
 
 
 def _host_activity_projection(state: Any) -> dict[str, Any]:
@@ -1105,6 +1120,9 @@ def _public_evaluation_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     result.pop("sample_execution_records", None)
     result.pop("sample_execution_trace_archive", None)
     result.pop("promotion_block_evidence", None)
+    if isinstance(result.get("sample_execution"), Mapping):
+        result["sample_execution"] = {k: v for k, v in result["sample_execution"].items()
+                                     if k != "execution_behavior"}
     raw_controls = result.pop("generation_control_evaluations", None)
     if isinstance(raw_controls, list):
         controls: list[dict[str, Any]] = []
@@ -2697,7 +2715,12 @@ def _origin_live_projection_after(
             sample_events.append(event)
         elif event.kind == "DshChildExecutionFailed":
             identity = event.payload.get("identity")
-            if not isinstance(identity, Mapping) or identity.get("stage") != "sample.plan":
+            # Report failures of review/reflection children as well as the
+            # planner. Origin completion and liveness still use only planner
+            # reservations below; a failed review must not change those counts.
+            if not isinstance(identity, Mapping) or not str(
+                identity.get("stage") or ""
+            ).startswith("sample."):
                 continue
             reservation = str(identity.get("child_reservation_id") or "").strip()
             if reservation:
@@ -3143,24 +3166,48 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
     candidate_id = str(batch.get("candidate_id") or "")
     batch_index = int(batch.get("batch_index", -1))
     cohort_digest = str(batch.get("cohort_digest") or "")
+    # A paired batch shares its candidate/batch/cohort across two arms. The
+    # latest private result scope identifies the active arm, including pairs
+    # whose two arms happen to use the same candidate revision.
+    revision_start = next((event for event in reversed(events)
+        if event.seq > started.seq and event.kind == "EvaluationSampleResultsStarted"
+        and event.payload.get("candidate_id") == candidate_id
+        and isinstance(event.payload.get("checkpoint"), Mapping)
+        and event.payload["checkpoint"].get("evaluation_phase") == "formal_batch"
+        and event.payload["checkpoint"].get("formal_batch_index") == batch_index
+        and event.payload["checkpoint"].get("holdout_arm") is None
+        and event.payload["checkpoint"].get("cohort_digest") == cohort_digest), None)
+    checkpoint = revision_start.payload["checkpoint"] if revision_start is not None else {}
+    revision_id = checkpoint.get("candidate_revision_id") or str(batch.get("revision_id") or "") or None
+    scope_digest = checkpoint.get("execution_scope_digest")
     if any(
         item.scope.generation == generation
         and item.scope.candidate_id == candidate_id
         and item.scope.batch_index == batch_index
         and item.scope.cohort_digest == cohort_digest
+        and (revision_start is None or (
+            (not revision_id or getattr(item.scope, "candidate_revision_id", None) == revision_id)
+            and (not scope_digest or getattr(item.scope, "scope_key", None) == scope_digest)
+        ))
         for item in state.formal_batch_evaluations
     ):
         return None
     origin_total = max(1, int(batch.get("origin_count") or 0))
+    # Keep the original boundary for Host scope matching while excluding the
+    # preceding arm's DSH launches/receipts from remote activity counters.
+    view = state if revision_start is None else SimpleNamespace(
+        task_manifest=state.task_manifest,
+        events=(started, *(event for event in events if event.seq >= revision_start.seq)),
+    )
     return _merge_scoped_origin_progress(
-        state,
+        view,
         started=started,
         candidate_id=candidate_id,
         evaluation_phase="formal_batch",
         origin_total=origin_total,
         outcome_scope="active_formal_batch",
         formal_batch_index=batch_index,
-        candidate_revision_id=str(batch.get("revision_id") or "") or None,
+        candidate_revision_id=revision_id,
         cohort_digest=cohort_digest or None,
     )
 
@@ -3529,12 +3576,16 @@ def _adaptive_progress_projection(
         else 0
     )
     terminal_skipped = screening_skipped + formal_skipped + holdout_skipped
-    total = screening_total + formal_total + holdout_total
+    repeatability = build_repeatability_projection(state, generation)
+    repeatability_total = int(repeatability["total_origins"]) if repeatability else 0
+    repeatability_completed = int(repeatability["completed_origins"]) if repeatability else 0
+    total = screening_total + formal_total + holdout_total + repeatability_total
     completed = min(
         total,
         screening_completed
         + formal_completed
         + holdout_completed
+        + repeatability_completed
         + terminal_skipped,
     )
     phase_throughput_rows: list[tuple[datetime, int]] = []
@@ -3977,6 +4028,9 @@ def _adaptive_progress_projection(
         "epoch_progress_percent": epoch_progress_percent,
         "screening_completed_origins": min(screening_completed, screening_total),
         "screening_total_origins": screening_total,
+        "repeatability_completed_origins": repeatability_completed,
+        "repeatability_total_origins": repeatability_total,
+        "repeatability_status": repeatability["status"] if repeatability else None,
         "screening_skipped_origins": screening_skipped,
         "formal_completed_origins": min(
             formal_completed + live_formal_completed,
@@ -4895,6 +4949,16 @@ def _run_execution_progress(
             1,
         )
 
+    # The adaptive sample budget can be complete while the generation's
+    # reflection model is still working. Keep its durable stage visible;
+    # the sample counters describe completed evaluation, not active work.
+    if (retry_wait is None and stage_event is not None
+            and stage_event.payload.get("stage") == "reflection"
+            and str(stage_event.payload.get("status") or "").lower()
+            in {"started", "running", "failed"}):
+        current_stage = "reflection"
+        active_candidate_id = stage_event.payload.get("candidate_id")
+
     last_evidence_candidate_id = _last_evidence_candidate_id(state)
 
     if status in {"completed", "cancelled", "failed"}:
@@ -5674,6 +5738,10 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
         state, candidate, proposal, evaluation, promotion
     )
     result["score_evidence"] = candidate_score_evidence(state, candidate, evaluation)
+    from ..evolution.branch_archive import candidate_mechanism_evidence
+    mechanism = candidate_mechanism_evidence(state, candidate, proposal, summary_only=summary_only)
+    if mechanism is not None:
+        result["mechanism_evidence"] = mechanism
     if not summary_only:
         artifact = state.artifact_for(candidate.candidate_id)
         result["algorithm_execution"] = _algorithm_execution_projection(state, candidate)
@@ -6446,6 +6514,7 @@ def _projection_json(
         },
         "configuration": configuration,
         "frozen_feature_policies": build_frozen_feature_policies(task),
+        "inference_repeatability": build_repeatability_projection(state),
         "evolution_funnel": evidence_funnel(state),
         **({"evolution_diversity": diversity_report(state)} if diversity_enabled(metadata) else {}),
         "dataset": {
@@ -6622,6 +6691,7 @@ def _monitor_payload(
             "id": state.run.run_id,
             "run_id": state.run.run_id,
             "frozen_feature_policies": build_frozen_feature_policies(task),
+            "inference_repeatability": build_repeatability_projection(state),
             "status": state.run.status.value,
             "outcome": outcome,
             "termination_reason": termination_reason,
@@ -6650,6 +6720,7 @@ def _monitor_payload(
             "adaptive_trajectories": _adaptive_trajectory_projection(state),
             "evolution_evidence": _evolution_evidence_projection(state),
             "evolution_funnel": evidence_funnel(state),
+            "behavior_comparison": comparison_summary(state),
             "token_usage_available": run_wide_usage["available"],
             "tokens_used": run_wide_usage["tokens_used"],
             "token_limit": run_wide_usage["token_limit"],

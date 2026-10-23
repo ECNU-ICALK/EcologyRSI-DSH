@@ -55,6 +55,26 @@ class DshStructuredRoleRuntime:
         identity_digests: Mapping[str, str] | None = None,
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        retrieval_policy = getattr(self.admission, "stage_retrieval_policy_for_run", None)
+        if callable(retrieval_policy):
+            # Resolve before hashing so the prompt, replay identity and runtime
+            # evidence validation all see the same Host-owned policy snapshot.
+            frozen_retrieval_policy = retrieval_policy(run_id)
+            if frozen_retrieval_policy is not None:
+                context = {
+                    **context,
+                    "retrieval_policy": frozen_retrieval_policy.to_dict(),
+                }
+        formal_retrieval = getattr(self.admission, "formal_retrieval_context_for_run", None)
+        if callable(formal_retrieval):
+            frozen_context = formal_retrieval(run_id)
+            if frozen_context is not None:
+                context = {**context, "formal_retrieval": frozen_context}
+        comparison_retrieval = getattr(self.admission, "comparison_retrieval_context_for_stage", None)
+        if callable(comparison_retrieval):
+            frozen_comparison = comparison_retrieval(run_id, stage)
+            if frozen_comparison is not None:
+                context = {**context, **frozen_comparison}
         policy = research_execution_policy(context) if stage == "generation.research-synthesis" else None
         maximum = (
             policy["synthesis_max_output_tokens"]

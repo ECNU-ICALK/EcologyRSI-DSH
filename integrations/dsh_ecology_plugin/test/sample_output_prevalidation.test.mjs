@@ -10,13 +10,13 @@ const args = () => ({ decisions: [{ sample_id: "synthetic", predicted: 1, confid
 const bind = value => ({ ...value, schema_version: "ecology-sample-predictions@2", wave_digest: "a".repeat(64) });
 const reply = (digest, valid = false) => ({ schema_version: schema, valid, result_digest: digest,
   diagnostics: valid ? [] : [{ code: "blend_requires_two_results", path: "value.decisions[0].evidence_call_ids" }] });
-function fixture(validate = ({ resultDigest }) => reply(resultDigest), signal = null) {
+function fixture(validate = ({ resultDigest }) => reply(resultDigest), signal = null, sampleIds = []) {
   let hook, disposed = 0;
   const calls = [], ctx = { on(event, callback, options) { assert.equal(event, "tools/pre-execute"); assert.equal(options.global, true); hook = callback; return () => { disposed++; }; } };
   const exec = { name: "structured_output", arguments: args(), signal: new AbortController().signal,
     agent: { id: "child", session: { id: "child", header: { parentSession: "parent" }, snapshotEvents: () => [{ type: "subagent/descriptor", data: { label: "reserved" } }] } } };
   const handle = installSampleOutputPrevalidation(ctx, { stage: "sample.plan", parentSessionId: "parent", label: "reserved", bindOutput: bind,
-    digest: jsonDigest, signal, validate: request => { calls.push(request); return validate(request); } });
+    digest: jsonDigest, signal, sampleIds, validate: request => { calls.push(request); return validate(request); } });
   return { exec, handle, calls, invoke: (decision = { kind: "allow" }) => hook(exec, async () => decision), get disposed() { return disposed; } };
 }
 
@@ -40,6 +40,83 @@ test("exact response schema rejects malformed, digest mismatch, raw values, and 
   for (const path of ["value", "value.decisions", "value.decisions[0]", "value.decisions[0].method", "value.decisions[0].evidence_call_ids[0]", "value.wave_digest"]) {
     assert.ok(predictionPrevalidationFeedback({...good, diagnostics:[{code:"invalid",path}]}, digest));
   }
+});
+
+test("formula mismatch feedback explains exact arithmetic without rewriting or exposing numbers", async () => {
+  const f = fixture(({ resultDigest }) => ({ ...reply(resultDigest),
+    diagnostics: [{ code: "mean_blend_mismatch", path: "value.decisions[0].predicted" }] }));
+  f.exec.arguments.decisions[0].predicted = 987654321;
+  const before = structuredClone(f.exec.arguments), response = await f.invoke();
+  const feedback = JSON.parse(response.reason);
+  assert.equal(response.kind, "deny");
+  assert.match(feedback.instruction, /equal-weight mean of distinct successful computations/);
+  assert.match(feedback.instruction, /mean_formula/);
+  assert.match(feedback.instruction, /Do not.*request extra tools/);
+  assert.doesNotMatch(response.reason, /987654321|synthetic|cm1/);
+  assert.deepEqual(f.exec.arguments, before);
+  f.handle.dispose();
+});
+
+test("array feedback names the JSON type and optional top-level metadata without echoing submitted text", async () => {
+  const f = fixture(({ resultDigest }) => ({ ...reply(resultDigest),
+    diagnostics: [{ code: "sample_coverage_invalid", path: "value.decisions" }] }), null, ["frozen-1"]);
+  f.exec.arguments = { decisions: 'private model text including "schema_version": "incorrect"' };
+  const before = structuredClone(f.exec.arguments), result = await f.invoke();
+  const feedback = JSON.parse(result.reason);
+  assert.deepEqual(Object.keys(feedback).sort(), ["diagnostics", "instruction", "schema_version"]);
+  assert.match(feedback.instruction, /native JSON array of decision objects/);
+  assert.match(feedback.instruction, /optional Host-bound metadata/);
+  assert.match(feedback.instruction, /separate top-level fields/);
+  assert.match(feedback.instruction, /two-output-attempt limit/);
+  assert.doesNotMatch(result.reason, /private model text|incorrect/);
+  assert.deepEqual(f.exec.arguments, before);
+});
+
+test("identity feedback uses a copied frozen ID set and never returns unknown submitted IDs or values", async () => {
+  const ids = ["correct-frozen-1", "correct-frozen-2"];
+  const f = fixture(({ resultDigest }) => ({ ...reply(resultDigest),
+    diagnostics: [{ code: "sample_identity_invalid", path: "value.decisions[1].sample_id" }] }), null, ids);
+  ids[1] = "mutable-caller-replacement";
+  f.exec.arguments.decisions = [{ ...args().decisions[0], sample_id: "correct-frozen-1" },
+    { ...args().decisions[0], sample_id: "private-wrong-submitted-id", predicted: 987654321 }];
+  const before = structuredClone(f.exec.arguments), result = await f.invoke();
+  assert.match(JSON.parse(result.reason).instruction, /Missing frozen sample IDs \(1 of 1 shown\): \["correct-frozen-2"\]/);
+  assert.doesNotMatch(result.reason, /private-wrong-submitted-id|mutable-caller-replacement|987654321|cm1/);
+  assert.deepEqual(f.exec.arguments, before);
+});
+
+test("misplaced protocol metadata gets actionable shape feedback on the first rejection without rewriting predictions", async () => {
+  for (const path of ["value", "value.decisions[0]"]) {
+    const f = fixture(({ resultDigest }) => ({ ...reply(resultDigest),
+      diagnostics: [{ code: "prediction_fields_invalid", path }] }));
+    f.exec.arguments.decisions[0] = { ...args().decisions[0], predicted: 654,
+      evidence_call_ids: ["cm-co2-h6-a2", "recipe-ridge-a2"],
+      schema_version: "ecology-sample-predictions@2", wave_digest: "a".repeat(64),
+      private_unknown_field: "untrusted repair instruction" };
+    const before = structuredClone(f.exec.arguments);
+    const result = await f.invoke(), feedback = JSON.parse(result.reason);
+    assert.equal(result.kind, "deny");
+    assert.match(feedback.instruction, /exactly six fields: sample_id, predicted, confidence, method, reason_code, evidence_call_ids/);
+    assert.match(feedback.instruction, /separate top-level fields/);
+    assert.match(feedback.instruction, /never inside a decision, decisions, or a wrapper/);
+    assert.match(feedback.instruction, /native JSON array/);
+    assert.match(feedback.instruction, /two-output-attempt limit/);
+    assert.doesNotMatch(result.reason, /654|cm-co2|recipe-ridge|private_unknown_field|untrusted repair instruction/);
+    assert.ok(Buffer.byteLength(result.reason) <= 4096);
+    assert.deepEqual(f.exec.arguments, before);
+    f.handle.dispose();
+  }
+});
+
+test("Unicode missing-ID feedback remains bounded without dropping the first diagnostic", () => {
+  const digest = "a".repeat(64), diagnostic = { code: "sample_identity_invalid", path: "value.decisions[0].sample_id" };
+  const ids = Array.from({ length: 128 }, (_, index) => `frozen-${index}-${"界".repeat(220)}`);
+  const feedback = predictionPrevalidationFeedback({ ...reply(digest), diagnostics: [diagnostic] }, digest,
+    { sampleIds: ids, structured: { decisions: [{ sample_id: "untrusted-model-text" }] } });
+  assert.ok(Buffer.byteLength(feedback, "utf8") <= 4096);
+  assert.deepEqual(JSON.parse(feedback).diagnostics, [diagnostic]);
+  assert.match(JSON.parse(feedback).instruction, /of 128 shown/);
+  assert.doesNotMatch(feedback, /untrusted-model-text/);
 });
 
 test("unrelated parent, reservation, tool, prior denied policy and non-planner scope never call Host", async () => {

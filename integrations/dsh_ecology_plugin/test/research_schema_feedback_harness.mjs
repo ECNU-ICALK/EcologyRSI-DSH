@@ -38,7 +38,10 @@ const server=createServer(async(req,res)=>{try{
  if(outsider&&index===1){assert.equal(errors.length,1);assert.match(errors[0],/oneOf/,'Fixture must preserve the original ambiguous oneOf failure');assert.ok(!errors[0].includes(marker),'Unrelated child must not receive scoped research feedback');state.outsider.originalError=errors[0];}
  if(!outsider&&index===2){
   assert.ok(errors.length>=1);const error=errors.at(-1);assert.ok(error.includes(marker),'Next real HTTP request must include appended schema diagnostics');
-  for(let i=0;i<4;i++)assert.ok(error.includes(`value.candidate_directions[${i}].title`));
+  if(state.referenceTypo){
+   for(const field of ['value.evidence[0].evidence_ref','value.candidate_directions[0].evidence_refs[0]','allowed_identifiers_one_edit_away'])assert.ok(error.includes(field));
+   assert.ok(error.includes('fixture:public-paper'));
+  }else for(let i=0;i<4;i++)assert.ok(error.includes(`value.candidate_directions[${i}].title`));
   if(state.outsider.originalError)assert.ok(error.includes(state.outsider.originalError),'Original validator error must be retained verbatim');
   state.feedbackReachedNextHttp=true;
  }
@@ -68,7 +71,7 @@ try{
  manager=new RoleAgentManager(host.ctx);const manifest=JSON.parse(await readFile(path.join(pkg,'presets/preset-manifest.json'),'utf8'));
  host.ctx.on('tools/post-execute',async(exec,result,next)=>{const decision=await next();if(exec.name==='structured_output'){report.hook_diagnostics??=[];report.hook_diagnostics.push({name:exec.name,argument_type:typeof exec.arguments,argument_keys:Object.keys(exec.arguments||{}),is_error:result.isError,error:result.error,decision_kind:decision.kind,decision_has_value:Object.hasOwn(decision,'value'),decision_has_feedback:JSON.stringify(decision.content||[]).includes(marker),result_has_feedback:JSON.stringify(result.content||[]).includes(marker),signal_aborted:exec.signal?.aborted,session_id:exec.agent?.session?.id,parent_session:exec.agent?.session?.header?.parentSession,expected_parent:activeCase?.role?.sessionId,descriptor:exec.agent?.session?.snapshotEvents?.().findLast(e=>e.type==='subagent/descriptor')?.data});}return decision;},{global:true});
  offEvents=host.ctx.on('session/event',(session,event)=>{if(activeCase?.role&&session.header?.parentSession===activeCase.role.sessionId)activeCase.events.push({session_id:session.id,event});},{global:true});
- for(const spec of [{name:'missing-title-repaired',invalidAttempts:1,checkIsolation:true},{name:'two-invalid-title-stop',invalidAttempts:2,checkIsolation:false}]){
+ for(const spec of [{name:'missing-title-repaired',invalidAttempts:1,checkIsolation:true},{name:'two-invalid-title-stop',invalidAttempts:2,checkIsolation:false},{name:'reference-typo-repaired',invalidAttempts:1,referenceTypo:true},{name:'two-invalid-reference-stop',invalidAttempts:2,referenceTypo:true}]){
   const stage='generation.research-synthesis',contract=STAGES[stage],runId=`local-feedback-${spec.name}`;
   const state=activeCase={...spec,role:null,requests:[],outsider:{requests:[]},events:[],reservations:[],persisted:[],failures:[],feedbackReachedNextHttp:false};
   const sidecar={request:async(route,options)=>{
@@ -82,6 +85,7 @@ try{
   state.role=await manager.createRoleAgent({run_id:runId,role:contract.role,preset_id:manifest.presets.find(p=>p.role===contract.role).preset_id,model:'local-feedback/model',cwd:home});
   const context={research_execution_policy:{...RESEARCH_EXECUTION_POLICY},knowledge_snapshot:{evidence_catalog:[{knowledge_id:'fixture:public-paper'}]},required_candidate_direction_count:4,synthesis_contract:{mutation_directions_by_axis:{scientific_parameter:['increase','decrease'],registered_predictor:['select'],instruction_profile:['select'],instruction_parameter:['increase','decrease']},allowed_mutation_targets:{scientific_parameter:['ridge_alpha'],registered_predictor:['ridge@1'],instruction_profile:['balanced@1'],instruction_parameter:['confidence_threshold']}}};
   const transport=researchOutputTransport(stage,prepareStageOutputSchema(stage,await runner.schema(contract.file),context));state.schema=transport.schema;state.validOutput=fixture(transport.schema);state.validOutput.candidate_directions=Array.from({length:4},(_,i)=>({...state.validOutput.candidate_directions[0],direction_id:`fixture-direction-${i+1}`}));assert.ok(state.validOutput.candidate_directions.every(v=>typeof v.title==='string'));state.invalidOutput=structuredClone(state.validOutput);for(const d of state.invalidOutput.candidate_directions)delete d.title;
+  if(spec.referenceTypo){state.invalidOutput=structuredClone(state.validOutput);state.invalidOutput.evidence[0].evidence_ref='fixture:public-papr';state.invalidOutput.candidate_directions[0].evidence_refs=['fixture:public-papr'];}
   const binding={run_id:runId,stage,run_state_revision:1,stage_attempt:1,ledger_expected_revision:1,admission_id:`admission-${spec.name}`,idempotency_key:`idempotency-${spec.name}`,request:{role:contract.role,output_schema_id:contract.schema,max_tokens:16384,context,context_canonical_json:canonical(context),context_digest:jsonDigest(context),identity_digests:{genome_digest:'a'.repeat(64),compiled_behavior_digest:'b'.repeat(64),phenotype_instance_digest:'c'.repeat(64)}}};
   let result,caught;try{result=await runner.run(binding);}catch(e){caught=e;}await new Promise(resolve=>setTimeout(resolve,25));
   assert.equal(serverError,undefined,serverError?.message);assert.equal(state.requests.length,3,'Only Skill and two structured provider requests are allowed');assert.ok(state.feedbackReachedNextHttp);assert.equal(state.reservations.length,1,'No extra child repair');

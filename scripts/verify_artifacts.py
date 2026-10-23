@@ -46,11 +46,13 @@ CURRENT_DSH_PRESET_IDS = frozenset(
         "ecology-coordinator-v6",
         "ecology-researcher-v17",
         "ecology-candidate-proposer-v9",
-        "ecology-sample-planner-v14",
+        "ecology-sample-planner-v15",
         "ecology-sample-critic-v6",
         "ecology-generation-judge-v10",
     }
 )
+# Byte-preserved resources support historical run replay; they are not active roles.
+HISTORICAL_DSH_PRESET_IDS = frozenset({"ecology-sample-planner-v14"})
 _MANAGED_DSH_PRESET_ID = re.compile(
     r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"
 )
@@ -88,9 +90,9 @@ def assert_current_dsh_presets(names: set[str], label: str) -> None:
             candidate = parts[index + 1]
             if _MANAGED_DSH_PRESET_ID.fullmatch(candidate):
                 found.add(candidate)
-    if found != CURRENT_DSH_PRESET_IDS:
-        missing = sorted(CURRENT_DSH_PRESET_IDS - found)
-        obsolete = sorted(found - CURRENT_DSH_PRESET_IDS)
+    missing = sorted(CURRENT_DSH_PRESET_IDS - found)
+    obsolete = sorted(found - CURRENT_DSH_PRESET_IDS - HISTORICAL_DSH_PRESET_IDS)
+    if missing or obsolete:
         details = []
         if missing:
             details.append("missing: " + ", ".join(missing))

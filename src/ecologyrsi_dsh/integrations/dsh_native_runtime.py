@@ -84,6 +84,7 @@ _STATUS_KEYS = frozenset(
 _STAGE_KEYS = _MUTATION_KEYS | frozenset(
     {"structured", "result_digest", "session_id", "first_call_verified"}
 )
+_FORMAL_MUTATION_KEYS = _MUTATION_KEYS | frozenset({"status", "formal_execution_id"})
 
 
 def _nonempty_text(value: Any, name: str) -> str:
@@ -223,6 +224,38 @@ class DshNativeAgentRuntimeClient:
 
     def create_run(self, binding: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         return self._mutation("/api/ecology-agent-runtime/v1/runs", binding, cancelled)
+
+    def prepare_formal_run(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Create a fresh formal generation without reopening training."""
+        execution = request.get("formal_execution")
+        if not isinstance(execution, Mapping):
+            raise ValueError("formal runtime preparation requires its frozen execution identity")
+        return self._formal_mutation(request, "prepare", execution.get("execution_id"), "running")
+
+    def close_formal_run(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Dispose only the matching formal generation."""
+        return self._formal_mutation(request, "close", request.get("formal_execution_id"), "cancelled")
+
+    def _formal_mutation(self, request, operation, execution_id, expected_status):
+        self._validate_identity(request)
+        if (not isinstance(execution_id, str) or len(execution_id) != 64
+                or any(character not in "0123456789abcdef" for character in execution_id)):
+            raise ValueError("formal execution identity must be a lowercase SHA-256 digest")
+        run_id = request["run_id"]
+        payload = self._request("POST",
+            f"/api/ecology-agent-runtime/v1/runs/{quote(run_id, safe='')}/formal/{operation}",
+            body=request)
+        self._exact_keys(payload, _FORMAL_MUTATION_KEYS, "formal mutation")
+        self._validate_identity(payload)
+        if (payload["accepted"] is not True or payload["status"] != expected_status
+                or payload["formal_execution_id"] != execution_id
+                or any(payload[name] != request[name] for name in (
+                    "run_id", "run_state_revision", "stage_attempt",
+                    "ledger_expected_revision", "idempotency_key"))):
+            raise DshNativeRuntimeUnavailableError(
+                "DSH formal runtime receipt does not match its prepared execution.",
+                error_code="dsh_native_runtime_identity_mismatch")
+        return payload
 
     def run_canary(self, request: Mapping[str, Any]) -> dict[str, Any]:
         from .model_canary import CanaryBounds, canary_request, validate_canary_receipt

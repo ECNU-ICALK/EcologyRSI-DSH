@@ -225,7 +225,7 @@
         : "参数无效：" + optimizationControls.message + "（" + optimizationControlInputText(optimizationControls) + "）"],
       ["预测方案", "运行中由模型选择、切换和优化，可仅使用基线"],
       ["独立评测器", itemLabel(selectedCatalogItem("evaluators", "#evaluator-id"))],
-      ["知识检索", $("#knowledge-online-enabled").checked ? "每轮在线检索并冻结知识快照" : "仅使用内置知识目录"],
+      ["知识检索", $("#knowledge-online-enabled").checked ? "研究、生成方案与评审中按需检索" : "关闭各阶段联网检索，保留内置目录与已存结果"],
       ["运行环境", state.usingDemo ? "浏览器演示" : environmentText(state.catalog.dsh.environment)]
     ];
     $("#selected-summary").innerHTML = values.map(function (item) { return "<div><dt>" + escapeHTML(item[0]) + "</dt><dd title=\"" + escapeHTML(item[1]) + "\">" + escapeHTML(item[1]) + "</dd></div>"; }).join("");

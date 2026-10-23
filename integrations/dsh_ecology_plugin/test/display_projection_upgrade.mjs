@@ -95,10 +95,10 @@ if (args[0] === 'plugin') {
   assert.deepEqual(await snapshot(path.join(dshHome, ".agent-presets")), before);
   assert.equal(sha(await readFile(path.join(dshHome, "plugin-cache/ecologyrsi", path.basename(baseline)))), baselineDigest);
   // Same-id drift must remain rejected; do not relax the installer's protection.
-  const skill = "ecology-sample-planner-v14/skills/origin-vector-forecasting/SKILL.md";
+  const skill = "ecology-sample-planner-v15/skills/origin-vector-forecasting/SKILL.md";
   await writeFile(path.join(newPackage, "presets", skill), "changed under the same preset id\n");
   await assert.rejects(installPresetTree({ sourceRoot: path.join(newPackage, "presets"), dshHome, dshBin: hostBin }),
-    /refusing drifting preset: ecology-sample-planner-v14/);
+    /refusing drifting preset: ecology-sample-planner-v15/);
   assert.deepEqual(await snapshot(path.join(dshHome, ".agent-presets")), before);
   assert.equal(sha(await readFile(baseline)), baselineDigest);
   Object.assign(report, { passed: true, candidate_version: manifest.version, immutable_preset_files: Object.keys(before).length,

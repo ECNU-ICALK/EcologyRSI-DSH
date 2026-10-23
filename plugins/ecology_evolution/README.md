@@ -1,6 +1,6 @@
 # 生态模型进化工作台
 
-工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，当前交付版本为 **0.10.11 本地研究版**，适配 Harness 0.2.0-rc.2；历史实施记录不作为当前版本的科学验收结论。
+工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，当前版本为 **0.10.29 本地研究版**，适配 Harness 0.2.0-rc.2；历史实施记录不作为当前版本的科学验收结论。
 
 ## 当前默认流程
 
@@ -8,7 +8,7 @@
 
 新实验固定使用 `joint_plugin_epoch@2`：四候选与当前最佳版本各 10 时点初筛，一条主线的父子版本各 25 时点配对，候选与轮初最佳版本各 50 时点比较。基础最多 200 次预测时点执行，另预留最多 100 次用于一次双臂复核。每轮使用 85 个不同评分起点；复测不增加独立观测数，历史上下文与时间隔离另计。
 
-创建页可选择标准搜索或 `cellwise_training_evidence@1` 逐目标、逐时距改进；后者默认启用 `prediction_contribution@2` 训练预测贡献诊断，历史 `@1` 合同继续兼容读取。过程页从本运行冻结合同显示实际搜索方式、诊断与行为去重开关；部署新版本或修改创建表单不会给旧运行补开关。工程执行回执通过、同组搜索采纳和独立科学验证分别展示。等价候选标记不代表已跳过评测，事件说明会结合后续实际评测记录。
+创建页可选择标准搜索或 `cellwise_training_evidence@1` 逐目标、逐时距改进；新建原生自主实验启用 `prediction_contribution@3` 训练预测贡献诊断，历史 `@1`、`@2` 合同继续按原语义读取。过程页从本运行冻结合同显示实际搜索方式、诊断与行为去重开关；部署新版本或修改创建表单不会给旧运行补开关。工程执行回执通过、同组搜索采纳和独立科学验证分别展示。等价候选标记不代表已跳过评测，事件说明会结合后续实际评测记录。
 
 候选最多四处关联修改，局部一次修订最多两处；联合继承提示词、参数、Skill、受控计算与经验记忆。仅对满足基础门槛的临界收益或跨日收益混合结果追加一次复测，两次都须通过。证据不足保留原版本，搜索晋级与独立验证分别展示。表单名义默认 5 轮，会依据容量预检调整未手动修改的默认值。
 
@@ -49,7 +49,7 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
 页面加载后向父窗口发送握手，目标 origin 取 `parent_origin` 查询参数，缺省为自身 origin：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.10.11","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.10.29","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
 ```
 
 宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。消息可提供同源代理地址和内存中的能力令牌，身份、能力范围和模型目录可选。下列身份及模型 ID 仅为示例，必须替换为后端已登记值：

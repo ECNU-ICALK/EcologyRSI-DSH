@@ -256,12 +256,12 @@ def normalize_search_queries(
 
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TypeError(f"{name} must be an array")
-    if not minimum_items <= len(value) <= 6:
-        raise ValueError(f"{name} must contain between {minimum_items} and 6 items")
+    if not minimum_items <= len(value) <= 12:
+        raise ValueError(f"{name} must contain between {minimum_items} and 12 items")
     result: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(value):
-        query = _text(raw, f"{name}[{index}]", maximum=180)
+        query = _text(raw, f"{name}[{index}]", maximum=600)
         if any(ord(character) < 32 for character in query):
             raise ValueError(f"{name}[{index}] contains a control character")
         identity = query.casefold()
@@ -491,6 +491,7 @@ class CandidateDirection:
     expected_tradeoff: str
     success_criterion: str
     mutation_direction: str
+    mechanism_hypothesis: Mapping[str, Any] | None = None
     _legacy_mutation_direction_omitted: bool = field(
         default=False,
         init=False,
@@ -547,6 +548,10 @@ class CandidateDirection:
                 maximum_length=160,
             ),
         )
+        if self.mechanism_hypothesis is not None:
+            from ..evolution.mechanisms import validate_hypothesis
+            object.__setattr__(self, "mechanism_hypothesis", validate_hypothesis(
+                self.mechanism_hypothesis, axis=self.mutation_axis))
 
     @property
     def direction_digest(self) -> str:
@@ -567,6 +572,11 @@ class CandidateDirection:
         }
         if not self._legacy_mutation_direction_omitted:
             identity["mutation_direction"] = self.mutation_direction
+        if self.mechanism_hypothesis is not None:
+            from ..evolution.mechanisms import validate_hypothesis
+            from ..core.immutable import thaw_json
+            identity["mechanism_hypothesis"] = thaw_json(validate_hypothesis(
+                self.mechanism_hypothesis, axis=self.mutation_axis))
         return identity
 
     def to_dict(self) -> JsonObject:
@@ -591,9 +601,13 @@ class CandidateDirection:
             "expected_tradeoff",
             "success_criterion",
         }
-        if set(data) != required:
+        if set(data) not in (required, required | {"mechanism_hypothesis"}):
             raise ValueError("candidate direction fields do not match the contract")
         item = cls(**data)
+        if item.mechanism_hypothesis is not None:
+            from ..evolution.mechanisms import validate_hypothesis
+            object.__setattr__(item, "mechanism_hypothesis", validate_hypothesis(
+                item.mechanism_hypothesis, axis=item.mutation_axis))
         if supplied_digest is not None and supplied_digest != item.direction_digest:
             raise ValueError("candidate direction digest mismatch")
         return item

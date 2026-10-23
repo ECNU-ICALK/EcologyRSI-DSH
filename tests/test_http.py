@@ -698,7 +698,8 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(policies, detail["projection"]["frozen_feature_policies"])
         self.assertEqual(policies, {key: detail["projection"]["configuration"][key] for key in (
             "targeted_search_policy", "behavior_diagnostics_policy", "candidate_novelty_policy",
-            "candidate_executability_policy")})
+            "candidate_executability_policy", "candidate_exploration_policy",
+            "mutation_effect_scope_policy", "execution_outcome_policy", "local_edit_memory_policy")})
         self.assertNotIn("configuration", projection, "compact policies must not overwrite hydrated configuration")
         for required in (
             "projection_revision",

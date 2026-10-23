@@ -119,9 +119,11 @@
     var status = Number(error.status);
     var message = String(error.message || "");
     return error.name === "AbortError"
+      || error.name === "NetworkError"
+      || (error.status != null && status === 0)
       || status === 408
       || status >= 500
-      || /请求超时|timed out|timeout|服务不可用/i.test(message);
+      || /请求超时|timed out|timeout|服务不可用|failed to fetch|networkerror|network request failed|load failed|无法连接服务网关/i.test(message);
   }
 
   function reconcileTimedOutCreate(body) {
@@ -370,7 +372,7 @@
         state.createStatus = {
           state: "verifying",
           runId: null,
-          message: "创建请求响应超时，正在核对后台状态，请勿重复提交。"
+          message: "创建请求结果尚未确认，正在核对后台状态，请勿重复提交。"
         };
         showToast(state.createStatus.message);
         renderAll();
@@ -972,7 +974,9 @@
     if (!runId || state.usingDemo) { $("#independent-evaluation-status").textContent = "请先完成一个真实数据集的进化运行。"; return Promise.resolve(); }
     return request("/runs/" + encodeURIComponent(runId) + "/independent-evaluation").then(function (report) {
       if (independentEvaluationRequest !== requestId || !state.activeRun || state.activeRun.id !== runId) { return; }
-      $("#independent-evaluation-status").innerHTML = report.stages.map(function (stage) {
+      var snapshot = report.formal_retrieval;
+      var snapshotText = snapshot ? "<p>固定方法资料：" + escapeHTML(String(snapshot.document_count)) + " 条；实时联网已关闭；两次推理及最终测试共用快照 <code>" + escapeHTML(snapshot.snapshot_digest) + "</code>。</p>" : "<p>启动独立验证时冻结方法资料，最终测试复用同一快照。模型可随时查询固定库。</p>";
+      $("#independent-evaluation-status").innerHTML = snapshotText + report.stages.map(function (stage) {
         var assessment = stage.assessment;
         var outcomes = {passed: "通过", failed: "未通过", inconclusive: "证据不足"};
         var status = stage.status === "running" ? "正在执行" : stage.status === "completed" ? outcomes[stage.outcome] || stage.outcome : stage.status === "sealed" ? "已封存" : "尚未执行";

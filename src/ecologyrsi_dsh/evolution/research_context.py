@@ -6,8 +6,9 @@ from copy import deepcopy
 from typing import Any
 
 from ..core.model_execution_policy import research_execution_policy
-from ..core.models import digest
+from ..core.models import canonical_json, digest
 from ..knowledge.autonomous_cycle import GenerationReflection
+from ..knowledge.research_iteration import RESEARCH_PLAN_MAX_CHARS, RESEARCH_HOST_EXTENSIONS_MAX_CHARS, ResearchPlanSizeError
 from .genome import EcologyEvolutionPluginGenome, TRUST_REGION_MAX_NORMALIZED_STEP, parameter_trust_region_neighborhood
 
 
@@ -22,6 +23,46 @@ CONCISE_REPORT_LIMITS = {
         "capability_focus": 160, "expected_tradeoff": 240, "success_criterion": 240,
     },
 }
+
+
+def research_plan_size_feedback(error: ResearchPlanSizeError, output: Mapping[str, Any]) -> dict[str, Any]:
+    """Name the space left for model values after Host assembly, without editing them.
+
+    The measured difference includes normalized direction receipts, JSON keys,
+    search provenance and diagnostics. Host extensions have a separate bound.
+    Reserve a small margin because
+    subsequent normalization/diagnostics can change when the model rewrites text.
+    Counts are Unicode characters, matching canonical_json, not bytes or tokens.
+    """
+    fields = {name: len(canonical_json(output[name]))
+              for name in ("summary", "evidence", "candidate_directions")}
+    authored_chars = sum(fields.values())
+    overhead = max(0, error.actual_chars - authored_chars)
+    available = max(0, RESEARCH_PLAN_MAX_CHARS - overhead)
+    return {
+        "maximum_plan_chars": RESEARCH_PLAN_MAX_CHARS,
+        "maximum_host_extension_chars": RESEARCH_HOST_EXTENSIONS_MAX_CHARS,
+        "maximum_assembled_plan_chars": RESEARCH_PLAN_MAX_CHARS + RESEARCH_HOST_EXTENSIONS_MAX_CHARS,
+        "assembled_plan_chars": error.assembled_chars,
+        "checked_plan_chars": error.actual_chars,
+        "host_extension_chars": error.host_extension_chars,
+        "excess_plan_chars": error.actual_chars - RESEARCH_PLAN_MAX_CHARS,
+        "model_value_chars": fields,
+        "observed_host_and_normalization_chars": overhead,
+        "available_model_value_chars": available,
+        "recommended_model_value_chars": max(0, available - 512),
+        "measurement": "sum_of_canonical_JSON_character_counts_of_summary_evidence_candidate_directions_values",
+        "instruction": (
+            "The 24000-character plan ceiling includes Host metadata you cannot edit, "
+            "except the separately bounded exploration archive and mechanism catalog. "
+            "Keep the combined JSON values of summary, evidence and candidate_directions "
+            "within recommended_model_value_chars. Shorten repeated prose and evidence "
+            "summaries across the whole response; retain all required candidate slots, "
+            "exact identifiers, mechanism hypotheses and falsifiable claims. Do not copy "
+            "Host archives, catalogs or the parent plan into your output. Return the "
+            "complete corrected object; the Host will validate the assembled plan again."
+        ),
+    }
 
 
 def research_reflection_reference(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -135,6 +176,13 @@ def compact_research_context(context: Mapping[str, Any], *, parent: EcologyEvolu
         "behavior under sibling avoidance. Prose is audit-only; do not invent "
         "an instruction-profile weakness merely to fill a slot."
     )
+    if contract.get("candidate_portfolio"):
+        contract["direction_diversity"] = (
+            "Follow candidate_portfolio.slot_requirements. Each direction requires a bounded "
+            "mechanism_hypothesis from the Host catalog. Distinct prose, prompt or skill names "
+            "do not count as distinct mechanisms. Related joint operations remain allowed. "
+            "Mechanism diversity is a search constraint, not evidence of scientific improvement."
+        )
     evidence_contract = contract.get("evaluation_evidence_contract", {})
     if evidence_contract.get("selection_evidence_eligible") is True:
         evidence_contract["success_criterion_scope"] = (
@@ -146,6 +194,10 @@ def compact_research_context(context: Mapping[str, Any], *, parent: EcologyEvolu
         "schema_version": "ecologyrsi-dsh.research-synthesis-report-contract/2",
         "format": "concise@2",
         "length_limits_are_advisory": True,
+        "durable_plan_maximum_chars": RESEARCH_PLAN_MAX_CHARS,
+        "durable_host_extensions_maximum_chars": RESEARCH_HOST_EXTENSIONS_MAX_CHARS,
+        "durable_plan_limit_includes_host_metadata": True,
+        "separately_bounded_host_fields": ["exploration_archive", "candidate_portfolio"],
         **deepcopy(CONCISE_REPORT_LIMITS),
         "instruction": (
             "Return the required JSON directly: one brief summary, only evidence needed for the "
@@ -179,6 +231,10 @@ def research_report_size_diagnostics(value: Mapping[str, Any]) -> list[dict[str,
             measure(f"evidence[{index}].{field}", item[field], limits[f"{field}_max_chars"])
     for index, direction in enumerate(value["candidate_directions"]):
         measure(f"candidate_directions[{index}].evidence_refs", direction["evidence_refs"], limits["max_evidence_refs_per_direction"])
+        if "mechanism_hypothesis" in direction:
+            from ..core.models import canonical_json
+            measure(f"candidate_directions[{index}].mechanism_hypothesis",
+                    canonical_json(direction["mechanism_hypothesis"]), 800)
         for field, maximum in limits["direction_max_chars"].items():
             measure(f"candidate_directions[{index}].{field}", direction[field], maximum)
     return findings

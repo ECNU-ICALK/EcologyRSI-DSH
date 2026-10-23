@@ -7,8 +7,8 @@ from time import monotonic
 from types import MappingProxyType
 
 from ..core.agent_prediction import (
-    PREDICTION_TOOL_CALL_BUDGET, PredictionContractViolation,
-    frozen_prediction_methods, validate_predictions,
+    EVIDENCE_FORMULA_POLICY, PREDICTION_TOOL_CALL_BUDGET, PredictionContractViolation,
+    frozen_prediction_methods, unique_prediction_evidence, validate_evidence_formulas, validate_predictions,
 )
 from ..core.models import digest
 
@@ -37,7 +37,10 @@ def _public_numeric_parameters(parameters):
 
 class DshPredictionToolBinding:
     def __init__(self, *, run_id, stage_attempt, idempotency_key, wave_digest, sample_ids, catalog, executor,
-                 budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None, identity_digests=None):
+                 budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None, identity_digests=None,
+                 formula_policy=None):
+        if formula_policy not in (None, EVIDENCE_FORMULA_POLICY):
+            raise ValueError("unknown frozen prediction formula policy")
         if identity_digests is not None:
             fields = {"genome_digest", "compiled_behavior_digest", "phenotype_instance_digest"}
             if not isinstance(identity_digests, Mapping) or set(identity_digests) != fields or any(
@@ -57,7 +60,8 @@ class DshPredictionToolBinding:
         # attribute a tool call to an origin without joining through sample_ids.
         self.origin_timestamp = origin_timestamp
         self.mean_blend_required = mean_blend_required
-        self.allowed_methods = frozen_prediction_methods(allowed_methods)
+        self.formula_policy = formula_policy
+        self.allowed_methods = frozen_prediction_methods(allowed_methods, formula_policy=formula_policy)
         self.catalog = {item['tool_id']: dict(item) for item in catalog}
         for item in self.catalog.values():
             cost = item.get("call_cost", 1)
@@ -174,8 +178,24 @@ class DshPredictionToolBinding:
                 if result['status'] == 'completed':
                     self._predictions.setdefault(computation_key, (deepcopy(result['outputs']), event_id))
             self._session_calls.setdefault(session_id, set()).add(call_id)
-            return {'accepted': True, 'event_id': event_id, 'output_digest': p['output_digest'],
+            response = {'accepted': True, 'event_id': event_id, 'output_digest': p['output_digest'],
                     'remaining_calls': max(0, self.budget - self._spent()), **deepcopy(p['result'])}
+            if self.formula_policy == EVIDENCE_FORMULA_POLICY:
+                visible = {key: value for key, value in self.calls.items()
+                           if key in self._session_calls[session_id]}
+                refs = unique_prediction_evidence(visible, provenance_calls=self.calls)
+                if len(refs) >= 2:
+                    # Explicit arithmetic aid, not a forecast chosen by Host.
+                    # The Agent must still select and submit its own formula.
+                    response['mean_formula'] = {
+                        'formula_policy': self.formula_policy, 'method': 'blend',
+                        'evidence_call_ids': refs, 'weight_per_call': 1 / len(refs),
+                        'outputs': [{'sample_id': sample_id, 'predicted': math.fsum(
+                            next(row['predicted'] for row in visible[ref][0]['result']['outputs']
+                                 if row['sample_id'] == sample_id) / len(refs) for ref in refs
+                        )} for sample_id in self.sample_ids],
+                    }
+            return response
 
     def final_receipt(self, structured, *, session_id):
         rows = validate_predictions(structured, self.sample_ids, wave_digest=self.wave_digest,
@@ -192,7 +212,9 @@ class DshPredictionToolBinding:
                     'Agent cites tool evidence it did not receive or that failed', unavailable)
             self.validate_formulas(rows)
             return {
-                'schema_version': 'ecologyrsi-dsh.agent-prediction-receipt/2',
+                'schema_version': ('ecologyrsi-dsh.agent-prediction-receipt/3'
+                                   if self.formula_policy else 'ecologyrsi-dsh.agent-prediction-receipt/2'),
+                **({'formula_policy': self.formula_policy} if self.formula_policy else {}),
                 'wave_digest': self.wave_digest, 'sample_ids': list(self.sample_ids),
                 'result_digest': digest(structured),
                 'calls': [{'call_id': key, 'event_id': event_id, 'output_digest': p['output_digest']}
@@ -205,6 +227,10 @@ class DshPredictionToolBinding:
         Inputs are the cited successful outputs for this exact sample and wave.
         No labels, inferred weights, or new prediction values are introduced.
         """
+        if self.formula_policy == EVIDENCE_FORMULA_POLICY:
+            with self._lock:
+                validate_evidence_formulas(rows, self.calls)
+            return
         if not self.mean_blend_required:
             return
         with self._lock:

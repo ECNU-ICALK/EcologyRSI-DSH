@@ -1,3 +1,5 @@
+import { RETRIEVAL_KEY_CONTRACT } from "./retrieval.js";
+
 function objectInput(properties, required = Object.keys(properties)) {
   return Object.freeze({ type: "object", additionalProperties: false, required, properties });
 }
@@ -7,15 +9,15 @@ const text = (maxLength = 240) => ({ type: "string", minLength: 1, maxLength });
 export const TOOL_DEFINITIONS = Object.freeze({
   web_search: {
     name: "web_search",
-    description: "Search for evidence needed at the current reasoning step. DSH chooses the primary provider and EcologyRSI automatically handles fallback; provide queries only, never a provider.",
+    description: `Search when evidence would help the current reasoning step, including while planning, comparing or revising a proposal. In formal evaluation, formal_retrieval restricts this tool to the Host's frozen evidence library: queries may evolve, the library cannot change, and returned URLs are citations only and must never be read remotely. Otherwise follow the Host retrieval_policy budget and online switch. Prefer focused queries of at most 128 Unicode characters when feasible for compatibility across online sources; site:, lang:, after: and before: filters are supported by online search. Routing and fallback are Host-owned; provide queries and retrieval_key, never a provider. ${RETRIEVAL_KEY_CONTRACT}.`,
     parameters: objectInput({
       queries: {
         type: "array",
         minItems: 1,
-        maxItems: 4,
-        items: text(180),
+        maxItems: 12,
+        items: text(600),
       },
-      retrieval_key: text(120),
+      retrieval_key: { ...text(120), description: RETRIEVAL_KEY_CONTRACT },
     }),
   },
   ecology_execute_prediction_tool: {
@@ -35,6 +37,8 @@ export const BLOCKED_MODEL_IDENTITY_FIELDS = Object.freeze(new Set([
   "ledger_expected_revision", "session_id", "idempotency_key",
   "child_reservation_id", "activation_lease_id", "genome_digest",
   "compiled_behavior_digest", "phenotype_instance_digest",
+  "formal_retrieval", "comparison_retrieval", "comparison_retrieval_policy",
+  "comparison_retrieval_scope", "snapshot_digest",
 ]));
 
 export function assertModelArgumentsSafe(value, { labelFree = false, path = "$" } = {}) {

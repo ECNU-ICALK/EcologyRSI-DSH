@@ -94,7 +94,7 @@ test("role hosts do not require an unused Workflow service", async () => {
   const controller = new RuntimeController({}, {
     presetCatalog: [
       { preset_id: "ecology-coordinator-v6", tool_profile: "test" },
-      { preset_id: "ecology-sample-planner-v14", tool_profile: "test" },
+      { preset_id: "ecology-sample-planner-v15", tool_profile: "test" },
     ],
   });
   controller.roleAgents = {

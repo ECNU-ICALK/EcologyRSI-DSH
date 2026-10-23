@@ -21,7 +21,10 @@ from ..core.model_execution_policy import (
     SAMPLE_OPERATION_MIN_MAX_TOKENS,
 )
 from ..core.errors import dsh_native_runtime_evaluation_fatal
-from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions, validate_agent_review
+from ..core.agent_prediction import (
+    EVIDENCE_FORMULA_POLICY, PREDICTION_TOOL_CALL_BUDGET, frozen_prediction_methods,
+    validate_predictions, validate_agent_review,
+)
 from ..evolution.agent_policy import (
     allowed_prediction_methods as _allowed_prediction_methods,
     frozen_prediction_tool_call_budget,
@@ -458,7 +461,8 @@ class DshSampleCollaborationAdapter:
         origins = {request.origin_timestamp for request in frozen_requests}
         policy = context.get("evolution_context", {}).get("agent_policy") or {}
         profile = context.get("candidate_agent_profile") or {}
-        mean_required = (policy.get("inference", {}).get("prediction_formula_policy") == "mean-referenced-tools@1"
+        formula_policy = policy.get("inference", {}).get("prediction_formula_policy")
+        mean_required = (formula_policy == "mean-referenced-tools@1"
                          and profile.get("authored_directive", {}).get("blend_rule") == "mean")
         return self._prediction_tool_binder(
             run_id=self._decision_client.run_id,
@@ -474,6 +478,7 @@ class DshSampleCollaborationAdapter:
             allowed_methods=_allowed_prediction_methods(profile),
             identity_digests=self._decision_client.identity_digests,
             **({"mean_blend_required": True} if mean_required else {}),
+            **({"formula_policy": formula_policy} if formula_policy == EVIDENCE_FORMULA_POLICY else {}),
             origin_timestamp=next(iter(origins)) if len(origins) == 1 else None,
         )
 
@@ -951,9 +956,11 @@ class DshSampleCollaborationAdapter:
         # to the planner below and enforced on its answer by
         # validate_predictions, so the contract it read is the contract it is
         # held to.
-        allowed_methods = _allowed_prediction_methods(
-            decision_context.get("candidate_agent_profile")
-        )
+        formula_policy = (decision_context.get("agent_policy") or {}).get("inference", {}).get("prediction_formula_policy")
+        allowed_methods = tuple(sorted(frozen_prediction_methods(
+            _allowed_prediction_methods(decision_context.get("candidate_agent_profile")),
+            formula_policy=formula_policy,
+        )))
         context["prediction_contract"] = {
             "owner": "sample_agent", "max_prediction_tool_calls": prediction_tool_call_budget,
             "model_fit_cache_capacity": 8,
@@ -986,6 +993,22 @@ class DshSampleCollaborationAdapter:
                 "Agent owns final numeric predictions. Cite actual tool outputs used; do not claim unused changes were activated.")
             if isinstance(profile, Mapping) and profile.get("strategy_program"):
                 context["candidate_strategy_guidance"] = profile["strategy_program"]["planner_prompt"]
+        if formula_policy == EVIDENCE_FORMULA_POLICY:
+            context["prediction_contract"]["formula_policy"] = formula_policy
+            context["prediction_contract"]["final_prediction"] = (
+                "Submit only a permitted executable formula. For method=model, cite exactly one successful "
+                "call and copy its predicted number for that exact sample. For method=blend, cite at least "
+                "two distinct successful computations and submit their equal-weight arithmetic mean: "
+                "predicted=sum(cited sample predictions)/number of cited calls. Weights are fixed at 1/n, "
+                "nonnegative and normalized. Duplicate requests with equivalent default parameters are "
+                "one computation, never extra votes. Tool responses provide an optional mean_formula "
+                "with exact numeric outputs and evidence_call_ids; copying it avoids arithmetic rounding "
+                "errors. Do not add offsets, invent weights, round copied values, or use direct/adjusted. "
+                "For a different formula, evolve a frozen candidate-program in a subsequent candidate; "
+                "its executed output can be copied with method=model. Host validates your submitted values "
+                "against real evidence and rejects mismatches; it never silently replaces a prediction. "
+                "Tool choice and permitted mid-reasoning retrieval remain autonomous."
+            )
         catalog = self._available_tool_catalog(selected[0], plans[indices[0]], role=role)
         try:
             with self._prediction_tool_context(
@@ -1031,16 +1054,26 @@ class DshSampleCollaborationAdapter:
                 "execution_owner": "dsh_agent_prediction",
                 **({"formula_status": "passed" if row["method"] == "blend" else "not_exercised"}
                    if binding.mean_blend_required else {}),
+                **({"formula_status": "passed" if row["method"] == "blend" else "model_copy_passed"}
+                   if binding.formula_policy == EVIDENCE_FORMULA_POLICY else {}),
             }
             agent_step = {
                 "role": "remote_planner_agent", "decision": "submit_prediction:" + row["method"],
                 "status": "completed", "model_id": self.strategy_model_id,
                 "reason_code": row["reason_code"], "confidence": row["confidence"],
                 "response_digest": digest(row),
+                "critic_routing": {
+                    "policy_version": (self.remote_critic_policy or {}).get("version", "always@1"),
+                    "planner_confidence": row["confidence"],
+                    "threshold": (self.remote_critic_policy or {}).get("min_planner_confidence"),
+                    "required": self._requires_remote_review(row),
+                    "enabled": self.remote_review_enabled,
+                },
             }
             item = {"index": index, "request": request, "predicted": row["predicted"],
                     "agent_steps": [agent_step], "tool_step": final_step,
                     "decision": row, "tool_trace": tool_trace,
+                    "evaluation_scope": context.get("evaluation_scope"),
                     "causal_context": origin_contexts[samples[indices.index(index)]["context_ref"]]}
             successful.append(item)
             outcomes[index] = SamplePredictionOutcome(sample_id=request.sample_id, result={
@@ -1110,15 +1143,22 @@ class DshSampleCollaborationAdapter:
             "causal_context": item["causal_context"],
             "tool_evidence": item["tool_trace"],
         } for item in successful]
+        review_context = {"review_contract": {
+            "owner": "sample_agent", "phase": "pre_score_label_free",
+            "actions": ["accept", "revise", "uncertain"],
+            "revision": "Return evidence concerns to the Agent under its existing attempt budget; never substitute a tool value",
+            "hard_constraints": "Host validates finite values and physical bounds after Agent execution",
+        }}
+        # The planner groups each wave by its frozen decision-context digest.
+        # Carry its formal phase/replica through review, but preserve historical
+        # critic wave hashes when no evaluation scope was supplied.
+        scope = successful[0].get("evaluation_scope")
+        if scope is not None:
+            review_context["evaluation_scope"] = scope
         try:
             raw = self._agent_decide(
                 self.review_model_id, role="critic", samples=samples,
-                context={"review_contract": {
-                    "owner": "sample_agent", "phase": "pre_score_label_free",
-                    "actions": ["accept", "revise", "uncertain"],
-                    "revision": "Return evidence concerns to the Agent under its existing attempt budget; never substitute a tool value",
-                    "hard_constraints": "Host validates finite values and physical bounds after Agent execution",
-                }}, available_tools=[], allow_format_retry=False, diagnostics=diagnostics,
+                context=review_context, available_tools=[], allow_format_retry=False, diagnostics=diagnostics,
             )
             reviews = {row["sample_id"]: row for row in validate_agent_review(raw, [s["sample_id"] for s in samples])}
         except SampleExecutionControlError:

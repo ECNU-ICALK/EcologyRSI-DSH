@@ -5,6 +5,9 @@ const MAX_REQUEST_TIMEOUT_MS = 600_000;
 const PUBLIC_SIDECAR_ERROR_CODES = new Set([
   "dsh_tool_admission_closed",
   "dsh_tool_authorization_failed",
+  "dsh_retrieval_online_disabled",
+  "dsh_retrieval_budget_exhausted",
+  "dsh_formal_retrieval_isolation",
   "dsh_prediction_binding_closed",
   "structured_role_operational_timeout",
   "structured_result_persistence_unavailable",

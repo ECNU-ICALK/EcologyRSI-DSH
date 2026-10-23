@@ -29,6 +29,9 @@ export function roleSessionFingerprint(binding) {
   const preimage = JSON.stringify([
     ROLE_SESSION_PROVENANCE_VERSION,
     ...ROLE_SESSION_PROVENANCE_FIELDS.map((field) => String(binding?.[field] ?? "")),
+    ...(binding?.formal_execution_id === undefined ? [] : [
+      "formal_execution_id", String(binding.formal_execution_id),
+    ]),
   ]);
   return createHash("sha256").update(preimage, "utf8")
     .digest("hex").slice(0, ROLE_SESSION_FINGERPRINT_LENGTH);

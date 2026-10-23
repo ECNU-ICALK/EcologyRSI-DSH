@@ -25,6 +25,20 @@ from ..knowledge.retrieval import (
     normalize_dynamic_search_result,
     search_openalex_metadata,
 )
+from ..knowledge.retrieval_policy import (
+    RETRIEVAL_POLICY_LIMITS,
+    RetrievalPolicy,
+    resolve_retrieval_policy,
+)
+from ..knowledge.formal_retrieval import (
+    FORMAL_RETRIEVAL_SNAPSHOT_EVENT,
+    search_formal_retrieval_snapshot,
+    validate_formal_retrieval_snapshot,
+)
+from ..knowledge.comparison_retrieval import (
+    COMPARISON_RETRIEVAL_STAGES, comparison_retrieval_context,
+    comparison_retrieval_snapshot,
+)
 
 
 ROLE_TOOLS: dict[str, frozenset[str]] = {
@@ -40,9 +54,12 @@ ROLE_TOOLS: dict[str, frozenset[str]] = {
 
 _PREDICTION_TOOL_NAME = "ecology_execute_prediction_tool"
 _RETRIEVAL_TOOL_NAME = "web_search"
-_RETRIEVAL_MAX_CALLS_PER_STAGE = 3
-_RETRIEVAL_MAX_QUERIES = 4
-_RETRIEVAL_QUERY_MAX_CHARS = 180
+_CROSSREF_RESEARCH_STAGES = frozenset({
+    "generation.research", "generation.search-plan", "generation.research-synthesis",
+    "candidate.propose", "candidate.local_edit", "generation.reflect",
+})
+_RETRIEVAL_MAX_QUERIES = RETRIEVAL_POLICY_LIMITS["max_queries_per_call"][1]
+_RETRIEVAL_QUERY_MAX_CHARS = RETRIEVAL_POLICY_LIMITS["max_query_chars"][1]
 _RETRIEVAL_IDEMPOTENCY_MAX_CHARS = 120
 _RETRIEVAL_TECHNICAL_FAILURES = frozenset(
     {
@@ -172,6 +189,18 @@ class DshToolAuthorizationError(PermissionError):
     error_code = "dsh_tool_authorization_failed"
 
 
+class DshRetrievalDisabledError(DshToolAuthorizationError):
+    error_code = "dsh_retrieval_online_disabled"
+
+
+class DshRetrievalBudgetError(DshToolAuthorizationError):
+    error_code = "dsh_retrieval_budget_exhausted"
+
+
+class DshFormalRetrievalIsolationError(DshToolAuthorizationError):
+    error_code = "dsh_formal_retrieval_isolation"
+
+
 from ..core.errors import DshToolAdmissionClosedError
 
 
@@ -252,6 +281,8 @@ class DshToolService:
         ledger: Any,
         *,
         retrieval_fallback: Callable[..., Mapping[str, Any]] | None = None,
+        retrieval_additional: Callable[..., Mapping[str, Any]] | None = None,
+        retrieval_last_resort: Callable[..., Mapping[str, Any]] | None = None,
         monotonic_ms: Callable[[], float] | None = None,
         activation_attestor: Callable[..., bool] | None = None,
     ) -> None:
@@ -268,8 +299,25 @@ class DshToolService:
         # bounded stripe set avoids a process-wide bottleneck and does not
         # retain one lock per unbounded stream of requests.
         self._launch_locks = tuple(Lock() for _ in range(32))
-        self._retrieval_lock = Lock()
+        self._retrieval_lock = RLock()
+        self._retrieval_call_locks = tuple(Lock() for _ in range(32))
+        self._retrieval_reservations: dict[tuple[Any, ...], dict[str, str]] = {}
+        self._formal_retrieval_bindings: dict[str, tuple[object, dict[str, Any]]] = {}
         self._retrieval_fallback = retrieval_fallback or search_openalex_metadata
+        # Explicit provider injection owns its own fallback chain (including tests).
+        if retrieval_last_resort is None and retrieval_fallback is None:
+            from ..knowledge.crossref_search import search_crossref_metadata
+
+            retrieval_last_resort = search_crossref_metadata
+        self._retrieval_last_resort = retrieval_last_resort
+        if retrieval_additional is None:
+            from ..knowledge.deepseek_search import (
+                is_deepseek_search_configured,
+                search_deepseek_metadata,
+            )
+            if is_deepseek_search_configured():
+                retrieval_additional = search_deepseek_metadata
+        self._retrieval_additional = retrieval_additional
         self._monotonic_ms = monotonic_ms or (
             lambda: time.monotonic_ns() / 1_000_000
         )
@@ -311,7 +359,8 @@ class DshToolService:
     @contextmanager
     def bind_prediction_tool(self, *, run_id, stage_attempt, idempotency_key,
                              wave_digest, sample_ids, catalog, executor, identity_digests,
-                             prediction_tool_call_budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None):
+                             prediction_tool_call_budget=None, origin_timestamp=None, mean_blend_required=False, allowed_methods=None,
+                             formula_policy=None):
         """Bind a bounded model/tool catalog to one authenticated Agent wave."""
         if not run_id or not idempotency_key or not sample_ids or len(set(sample_ids)) != len(sample_ids):
             raise ValueError("invalid prediction wave identity")
@@ -325,6 +374,7 @@ class DshToolService:
             wave_digest=wave_digest, sample_ids=sample_ids, catalog=catalog, executor=executor,
             budget=prediction_tool_call_budget, origin_timestamp=origin_timestamp,
             mean_blend_required=mean_blend_required, allowed_methods=allowed_methods,
+            formula_policy=formula_policy,
             identity_digests=identity_digests,
         )
         with self._prediction_lock:
@@ -407,6 +457,11 @@ class DshToolService:
                 self._fences[key] = fence
         with fence.lock:
             fence.state = "closed"
+        if fence.stage is not None and fence.idempotency_key is not None:
+            with self._retrieval_lock:
+                self._retrieval_reservations.pop(
+                    (run_id, fence.stage, stage_attempt, fence.idempotency_key), None
+                )
         return fence
 
     def close_run_admissions(self, run_id: str) -> tuple[AdmissionFence, ...]:
@@ -424,6 +479,10 @@ class DshToolService:
                     continue
                 fence.state = "closed"
                 closed.append(fence)
+        with self._retrieval_lock:
+            for key in tuple(self._retrieval_reservations):
+                if key[0] == run_id:
+                    self._retrieval_reservations.pop(key, None)
         return tuple(closed)
 
     def open_run_admissions(self, run_id: str) -> None:
@@ -826,7 +885,7 @@ class DshToolService:
         if not isinstance(raw_queries, list) or not (
             1 <= len(raw_queries) <= _RETRIEVAL_MAX_QUERIES
         ):
-            raise ValueError("dynamic retrieval requires one to four queries")
+            raise ValueError(f"dynamic retrieval requires one to {_RETRIEVAL_MAX_QUERIES} queries")
         queries: list[str] = []
         seen: set[str] = set()
         for raw_query in raw_queries:
@@ -860,6 +919,10 @@ class DshToolService:
             "provider_route": payload.get("provider_route"),
             "fallback_reason": payload.get("fallback_reason"),
             "result_digest": payload.get("result_digest"),
+            **({"snapshot_digest": payload["frozen_snapshot_digest"]}
+               if "frozen_snapshot_digest" in payload else {}),
+            **({"provider_diagnostics": deepcopy(dict(payload["provider_diagnostics"]))}
+               if payload.get("provider_diagnostics") else {}),
         }
 
     def _recorded_retrieval(
@@ -908,8 +971,200 @@ class DshToolService:
             raise DshToolAuthorizationError("dynamic retrieval replay identity mismatch")
         return prior
 
-    def replay_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Replay one completed dynamic retrieval before any network access."""
+    def _retrieval_metadata_for_run(self, run_id: str) -> Mapping[str, Any]:
+        """Read only the frozen run manifest, without replaying the run history."""
+        created = self.ledger.events_by_kind(run_id, "RunCreated", limit=1)
+        manifest = created[0].payload.get("task_manifest", {}) if created else {}
+        metadata = manifest.get("metadata", {}) if isinstance(manifest, Mapping) else {}
+        return metadata if isinstance(metadata, Mapping) else {}
+
+    def _formal_retrieval_binding_for_run(self, run_id: str) -> dict[str, Any] | None:
+        """Durable formal admission can never fall back to normal online mode."""
+        snapshots = self.ledger.events_by_kind(run_id, FORMAL_RETRIEVAL_SNAPSHOT_EVENT)
+        frozen = self.ledger.events_by_kind(run_id, "FormalStageFrozen")
+        binding = self._formal_retrieval_bindings.get(run_id)
+        if not snapshots and not frozen and binding is None:
+            return None
+        if binding is None or len(snapshots) != 1:
+            raise DshFormalRetrievalIsolationError("formal retrieval requires an active frozen snapshot binding")
+        snapshot = binding[1]
+        try:
+            persisted = validate_formal_retrieval_snapshot(snapshots[0].payload.get("snapshot"))
+            validated = validate_formal_retrieval_snapshot(snapshot)
+        except (KeyError, TypeError, ValueError):
+            raise DshFormalRetrievalIsolationError("formal retrieval snapshot validation failed") from None
+        if not _strict_json_equal(persisted, validated):
+            raise DshFormalRetrievalIsolationError("formal retrieval snapshot binding mismatch")
+        sealed = self.ledger.events_by_kind(run_id, "FormalStageSealed")
+        if sealed and (not frozen or sealed[-1].seq > frozen[-1].seq):
+            raise DshFormalRetrievalIsolationError("formal retrieval stage is sealed")
+        return validated
+
+    @contextmanager
+    def bind_formal_retrieval(self, run_id: str, snapshot: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+        """Bind one already-persisted directory across a formal worker's children."""
+        validated = validate_formal_retrieval_snapshot(snapshot)
+        marker = object()
+        with self._retrieval_lock:
+            if run_id in self._formal_retrieval_bindings:
+                raise DshFormalRetrievalIsolationError("formal retrieval binding is already active")
+            persisted = self.ledger.events_by_kind(run_id, FORMAL_RETRIEVAL_SNAPSHOT_EVENT)
+            if (len(persisted) != 1
+                    or not _strict_json_equal(persisted[0].payload.get("snapshot"), validated)):
+                raise DshFormalRetrievalIsolationError("formal retrieval snapshot must be durably frozen first")
+            self._formal_retrieval_bindings[run_id] = (marker, validated)
+        try:
+            yield deepcopy(validated)
+        finally:
+            with self._retrieval_lock:
+                current = self._formal_retrieval_bindings.get(run_id)
+                if current is not None and current[0] is marker:
+                    self._formal_retrieval_bindings.pop(run_id, None)
+
+    def formal_retrieval_context_for_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._retrieval_lock:
+            snapshot = self._formal_retrieval_binding_for_run(run_id)
+            if snapshot is None:
+                return None
+            return {"mode": "frozen_snapshot", "snapshot_digest": snapshot["snapshot_digest"],
+                    "document_count": len(snapshot["documents"]), "online_enabled": False}
+
+    def _retrieval_snapshot_for_stage(self, run_id: str, stage: str) -> dict[str, Any] | None:
+        # Certification admission always takes precedence, including fail-closed
+        # behavior after pause/seal. A comparison snapshot grants no such admission.
+        formal = self._formal_retrieval_binding_for_run(run_id)
+        if formal is not None or stage not in COMPARISON_RETRIEVAL_STAGES:
+            return formal
+        try:
+            return comparison_retrieval_snapshot(self._retrieval_metadata_for_run(run_id))
+        except (KeyError, TypeError, ValueError):
+            raise DshFormalRetrievalIsolationError("comparison retrieval snapshot validation failed") from None
+
+    def comparison_retrieval_context_for_stage(self, run_id: str, stage: str) -> dict[str, Any] | None:
+        with self._retrieval_lock:
+            if self._formal_retrieval_binding_for_run(run_id) is not None:
+                return None
+            # Reuse the enforcing validation before exposing a prompt contract.
+            if self._retrieval_snapshot_for_stage(run_id, stage) is None:
+                return None
+            return comparison_retrieval_context(self._retrieval_metadata_for_run(run_id), stage)
+
+    def retrieval_policy_for_run(self, run_id: str) -> RetrievalPolicy:
+        with self._retrieval_lock:
+            snapshot = self._formal_retrieval_binding_for_run(run_id)
+            if snapshot is not None:
+                return RetrievalPolicy(**snapshot["retrieval_policy"])
+        return resolve_retrieval_policy(self._retrieval_metadata_for_run(run_id))
+
+    def stage_retrieval_policy_for_run(self, run_id: str) -> RetrievalPolicy | None:
+        """Preserve pre-policy stage hashes while new runs freeze prompt budgets."""
+        with self._retrieval_lock:
+            snapshot = self._formal_retrieval_binding_for_run(run_id)
+            if snapshot is not None:
+                return RetrievalPolicy(**snapshot["retrieval_policy"])
+        metadata = self._retrieval_metadata_for_run(run_id)
+        return resolve_retrieval_policy(metadata, environ={}) if "retrieval_policy" in metadata else None
+
+    @staticmethod
+    def _retrieval_stage_key(identity: Mapping[str, Any]) -> tuple[Any, ...]:
+        return tuple(identity[name] for name in (
+            "run_id", "stage", "stage_attempt", "idempotency_key",
+        ))
+
+    def _admit_retrieval(
+        self,
+        identity: Mapping[str, Any],
+        queries: tuple[str, ...],
+        retrieval_key: str,
+        policy: RetrievalPolicy,
+        *,
+        local_only: bool = False,
+    ) -> None:
+        """Reserve a distinct call before DSH may perform network I/O.
+
+        Completed calls are durable. In-flight reservations close the concurrent
+        preflight gap within the owning sidecar; they remain charged if a caller
+        abandons the request. A retry with the same key must keep its queries.
+        """
+        if not policy.online_enabled and not local_only:
+            raise DshRetrievalDisabledError("online retrieval is disabled by the shared knowledge policy")
+        if len(queries) > policy.max_queries_per_call or any(
+            len(query) > policy.max_query_chars for query in queries
+        ):
+            raise DshToolAuthorizationError("dynamic retrieval exceeds the configured query bounds")
+        stage_key = self._retrieval_stage_key(identity)
+        reservations = self._retrieval_reservations.setdefault(stage_key, {})
+        fingerprint = digest({
+            "queries": list(queries),
+            "role": identity["role"],
+            "run_state_revision": identity["run_state_revision"],
+            **{name: identity[name] for name in _GENOME_IDENTITY_DIGEST_FIELDS},
+        })
+        if retrieval_key in reservations:
+            if reservations[retrieval_key] != fingerprint:
+                raise ValueError("dynamic retrieval idempotency key was reused")
+            return
+        completed = self.ledger.retrieval_stage_count(identity)
+        if completed + len(reservations) >= policy.dynamic_max_calls_per_stage:
+            raise DshRetrievalBudgetError("dynamic retrieval stage call budget is exhausted")
+        reservations[retrieval_key] = fingerprint
+
+    def _prepare_formal_retrieval(
+        self, identity: Mapping[str, Any], queries: tuple[str, ...],
+        retrieval_key: str, snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Execute under the short retrieval lock; this path has no I/O providers."""
+        policy = RetrievalPolicy(**snapshot["retrieval_policy"])
+        prior = self._recorded_retrieval(
+            identity=identity, queries=queries, retrieval_idempotency_key=retrieval_key,
+        )
+        if prior is not None:
+            if (prior.payload.get("provider_route") != "frozen_snapshot"
+                    or prior.payload.get("frozen_snapshot_digest") != snapshot["snapshot_digest"]):
+                raise DshFormalRetrievalIsolationError("formal retrieval cannot replay external evidence")
+            return {"found": True, "result": self._retrieval_response(prior.payload),
+                    "policy": policy.to_dict()}
+        self._admit_retrieval(identity, queries, retrieval_key, policy, local_only=True)
+        result = search_formal_retrieval_snapshot(snapshot, queries, limit=policy.max_results)
+        quality = assess_dynamic_search_quality(queries, result)
+        # The directory search is complete even when it has no relevant method.
+        # Completeness here never grants permission for a network fallback.
+        quality.update(sufficient=True, fallback_reason=None)
+        payload = {
+            "schema_version": "ecologyrsi-dsh.retrieval-executed/1",
+            "execution_owner": "dsh_agent_web_search", "identity": deepcopy(dict(identity)),
+            "retrieval_idempotency_key": retrieval_key, "query_digest": digest(list(queries)),
+            "queries": list(queries), "provider_route": "frozen_snapshot",
+            "fallback_reason": None, "primary_quality": quality,
+            "result": result, "result_digest": digest(result),
+            "frozen_snapshot_digest": snapshot["snapshot_digest"],
+        }
+        event_id = self._retrieval_event_id(
+            str(identity["run_id"]), str(identity["role"]), str(identity["stage"]),
+            int(identity["stage_attempt"]), str(identity["idempotency_key"]), retrieval_key,
+        )
+        fence_key = tuple(identity[name] for name in ("run_id", "run_state_revision", "stage_attempt"))
+        with self._admission_registry_lock:
+            fence = self._fences.get(fence_key)
+        if fence is None:
+            raise DshToolAdmissionClosedError("stage admission is closed")
+        with fence.lock:
+            self._authorize_identity(identity, tool_name=_RETRIEVAL_TOOL_NAME, allow_ledger_advance=True)
+            active = self._retrieval_snapshot_for_stage(str(identity["run_id"]), str(identity["stage"]))
+            if active is None or active["snapshot_digest"] != snapshot["snapshot_digest"]:
+                raise DshFormalRetrievalIsolationError("formal retrieval binding changed")
+            event = self.ledger.append(str(identity["run_id"]), "DshRetrievalExecuted",
+                                       payload, event_id=event_id)
+        stage_key = self._retrieval_stage_key(identity)
+        reservations = self._retrieval_reservations.get(stage_key, {})
+        reservations.pop(retrieval_key, None)
+        if not reservations:
+            self._retrieval_reservations.pop(stage_key, None)
+        return {"found": True, "result": self._retrieval_response(event.payload),
+                "policy": policy.to_dict()}
+
+    def prepare_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
+        """Replay a completed call or admit bounded network work before it starts."""
 
         if not isinstance(envelope, Mapping) or set(envelope) != {
             "identity",
@@ -925,12 +1180,25 @@ class DshToolService:
             tool_name=_RETRIEVAL_TOOL_NAME,
             allow_ledger_advance=True,
         )
-        prior = self._recorded_retrieval(
-            identity=identity,
-            queries=queries,
-            retrieval_idempotency_key=retrieval_key,
-        )
-        return None if prior is None else self._retrieval_response(prior.payload)
+        with self._retrieval_lock:
+            snapshot = self._retrieval_snapshot_for_stage(str(identity["run_id"]), str(identity["stage"]))
+            if snapshot is not None:
+                return self._prepare_formal_retrieval(identity, queries, retrieval_key, snapshot)
+            prior = self._recorded_retrieval(
+                identity=identity,
+                queries=queries,
+                retrieval_idempotency_key=retrieval_key,
+            )
+            policy = self.retrieval_policy_for_run(str(identity["run_id"]))
+            if prior is not None:
+                return {"found": True, "result": self._retrieval_response(prior.payload),
+                        "policy": policy.to_dict()}
+            self._admit_retrieval(identity, queries, retrieval_key, policy)
+            return {"found": False, "result": None, "policy": policy.to_dict()}
+
+    def replay_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Compatibility facade; misses now enforce the shared admission policy."""
+        return self.prepare_retrieval(envelope)["result"]
 
     def complete_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
         """Assess DSH primary evidence, fall back when needed, and persist once."""
@@ -956,18 +1224,28 @@ class DshToolService:
             tool_name=_RETRIEVAL_TOOL_NAME,
             allow_ledger_advance=True,
         )
-        with self._retrieval_lock:
-            prior = self._recorded_retrieval(
-                identity=identity,
-                queries=queries,
-                retrieval_idempotency_key=retrieval_key,
-            )
-            if prior is not None:
-                return self._retrieval_response(prior.payload)
-            if self.ledger.retrieval_stage_count(identity) >= _RETRIEVAL_MAX_CALLS_PER_STAGE:
-                raise DshToolAuthorizationError(
-                    "dynamic retrieval stage call budget is exhausted"
+        event_id = self._retrieval_event_id(
+            str(identity["run_id"]), str(identity["role"]), str(identity["stage"]),
+            int(identity["stage_attempt"]), str(identity["idempotency_key"]), retrieval_key,
+        )
+        # A bounded stripe lock serializes duplicate completions while unrelated
+        # stages can contact providers concurrently. The global lock protects
+        # admission bookkeeping and the final append only.
+        with self._retrieval_call_locks[int(digest(event_id)[:8], 16) % len(self._retrieval_call_locks)]:
+            with self._retrieval_lock:
+                self._authorize_identity(
+                    identity, tool_name=_RETRIEVAL_TOOL_NAME, allow_ledger_advance=True
                 )
+                if self._retrieval_snapshot_for_stage(str(identity["run_id"]), str(identity["stage"])) is not None:
+                    raise DshFormalRetrievalIsolationError(
+                        "formal retrieval completion cannot accept external provider results")
+                prior = self._recorded_retrieval(
+                    identity=identity, queries=queries, retrieval_idempotency_key=retrieval_key,
+                )
+                if prior is not None:
+                    return self._retrieval_response(prior.payload)
+                policy = self.retrieval_policy_for_run(str(identity["run_id"]))
+                self._admit_retrieval(identity, queries, retrieval_key, policy)
 
             primary: dict[str, Any] | None = None
             primary_error_code = envelope.get("primary_error_code")
@@ -979,14 +1257,54 @@ class DshToolService:
             if "primary_result" in envelope:
                 try:
                     primary = normalize_dynamic_search_result(
-                        envelope.get("primary_result")
+                        envelope.get("primary_result"), max_sources=policy.max_results
                     )
                 except (TypeError, ValueError):
                     primary_error_code = "primary_malformed"
             elif primary_error_code not in _RETRIEVAL_TECHNICAL_FAILURES:
                 raise ValueError("dynamic retrieval primary error code is invalid")
 
-            if primary is None:
+            provider_diagnostics: dict[str, str] = {}
+            if primary_error_code is not None:
+                provider_diagnostics["primary_error_code"] = str(primary_error_code)
+            additional = None
+            additional_attempted = self._retrieval_additional is not None
+            if self._retrieval_additional is not None:
+                try:
+                    additional = normalize_dynamic_search_result(
+                        self._retrieval_additional(queries, limit=policy.max_results),
+                        max_sources=policy.max_results,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolated optional provider
+                    additional = {"sources": [], "truncated": False}
+                    code = getattr(exc, "code", None)
+                    safe_codes = {
+                        "not_configured", "invalid_queries", "query_requires_shortening",
+                        "invalid_limit", "invalid_timeout", "invalid_response",
+                        "redirect_rejected", "unauthorized", "insufficient_balance",
+                        "request_rejected", "temporarily_unavailable",
+                    }
+                    provider_diagnostics["additional_error_code"] = (
+                        f"deepseek_{code}" if isinstance(code, str) and code in safe_codes
+                        else "deepseek_provider_error"
+                    )
+            combined = merge_dynamic_search_results(
+                primary, additional, max_sources=policy.max_results
+            )
+            if primary is not None and additional is not None:
+                # Reserve visibility for both providers: a full DSH result must
+                # not silently crowd every supplemental source out of the cap.
+                provider_sources = (primary["sources"], additional["sources"])
+                interleaved = [
+                    sources[index]
+                    for index in range(max(map(len, provider_sources)))
+                    for sources in provider_sources
+                    if index < len(sources)
+                ]
+                combined = normalize_dynamic_search_result(
+                    {**combined, "sources": interleaved}, max_sources=policy.max_results
+                )
+            if primary is None and not additional_attempted:
                 primary_quality = assess_dynamic_search_quality(
                     queries,
                     {"sources": [], "truncated": False},
@@ -994,10 +1312,12 @@ class DshToolService:
                 fallback_reason = str(primary_error_code)
                 primary_quality["fallback_reason"] = fallback_reason
             else:
-                primary_quality = assess_dynamic_search_quality(queries, primary)
+                primary_quality = assess_dynamic_search_quality(queries, combined)
                 fallback_reason = (
                     str(primary_error_code)
-                    if primary_error_code is not None
+                    if primary_error_code is not None and (
+                        not additional_attempted or not primary_quality["sufficient"]
+                    )
                     else primary_quality["fallback_reason"]
                 )
                 primary_quality["fallback_reason"] = fallback_reason
@@ -1005,16 +1325,50 @@ class DshToolService:
 
             fallback: dict[str, Any] | None = None
             if fallback_reason is not None:
+                self._authorize_identity(
+                    identity, tool_name=_RETRIEVAL_TOOL_NAME, allow_ledger_advance=True
+                )
+                if not self.retrieval_policy_for_run(str(identity["run_id"])).online_enabled:
+                    raise DshRetrievalDisabledError("online retrieval was disabled during provider work")
                 try:
                     fallback = normalize_dynamic_search_result(
-                        self._retrieval_fallback(queries, limit=8)
+                        self._retrieval_fallback(queries, limit=policy.max_results),
+                        max_sources=policy.max_results,
                     )
                 except Exception:  # noqa: BLE001 - isolated optional provider
                     fallback = {"sources": [], "truncated": False}
-                provider_route = "dsh_primary_then_openalex_fallback"
+                    provider_diagnostics["fallback_error_code"] = "openalex_provider_error"
+                provider_route = (
+                    "dsh_primary_with_deepseek_then_openalex_fallback"
+                    if additional_attempted else "dsh_primary_then_openalex_fallback"
+                )
+                if (not combined["sources"] and not fallback["sources"]
+                        and self._retrieval_last_resort is not None
+                        and identity["stage"] in _CROSSREF_RESEARCH_STAGES):
+                    # Recheck the frozen-stage fence immediately before any new provider.
+                    self._authorize_identity(identity, tool_name=_RETRIEVAL_TOOL_NAME,
+                                             allow_ledger_advance=True)
+                    if self._retrieval_snapshot_for_stage(str(identity["run_id"]), str(identity["stage"])) is not None:
+                        raise DshFormalRetrievalIsolationError("frozen retrieval cannot use Crossref")
+                    if not self.retrieval_policy_for_run(str(identity["run_id"])).online_enabled:
+                        raise DshRetrievalDisabledError("online retrieval was disabled during provider work")
+                    try:
+                        fallback = normalize_dynamic_search_result(
+                            self._retrieval_last_resort(queries, limit=policy.max_results),
+                            max_sources=policy.max_results,
+                        )
+                    except Exception:  # noqa: BLE001 - no remote error details enter the ledger
+                        fallback = {"sources": [], "truncated": False}
+                        provider_diagnostics["last_resort_error_code"] = "crossref_provider_error"
+                    provider_route = (
+                        "dsh_primary_with_deepseek_then_openalex_then_crossref_fallback"
+                        if additional_attempted else "dsh_primary_then_openalex_then_crossref_fallback"
+                    )
             else:
-                provider_route = "dsh_primary"
-            result = merge_dynamic_search_results(primary, fallback)
+                provider_route = "dsh_primary_with_deepseek" if additional_attempted else "dsh_primary"
+            result = merge_dynamic_search_results(
+                combined, fallback, max_sources=policy.max_results
+            )
             result_digest = digest(result)
             payload = {
                 "schema_version": "ecologyrsi-dsh.retrieval-executed/1",
@@ -1028,20 +1382,28 @@ class DshToolService:
                 "primary_quality": deepcopy(dict(primary_quality)),
                 "result": deepcopy(result),
                 "result_digest": result_digest,
+                **({"provider_diagnostics": provider_diagnostics} if provider_diagnostics else {}),
             }
-            event = self.ledger.append(
-                str(identity["run_id"]),
-                "DshRetrievalExecuted",
-                payload,
-                event_id=self._retrieval_event_id(
-                    str(identity["run_id"]),
-                    str(identity["role"]),
-                    str(identity["stage"]),
-                    int(identity["stage_attempt"]),
-                    str(identity["idempotency_key"]),
-                    retrieval_key,
-                ),
-            )
+            fence_key = tuple(identity[name] for name in ("run_id", "run_state_revision", "stage_attempt"))
+            with self._admission_registry_lock:
+                fence = self._fences.get(fence_key)
+            if fence is None:
+                raise DshToolAdmissionClosedError("stage admission is closed")
+            # Closing a stage takes this same fence lock, so a cancelled in-flight
+            # search cannot publish a result after the cancellation wins.
+            with self._retrieval_lock, fence.lock:
+                self._authorize_identity(
+                    identity, tool_name=_RETRIEVAL_TOOL_NAME, allow_ledger_advance=True
+                )
+                if not self.retrieval_policy_for_run(str(identity["run_id"])).online_enabled:
+                    raise DshRetrievalDisabledError("online retrieval was disabled during provider work")
+                event = self.ledger.append(
+                    str(identity["run_id"]), "DshRetrievalExecuted", payload, event_id=event_id,
+                )
+                reservations = self._retrieval_reservations.get(self._retrieval_stage_key(identity), {})
+                reservations.pop(retrieval_key, None)
+                if not reservations:
+                    self._retrieval_reservations.pop(self._retrieval_stage_key(identity), None)
             return self._retrieval_response(event.payload)
 
     @staticmethod

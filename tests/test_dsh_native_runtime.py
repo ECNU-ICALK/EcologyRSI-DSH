@@ -208,12 +208,114 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         self.assertEqual(self.server.requests[0][2], "Bearer runtime-secret")  # type: ignore[attr-defined]
         self.assertEqual(DSH_NATIVE_EXECUTION_PROTOCOL, "dsh_native_plugin_evolution@1")
 
+    def test_formal_prepare_and_close_use_bound_control_plane_receipts(self):
+        identity = {key: value for key, value in self._accepted().items() if key != "accepted"}
+        execution_id = "a" * 64
+        prepare = {**identity, "formal_execution": {"execution_id": execution_id},
+                   "binding": {"task_manifest_digest": "b" * 64}}
+        close = {**identity, "formal_execution_id": execution_id}
+        self.server.responses.extend([
+            (200, {**self._accepted(), "status": "running", "formal_execution_id": execution_id}),
+            (200, {**self._accepted(), "status": "cancelled", "formal_execution_id": execution_id}),
+        ])
+        self.client.prepare_formal_run(prepare)
+        self.client.close_formal_run(close)
+        self.assertEqual([request[1] for request in self.server.requests], [
+            "/api/ecology-agent-runtime/v1/runs/run-1/formal/prepare",
+            "/api/ecology-agent-runtime/v1/runs/run-1/formal/close"])
+        self.assertEqual(self.server.requests[0][3], prepare)
+        self.assertEqual(self.server.requests[1][3], close)
+
+    def test_formal_receipt_rejects_wrong_generation_status_or_revision(self):
+        identity = {key: value for key, value in self._accepted().items() if key != "accepted"}
+        request = {**identity, "formal_execution": {"execution_id": "a" * 64}}
+        receipt = {**self._accepted(), "status": "running", "formal_execution_id": "a" * 64}
+        for changed in (
+            {"formal_execution_id": "b" * 64}, {"status": "created"}, {"accepted": False},
+            {"run_id": "other"}, {"ledger_expected_revision": 12}, {"run_state_revision": 8},
+            {"stage_attempt": 3}, {"idempotency_key": "other"}, {"extra": True},
+        ):
+            with self.subTest(changed=changed):
+                self.server.responses.append((200, {**receipt, **changed}))
+                with self.assertRaises(DshNativeRuntimeUnavailableError):
+                    self.client.prepare_formal_run(request)
+
+    def test_invalid_formal_execution_id_never_sends_request(self):
+        identity = {key: value for key, value in self._accepted().items() if key != "accepted"}
+        for execution_id in (None, "", "A" * 64, "a" * 63):
+            with self.subTest(execution_id=execution_id), self.assertRaises(ValueError):
+                self.client.close_formal_run({**identity, "formal_execution_id": execution_id})
+        self.assertFalse(self.server.requests)
+
+    def test_formal_handshake_with_real_node_after_cancel_or_process_restart(self):
+        for restored_status in ("cancelled", "missing"):
+            with self.subTest(restored_status=restored_status), _RealNodeRuntime() as client:
+                run_id = f"run:formal-handshake-{restored_status}"
+                identity = {"run_id": run_id, "run_state_revision": 10, "stage_attempt": 0,
+                            "ledger_expected_revision": 20, "idempotency_key": "training"}
+                frozen = {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                          "task_manifest_digest": "a" * 64, "preset_catalog_digest": "b" * 64,
+                          "data_protocol_digest": "c" * 64, "preset_content_digest": "d" * 64,
+                          "standing_tool_surface_digest": "e" * 64,
+                          "resolved_policy_route_config_digest": "f" * 64,
+                          "resolved_review_route_config_digest": "1" * 64,
+                          "strategy_model_id": "provider/model", "review_model_id": "provider/model"}
+                if restored_status == "cancelled":
+                    client.create_run({**identity, "binding": {**frozen, "initial_run_status": "running"}})
+                    client.cancel({**identity, "idempotency_key": "training-completed"})
+                    self.assertEqual(client.status(run_id)["status"], "cancelled")
+                previous_close = None
+                for stage, execution_id in (
+                    ("validation", "2" * 64), ("validation", "3" * 64), ("final_test", "7" * 64),
+                ):
+                    request = {**identity, "idempotency_key": f"formal-prepare:{execution_id}",
+                        "binding": frozen, "formal_execution": {
+                            "execution_id": execution_id, "stage": stage,
+                            "candidate_id": "candidate:fixed", "candidate_revision_id": "revision:fixed",
+                            "artifact_digest": "4" * 64, "snapshot_digest": "5" * 64}}
+                    receipt = client.prepare_formal_run(request)
+                    self.assertEqual(receipt["status"], "running")
+                    self.assertEqual(client.prepare_formal_run(request), receipt)
+                    if previous_close is not None:
+                        with self.assertRaises(DshNativeRuntimeUnavailableError):
+                            client.close_formal_run(previous_close)
+                        self.assertEqual(client.status(run_id)["status"], "running")
+                    for control in (client.activate, client.resume, client.cancel):
+                        with self.assertRaises(DshNativeRuntimeUnavailableError):
+                            control({**identity, "idempotency_key": "ordinary-control"})
+                    with self.assertRaises(DshNativeRuntimeUnavailableError):
+                        client.close_formal_run({**identity, "formal_execution_id": "6" * 64})
+                    self.assertEqual(client.status(run_id)["status"], "running")
+                    close = {**identity, "idempotency_key": f"formal-close:{execution_id}",
+                             "formal_execution_id": execution_id}
+                    self.assertEqual(client.close_formal_run(close)["status"], "cancelled")
+                    self.assertEqual(client.close_formal_run(close)["status"], "cancelled")
+                    previous_close = close
+
+    def test_formal_handshake_with_real_node_refuses_active_training(self):
+        with _RealNodeRuntime() as client:
+            identity = {"run_id": "run:formal-active-training", "run_state_revision": 10,
+                        "stage_attempt": 0, "ledger_expected_revision": 20, "idempotency_key": "training"}
+            frozen = {"strategy_model_id": "provider/model", "review_model_id": "provider/model"}
+            client.create_run({**identity, "binding": {**frozen, "initial_run_status": "running"}})
+            request = {**identity, "binding": frozen, "formal_execution": {
+                "execution_id": "a" * 64, "stage": "validation", "candidate_id": "candidate:fixed",
+                "candidate_revision_id": "revision:fixed", "artifact_digest": "b" * 64,
+                "snapshot_digest": "c" * 64}}
+            with self.assertRaises(DshNativeRuntimeUnavailableError):
+                client.prepare_formal_run(request)
+            self.assertEqual(client.status(identity["run_id"])["status"], "running")
+            client.pause({**identity, "idempotency_key": "training-paused"})
+            with self.assertRaises(DshNativeRuntimeUnavailableError):
+                client.prepare_formal_run(request)
+            self.assertEqual(client.status(identity["run_id"])["status"], "paused")
+
     def test_python_resume_handshake_accepts_real_node_restored_paused_hosts(self) -> None:
         preset_ids = (
             "ecology-coordinator-v6",
             "ecology-researcher-v17",
             "ecology-candidate-proposer-v9",
-            "ecology-sample-planner-v14",
+            "ecology-sample-planner-v15",
             "ecology-sample-critic-v6",
             "ecology-generation-judge-v10",
         )
@@ -420,7 +522,7 @@ class _FakeNativeRuntime:
             "ecology-coordinator-v6",
             "ecology-researcher-v17",
             "ecology-candidate-proposer-v9",
-            "ecology-sample-planner-v14",
+            "ecology-sample-planner-v15",
             "ecology-sample-critic-v6",
             "ecology-generation-judge-v10",
         ):

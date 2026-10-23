@@ -13,14 +13,14 @@ from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
 from ecologyrsi_dsh.core.models import Run, digest, canonical_json
 from ecologyrsi_dsh.evolution.genome import materialize_seed_genome, parameter_trust_region_neighborhood
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
-from ecologyrsi_dsh.evolution.research_context import compact_research_context, research_report_size_diagnostics
+from ecologyrsi_dsh.evolution.research_context import compact_research_context, research_report_size_diagnostics, research_plan_size_feedback
 from ecologyrsi_dsh.evolution.strategies import (
     StrategyRouterDSHAdapter, _forecast_objective_context, _mutation_contract_catalog,
     _predictor_semantics, _validate_candidate_direction_realizability,
 )
 from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan, GenerationReflection, validate_research_synthesis
 from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
-from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration, validate_research_plan
+from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration, ResearchPlanSizeError, validate_research_plan
 from ecologyrsi_dsh.knowledge.models import KnowledgeCard, KnowledgeSnapshot
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 from tests.test_autonomous_search_reflection_cycle import _task
@@ -210,6 +210,75 @@ class ResearchContextTests(unittest.TestCase):
         self.assertEqual([call["stage_attempt"] for call in calls], [1, 2])
         self.assertIn("4000", calls[1]["context"]["host_validation_feedback"]["validation_detail"])
         self.assertEqual(result["dsh_research_summary"], minimal_aligned_synthesis()["summary"])
+
+    def test_aggregate_plan_budget_accounts_for_host_fields_in_existing_repair(self):
+        verbose = minimal_aligned_synthesis()
+        verbose["summary"] = "研究" * 1700
+        for index, row in enumerate(verbose["candidate_directions"]):
+            row["hypothesis"] = str(index) + "h" * 1599
+            row["target_weakness"] = "w" * 800
+        original = deepcopy(verbose)
+        host_plan = {f"provenance_{i}": "p" * 3900 for i in range(3)}
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return deepcopy(verbose if len(calls) == 1 else minimal_aligned_synthesis())
+        plan = self._budget_policy_adapter(invoke, current_plan=host_plan)
+        self.assertEqual([call["stage_attempt"] for call in calls], [1, 2])
+        feedback = calls[1]["context"]["host_validation_feedback"]
+        budget = feedback["plan_size_budget"]
+        self.assertGreater(budget["assembled_plan_chars"], 24000)
+        self.assertEqual(budget["available_model_value_chars"] + budget["observed_host_and_normalization_chars"], 24000)
+        self.assertEqual(budget["model_value_chars"]["summary"], len(canonical_json(verbose["summary"])))
+        self.assertLess(budget["recommended_model_value_chars"], sum(budget["model_value_chars"].values()))
+        corrected = minimal_aligned_synthesis()
+        self.assertLessEqual(sum(len(canonical_json(corrected[k])) for k in budget["model_value_chars"]),
+                             budget["recommended_model_value_chars"])
+        self.assertIn("Host metadata", feedback["required_action"])
+        self.assertEqual(calls[1]["context"]["rejected_research_synthesis"], original)
+        self.assertEqual(verbose, original)
+        for key, value in host_plan.items():
+            self.assertEqual(plan[key], value)
+        self.assertEqual(plan["dsh_research_summary"], corrected["summary"])
+        self.assertLessEqual(len(canonical_json(plan)), 24000)
+
+    def test_aggregate_plan_overflow_still_stops_after_two_submissions(self):
+        output = minimal_aligned_synthesis()
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            return deepcopy(output)
+        with self.assertRaises(ResearchPlanSizeError):
+            self._budget_policy_adapter(invoke, current_plan={f"note_{i}": "x" * 3900 for i in range(7)})
+        self.assertEqual(len(calls), 2)
+        budget = calls[1]["context"]["host_validation_feedback"]["plan_size_budget"]
+        self.assertEqual(budget["available_model_value_chars"], 0)
+        self.assertEqual(budget["recommended_model_value_chars"], 0)
+        self.assertEqual(output, minimal_aligned_synthesis())
+
+    def test_plan_size_feedback_reports_no_content_and_unchanged_absolute_limit(self):
+        output = {"summary": "中文", "evidence": [], "candidate_directions": []}
+        before = deepcopy(output)
+        feedback = research_plan_size_feedback(ResearchPlanSizeError(30000), output)
+        self.assertEqual(feedback["maximum_plan_chars"], 24000)
+        self.assertEqual(feedback["excess_plan_chars"], 6000)
+        self.assertNotIn("中文", canonical_json(feedback))
+        self.assertEqual(output, before)
+
+    def test_host_extensions_have_a_separate_finite_budget_without_truncation(self):
+        plan = {**{f"prior_{i}": "p" * 3900 for i in range(6)},
+                "exploration_archive": {"entries": [{"note": "a" * 3900}]},
+                "candidate_portfolio": {"policy": "mechanism_evidence_search@1", "note": "b" * 3900}}
+        before = deepcopy(plan)
+        self.assertGreater(len(canonical_json(plan)), 24000)
+        self.assertLessEqual(len(canonical_json(plan)), 36000)
+        self.assertEqual(validate_research_plan(plan), before)
+        self.assertEqual(plan, before)
+        with self.assertRaisesRegex(ValueError, "maximum 24000"):
+            validate_research_plan({**plan, "one_more_authored_note": "x" * 3900})
+        with self.assertRaisesRegex(ValueError, "maximum 12000"):
+            validate_research_plan({"exploration_archive": plan["exploration_archive"],
+                "candidate_portfolio": {f"note_{i}": "x" * 3900 for i in range(3)}})
 
     def test_training_archive_survives_research_storage_and_next_round_feedback(self):
         from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback

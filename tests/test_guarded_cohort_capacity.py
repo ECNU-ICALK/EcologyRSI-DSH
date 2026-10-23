@@ -182,7 +182,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v15",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
@@ -252,7 +252,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
+                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v15",
                                        "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }

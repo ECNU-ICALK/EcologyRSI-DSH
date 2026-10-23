@@ -802,6 +802,21 @@
       "<details class=\"mutation-block mutation-allowed\"><summary>查看本轮允许改动的范围 <span>判断模型是否选对了着力点</span></summary><div class=\"change-list\">" + renderMutationAllowedTargets(explanation.allowed_mutation_targets) + "</div></details>" +
       "</section>";
   }
+  function renderMechanismEvidence(candidate) {
+    var evidence = candidate && candidate.mechanism_evidence;
+    if (!evidence) { return ""; }
+    var names = {parameter_adjustment: "参数调整", prediction_structure: "预测结构", feature_structure: "特征结构", agent_decision: "Agent 决策", execution_control: "执行控制"};
+    var states = {passed: "已执行", failed: "执行检查未通过", inconclusive: "证据不足", not_exercised: "未触发", not_recorded: "未记录"};
+    var mechanisms = (evidence.mechanism_ids || []).map(function (id) { return names[id] || id; }).join("、");
+    var pairs = evidence.comparisons || [];
+    var measured = pairs.filter(function (p) { return p.status === "measured"; });
+    var near = measured.filter(function (p) { return p.near_outputs; }).length;
+    return "<section class=\"detail-section candidate-section\"><div class=\"candidate-section-heading\"><h3>执行中是否体现修改</h3><span>初始候选 · 同组筛选</span></div>"
+      + "<p>机制：" + escapeHTML(mechanisms) + "；执行：" + escapeHTML(states[evidence.execution_status] || "证据不足") + "</p>"
+      + "<p>" + escapeHTML(pairs.length ? "可比 " + measured.length + "/" + pairs.length + " 对，最终输出近似 " + near + " 对。" : "尚未记录可核验的同组比较。")
+      + " 行为变化不代表性能提升，性能以配对评测结果为准。</p>"
+      + "<span class=\"muted\">版本：" + escapeHTML(evidence.revision_id || "待筛选") + "</span></section>";
+  }
   function renderCandidateTargets(targets) {
     if (!targets.length) { return "<span class=\"empty-state\">当前评测器未提供分目标结果。</span>"; }
     return targets.map(function (target) {
@@ -1039,6 +1054,7 @@
       "<section class=\"detail-section candidate-section candidate-gate-section\"><h3>评测门禁</h3>" + renderCandidateGates(candidate, run) + "</section>",
       "<section class=\"detail-section candidate-section candidate-changes-section\"><div class=\"candidate-section-heading\"><h3>候选当前参数</h3><span>本候选生效的科学参数取值；父子对比见下一节</span></div><div class=\"change-list candidate-change-list\">" + renderCandidateChanges(candidate.changes) + "</div></section>",
       renderMutationExplanation(candidate),
+      renderMechanismEvidence(candidate),
       renderCandidateExecutionEvidence(candidate, run),
       "<section class=\"detail-section candidate-section\"><div class=\"candidate-section-heading\"><h3>分目标表现</h3><span>每个目标单独计算，避免单位混淆</span></div><div class=\"target-results\">" + renderCandidateTargets(targets) + "</div></section>",
       "<details class=\"detail-section candidate-evidence\"><summary>查看预测效果预览 <span>" + escapeHTML(predictionRows.length ? formatNumber(predictionRows.length) + " 条记录" : "暂无记录") + "</span></summary>" + predictionTable + "</details>",

@@ -14,6 +14,28 @@ function immutableClone(value) {
 export class RuntimeRunRegistry {
   #runs = new Map();
   #metadata = new WeakMap();
+  #closedFormalExecutions = new Set();
+
+  startFormal(binding) {
+    const executionKey = `${binding.run_id}\0${binding.binding?.formal_execution?.execution_id}`;
+    if (this.#closedFormalExecutions.has(executionKey)) {
+      throw new Error("closed formal execution cannot be prepared again");
+    }
+    const prior = this.#runs.get(binding.run_id);
+    if (prior && prior.status !== "cancelled") {
+      if (prior.binding?.formal_execution
+        && isDeepStrictEqual(this.#metadata.get(prior)?.startBinding, binding)) return prior;
+      throw new Error("formal runtime requires a quiesced prior generation");
+    }
+    const startBinding = immutableClone(binding);
+    return this.#publish(binding.run_id, { ...startBinding, status: "running" },
+      Object.freeze({ generation: Object.freeze({}), startBinding }));
+  }
+
+  restore(record) {
+    if (!this.#metadata.has(record)) throw new Error("unknown runtime generation");
+    this.#runs.set(record.run_id, record);
+  }
 
   start(binding) {
     const prior = this.#runs.get(binding.run_id);
@@ -67,6 +89,9 @@ export class RuntimeRunRegistry {
     const prior = this.#runs.get(runId);
     if (!prior) throw new Error("unknown runtime run");
     if (prior.run_id !== binding.run_id) throw new Error("runtime run identity mismatch");
+    if (status === "cancelled" && prior.binding?.formal_execution) {
+      this.#closedFormalExecutions.add(`${runId}\0${prior.binding.formal_execution.execution_id}`);
+    }
     return this.#publish(runId, { ...prior, ...binding, status }, this.#metadata.get(prior));
   }
 

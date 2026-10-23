@@ -3697,7 +3697,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v14"],
+                        "preset_ids": ["ecology-sample-planner-v15"],
                     },
                 ),
                 SimpleNamespace(

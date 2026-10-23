@@ -143,6 +143,9 @@ test("sidecar preserves public Host tool boundary machine codes", async () => {
   for (const errorCode of [
     "dsh_tool_admission_closed",
     "dsh_tool_authorization_failed",
+    "dsh_retrieval_online_disabled",
+    "dsh_retrieval_budget_exhausted",
+    "dsh_formal_retrieval_isolation",
     "dsh_prediction_binding_closed",
   ]) {
     const server = createServer((_req, res) => {

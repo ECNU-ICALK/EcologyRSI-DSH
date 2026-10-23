@@ -6,8 +6,9 @@ RUNTIME_EVALUATOR_ID = "greenhouse_multihorizon_time_forward@4"
 CELLWISE_EVALUATOR_ID = "greenhouse_multihorizon_time_forward@5"
 TARGETED_SEARCH_POLICY = "cellwise_training_evidence@1"
 LEGACY_CONTRIBUTION_POLICY = "prediction_contribution@1"
-CONTRIBUTION_POLICY = "prediction_contribution@2"
-CONTRIBUTION_POLICIES = frozenset((LEGACY_CONTRIBUTION_POLICY, CONTRIBUTION_POLICY))
+PREVIOUS_CONTRIBUTION_POLICY = "prediction_contribution@2"
+CONTRIBUTION_POLICY = "prediction_contribution@3"
+CONTRIBUTION_POLICIES = frozenset((LEGACY_CONTRIBUTION_POLICY, PREVIOUS_CONTRIBUTION_POLICY, CONTRIBUTION_POLICY))
 BASELINE_REFERENCE_PREDICTOR_ID = "greenhouse-baseline-aligned-ridge@1"
 
 

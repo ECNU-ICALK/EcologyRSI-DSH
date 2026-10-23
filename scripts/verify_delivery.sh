@@ -83,8 +83,8 @@ integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/preset.yml
@@ -110,10 +110,11 @@ current_presets = {
     "ecology-coordinator-v6",
     "ecology-researcher-v17",
     "ecology-candidate-proposer-v9",
-    "ecology-sample-planner-v14",
+    "ecology-sample-planner-v15",
     "ecology-sample-critic-v6",
     "ecology-generation-judge-v10",
 }
+historical_presets = {"ecology-sample-planner-v14"}
 managed_preset = re.compile(
     r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"
 )
@@ -123,13 +124,16 @@ actual_presets = {
     for path in preset_root.iterdir()
     if path.is_dir() and managed_preset.fullmatch(path.name)
 }
-if actual_presets != current_presets:
-    missing = sorted(current_presets - actual_presets)
-    obsolete = sorted(actual_presets - current_presets)
+missing = sorted(current_presets - actual_presets)
+obsolete = sorted(actual_presets - current_presets - historical_presets)
+if missing or obsolete:
     raise SystemExit(
         "DSH preset inventory differs; "
         f"missing={missing or 'none'}, obsolete={obsolete or 'none'}"
     )
+manifest = json.loads((preset_root / "preset-manifest.json").read_text(encoding="utf-8"))
+if {item["preset_id"] for item in manifest["presets"]} != current_presets:
+    raise SystemExit("active DSH preset manifest must contain only the current roster")
 project_text = (root / "pyproject.toml").read_text(encoding="utf-8")
 match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', project_text)
 if match is None:

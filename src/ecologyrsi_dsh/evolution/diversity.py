@@ -130,6 +130,10 @@ def exploration_archive(state, generation: int) -> dict:
     Reuse means authoring a new child of the current parent and evaluating it.
     Unexecuted proposals and holdout evaluations cannot enter this archive.
     """
+    from . import exploration_policy
+    if exploration_policy.enabled(getattr(getattr(state, "task_manifest", None), "metadata", {})):
+        from .branch_archive import build_branch_archive
+        return build_branch_archive(state, generation)
     if not enabled(getattr(getattr(state, "task_manifest", None), "metadata", {})):
         return {}
     from .genome import EcologyEvolutionPluginGenome
@@ -230,7 +234,12 @@ def diversity_report(state) -> dict:
         behavior = batch.metrics.get("sample_execution", {}).get("observed_behavior", {})
         if behavior.get("signature"):
             observed.add(behavior["signature"])
+    from . import exploration_policy
+    from .branch_archive import comparison_summary
     return {"policy": state.task_manifest.metadata.get("evolution_diversity_policy"),
+            **({"exploration_policy": exploration_policy.POLICY,
+                "behavior_comparison": comparison_summary(state)}
+               if exploration_policy.enabled(state.task_manifest.metadata) else {}),
             "proposed_by_family": dict(proposed), "trained_by_family": dict(trained),
             "completed_by_family": dict(completed), "observed_signature_count": len(observed),
             "signature_count_is_descriptive_not_novelty_proof": True,

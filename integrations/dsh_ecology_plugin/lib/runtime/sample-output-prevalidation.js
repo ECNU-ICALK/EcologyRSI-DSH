@@ -3,6 +3,7 @@ import { isTrustedStructuredPhase } from "./structured-stage-errors.js";
 import { sessionEvents } from "./session-events.js";
 
 const SCHEMA = "ecologyrsi-dsh.prediction-prevalidation/1";
+export const PREDICTION_SHAPE_INSTRUCTION = "Pass the whole result object directly to structured_output. decisions must be a native JSON array of decision objects, not a JSON-encoded string. Each decision has exactly six fields: sample_id, predicted, confidence, method, reason_code, evidence_call_ids. schema_version and wave_digest are optional Host-bound metadata; omit them or place them as separate top-level fields with their exact frozen values, never inside a decision, decisions, or a wrapper. Preserve valid prediction values and evidence references while correcting the structure.";
 const MAX_BYTES = 4096;
 const RESPONSE_KEYS = ["diagnostics", "result_digest", "schema_version", "valid"];
 const DIAGNOSTIC_PATH = /^value(?:\.(?:schema_version|wave_digest)|\.decisions(?:\[\d{1,3}\](?:\.(?:sample_id|predicted|confidence|method|reason_code|evidence_call_ids(?:\[\d{1,3}\])?))?)?)?$/;
@@ -31,6 +32,15 @@ function sameCall(event, expected) {
   ) === value);
 }
 
+function freezeSampleIds(ids) {
+  if (!Array.isArray(ids) || ids.length > 128
+    || ids.some(id => typeof id !== "string" || !id.trim() || id.length > 240)
+    || new Set(ids).size !== ids.length) {
+    throw new Error("prediction prevalidation requires unique frozen sample ids");
+  }
+  return Object.freeze([...ids]);
+}
+
 export function trustedSamplePredictionRepair(authority, rawEvents, {
   stage, sessionId, resultDigest,
 } = {}) {
@@ -44,7 +54,9 @@ export function trustedSamplePredictionRepair(authority, rawEvents, {
     && sameCall(calls[1], state.last) && state.first.turn === state.last.turn;
 }
 
-export function predictionPrevalidationFeedback(response, expectedDigest, { allowPredictionRepair = false } = {}) {
+export function predictionPrevalidationFeedback(response, expectedDigest, {
+  allowPredictionRepair = false, structured = null, sampleIds = [],
+} = {}) {
   if (!response || typeof response !== "object" || Array.isArray(response)
     || JSON.stringify(Object.keys(response).sort()) !== JSON.stringify(RESPONSE_KEYS)
     || response.schema_version !== SCHEMA || typeof response.valid !== "boolean"
@@ -59,13 +71,46 @@ export function predictionPrevalidationFeedback(response, expectedDigest, { allo
     throw new SidecarError("invalid_response");
   }
   if (response.valid) return null;
-  // Only fixed codes and field paths are exposed. No Host error string, tool
-  // value, sample payload, credentials, labels or model text is forwarded.
+  // Feedback may repeat frozen identifiers already present in the request,
+  // never submitted unknown IDs, numeric values, labels or raw error text.
+  const ids = freezeSampleIds(sampleIds);
+  const coverageError = response.diagnostics.some(item =>
+    item.code === "sample_coverage_invalid" && item.path === "value.decisions");
+  const identityError = response.diagnostics.some(item =>
+    item.code === "sample_identity_invalid" && /^value\.decisions\[\d+\]\.sample_id$/.test(item.path));
+  const fieldsError = response.diagnostics.some(item => item.code === "prediction_fields_invalid"
+    && /^(?:value|value\.decisions\[\d+\])$/.test(item.path));
+  const array = Array.isArray(structured?.decisions);
+  const hints = [];
+  if (fieldsError || (coverageError && !array)) {
+    hints.push(PREDICTION_SHAPE_INSTRUCTION);
+  }
+  if (coverageError || identityError) {
+    hints.push(`Use exactly one decision for each frozen context.samples sample_id${ids.length ? ` (${ids.length} decisions)` : ""}. Unknown and duplicate IDs are invalid; copy the frozen IDs exactly and preserve valid predictions.`);
+  }
+  if (response.diagnostics.some(item => ["model_copy_mismatch", "mean_blend_mismatch",
+    "model_requires_one_result", "duplicate_computation_evidence"].includes(item.code))) {
+    hints.push("Follow the frozen formula exactly: model copies one successful call's value for that sample; blend uses the equal-weight mean of distinct successful computations. Copy the tool response's mean_formula numbers and references when using that formula. Repeated equivalent calls do not count as extra votes. Preserve full numeric precision; do not add offsets, infer weights or fabricate evidence.");
+  }
+  const seen = array ? new Set(structured.decisions.map(row => row?.sample_id)) : new Set();
+  const missing = array && (coverageError || identityError) ? ids.filter(id => !seen.has(id)) : [];
+  const shownMissing = missing.slice(0, 32);
   const feedback = { schema_version: SCHEMA, diagnostics: response.diagnostics,
     instruction: allowPredictionRepair
       ? "Correct the named fields yourself. For this first blend_requires_two_results rejection only, you may call the existing ecology_execute_prediction_tool within the unchanged frozen tool budget, remaining_calls and deadline to obtain missing successful evidence, or choose another frozen allowed method using existing evidence. Use unique call_ids and wait for each result. Do not call any other tool, invent references or change Host metadata. Submit structured_output once more; the existing two-output-attempt limit still applies."
       : "Correct the named fields yourself using the frozen prediction contract and successful tool evidence. Do not invent references, change Host metadata or request extra tools. The existing two-output-attempt limit still applies." };
-  while (Buffer.byteLength(JSON.stringify(feedback), "utf8") > MAX_BYTES) feedback.diagnostics = feedback.diagnostics.slice(0, -1);
+  const baseInstruction = [feedback.instruction, ...hints].join(" ");
+  const updateInstruction = () => {
+    feedback.instruction = baseInstruction + (missing.length
+      ? ` Missing frozen sample IDs (${shownMissing.length} of ${missing.length} shown): ${JSON.stringify(shownMissing)}.`
+      : "");
+  };
+  updateInstruction();
+  while (Buffer.byteLength(JSON.stringify(feedback), "utf8") > MAX_BYTES) {
+    if (shownMissing.length) { shownMissing.pop(); updateInstruction(); }
+    else if (feedback.diagnostics.length > 1) feedback.diagnostics = feedback.diagnostics.slice(0, -1);
+    else throw new SidecarError("invalid_response");
+  }
   return JSON.stringify(feedback);
 }
 
@@ -84,7 +129,7 @@ async function cancellable(operation, signal) {
 // Contract feedback becomes INVALID_ARGS; infrastructure failure cancels the
 // child and is rethrown by the stage boundary, never offered as model repair.
 export function installSampleOutputPrevalidation(ctx, {
-  stage, parentSessionId, label, bindOutput, digest, validate, signal = null,
+  stage, parentSessionId, label, bindOutput, digest, validate, signal = null, sampleIds = [],
 }) {
   const controller = new AbortController();
   let disposed = false, firstError = null, claimedSession = null;
@@ -95,6 +140,7 @@ export function installSampleOutputPrevalidation(ctx, {
   const handle = { signal: controller.signal, repairAuthority, get error() { return firstError; },
     dispose() { disposed = true; repairState.disposed = true; } };
   if (stage !== "sample.plan") return handle;
+  const frozenIds = freezeSampleIds(sampleIds);
   if (typeof ctx?.on !== "function" || !parentSessionId || !label
     || [bindOutput, digest, validate].some(fn => typeof fn !== "function")) {
     throw new Error("sample output prevalidation requires the scoped native tools hook");
@@ -127,13 +173,15 @@ export function installSampleOutputPrevalidation(ctx, {
       if (digest(bindOutput(exec.arguments)) !== expectedDigest) throw new SidecarError("invalid_response");
       // Validate the full wire contract before granting any exception. The
       // exact call comes from the native event log, not model arguments.
-      let feedback = predictionPrevalidationFeedback(response, expectedDigest);
+      const feedbackContext = { structured, sampleIds: frozenIds };
+      let feedback = predictionPrevalidationFeedback(response, expectedDigest, feedbackContext);
       const call = structuredCall(session, exec.callId);
       if (feedback && !repairState.first && call?.count === 1
         && response.diagnostics.every(item => item.code === "blend_requires_two_results")) {
         repairState.first = callIdentity(call.event);
         repairState.sessionId = session.id;
-        feedback = predictionPrevalidationFeedback(response, expectedDigest, { allowPredictionRepair: true });
+        feedback = predictionPrevalidationFeedback(response, expectedDigest,
+          { ...feedbackContext, allowPredictionRepair: true });
       } else if (!feedback && repairState.first && call?.count === 2
         && repairState.sessionId === session.id) {
         repairState.last = callIdentity(call.event);

@@ -8,7 +8,7 @@ from __future__ import annotations
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 from pathlib import Path
 from ..evolution.agent_policy import summarize_agent_tools, rebind_agent_policy
-from ..evolution.effect_contracts import observe_edit_effects, verify_runtime_effects
+from ..evolution.effect_contracts import TRAINING_EVIDENCE_PHASES, observe_edit_effects, verify_runtime_effects
 from ..core.agent_prediction import successful_agent_provenance_passes
 from ..core.prediction_policy import prediction_usage
 import math
@@ -48,6 +48,7 @@ from .noninferiority import (
     assess_relaxation_debt,
 )
 from .epoch_cohorts import PlannedCohort
+from .execution_validity import complete_origin_coverage
 from .shared_sample_context import sibling_stage_context_digest
 from .baselines import apply_baseline_profile, fit_baseline_profile
 from .greenhouse_prediction import (
@@ -1539,14 +1540,44 @@ class EvaluationPipeline:
         return {"evaluation_scope": scope.to_dict()}
 
     @staticmethod
-    def _observed_edit_effects(task, proposal, records):
+    def _observed_edit_effects(task, proposal, records, scoring_rows=()):
         raw_scope = task.metadata.get("_evaluation_scope")
         phase = raw_scope.get("phase", "training_feedback") if isinstance(raw_scope, Mapping) else "training_feedback"
+        if (task.metadata.get("mutation_effect_scope_policy") is not None
+                and phase in TRAINING_EVIDENCE_PHASES
+                and (proposal.metadata.get("mutation_operations") or proposal.metadata.get("effect_contract"))):
+            # Execution traces identify samples, while the Host's finalized
+            # scoring rows own their target/horizon. Bind by identity, never by
+            # list position or model-authored expected-effect cells. Copy only
+            # coordinates; observed values and rewards do not enter this check.
+            cells = {}
+            for row in scoring_rows:
+                sample_id = row.get("sample_id")
+                target, horizon = row.get("target"), row.get("horizon_hours")
+                if (not isinstance(sample_id, str) or not sample_id or sample_id in cells
+                        or not isinstance(target, str) or not target
+                        or type(horizon) is not int or horizon < 1):
+                    raise ValueError("effect scoring rows require unique sample identities and exact cells")
+                cells[sample_id] = {"target": target, "horizon_hours": horizon}
+            bound, seen = [], set()
+            for record in records:
+                sample_id = record.get("sample_id")
+                cell = cells.get(sample_id)
+                if cell is None or sample_id in seen:
+                    raise ValueError("effect execution records do not match scoring sample identities")
+                if any(key in record and record[key] != value for key, value in cell.items()):
+                    raise ValueError("effect execution coordinates conflict with the scoring sample")
+                seen.add(sample_id)
+                bound.append({**record, **cell})
+            if seen != set(cells):
+                raise ValueError("effect scoring samples are missing execution records")
+            records = bound
         return observe_edit_effects(
             proposal.metadata, records,
             scope_digest=(EvaluationScope.from_dict(raw_scope).scope_key if isinstance(raw_scope, Mapping)
                           else digest({"task": task.digest, "proposal": proposal.proposal_id})),
             phase=phase, parameters=proposal.changes,
+            scope_policy=task.metadata.get("mutation_effect_scope_policy"),
         )
 
 
@@ -2089,6 +2120,7 @@ class EvaluationPipeline:
         )
         sample_coverage_pass = (
             evaluation_eligible_examples > 0
+            and complete_origin_coverage(sample_batch.summary, task.metadata)
             and sample_coverage >= sample_policy.minimum_coverage
             and sample_coverage >= sample_policy.minimum_task_coverage
         )
@@ -2115,7 +2147,7 @@ class EvaluationPipeline:
             and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
-        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records, scoring_rows)
         if effect_receipt is not None:
             sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
@@ -2124,11 +2156,12 @@ class EvaluationPipeline:
         from ..core.prediction_policy import CONTRIBUTION_POLICIES
         contribution_policy = task.metadata.get("behavior_diagnostics_policy")
         if contribution_policy in CONTRIBUTION_POLICIES:
-            from .prediction_contribution import summarize_contribution
+            from .prediction_contribution import summarize_contribution, compiled_candidate_identity
             scope = task.metadata.get("_evaluation_scope") or {}
             sample_execution_summary["prediction_contribution"] = summarize_contribution(
                 sample_records, scoring_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
-                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy,
+                candidate_identity=compiled_candidate_identity(proposal.metadata, proposal.changes, policy=contribution_policy))
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(raw_prediction_rows),
@@ -2681,6 +2714,7 @@ class EvaluationPipeline:
         )
         sample_execution_coverage_pass = (
             total_eligible_rows > 0
+            and complete_origin_coverage(sample_batch.summary, task.metadata)
             and sample_execution_coverage >= sample_policy.minimum_coverage
             and per_task_coverage_pass
         )
@@ -2693,7 +2727,7 @@ class EvaluationPipeline:
             and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
-        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records, scoring_rows)
         if effect_receipt is not None:
             sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         sample_execution_summary["tool_performance"] = summarize_tool_performance(
@@ -2703,14 +2737,19 @@ class EvaluationPipeline:
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
+        from ..evolution.behavior_comparison import build_execution_behavior
+        behavior = build_execution_behavior(task, sample_records, scoring_rows, normalization_scales)
+        if behavior is not None:
+            sample_execution_summary["execution_behavior"] = behavior
         from ..core.prediction_policy import CONTRIBUTION_POLICIES
         contribution_policy = task.metadata.get("behavior_diagnostics_policy")
         if contribution_policy in CONTRIBUTION_POLICIES:
-            from .prediction_contribution import summarize_contribution
+            from .prediction_contribution import summarize_contribution, compiled_candidate_identity
             scope = task.metadata.get("_evaluation_scope") or {}
             sample_execution_summary["prediction_contribution"] = summarize_contribution(
                 sample_records, scoring_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
-                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy,
+                candidate_identity=compiled_candidate_identity(proposal.metadata, proposal.changes, policy=contribution_policy))
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -3411,6 +3450,7 @@ class EvaluationPipeline:
         )
         sample_execution_coverage_pass = (
             total_eligible_rows > 0
+            and complete_origin_coverage(sample_batch.summary, task.metadata)
             and sample_execution_coverage >= sample_policy.minimum_coverage
             and per_task_coverage_pass
         )
@@ -3476,28 +3516,47 @@ class EvaluationPipeline:
             )
 
         sample_execution_summary = dict(sample_batch.summary)
-        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records, scored_feedback_rows)
         if effect_receipt is not None:
             sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         sample_execution_summary["tool_performance"] = summarize_tool_performance(
             sample_records,
             scored_feedback_rows,
         )
+        from .prediction_contribution import compiled_candidate_identity
         sample_execution_summary["agent_tool_performance"] = summarize_agent_tools(
             sample_records, scored_feedback_rows,
             source_phase=(task.metadata.get("_evaluation_scope") or {}).get("phase", "training_feedback"),
+            candidate_identity=compiled_candidate_identity(proposal.metadata, proposal.changes,
+                policy=task.metadata.get("behavior_diagnostics_policy")),
         )
+        from .candidate_attribution import summarize_candidate_attribution, METRIC_KEY
+        attribution_scope = task.metadata.get("_evaluation_scope") or {}
+        attribution = summarize_candidate_attribution(
+            sample_records, scored_feedback_rows, metadata=task.metadata,
+            source_phase=attribution_scope.get("phase"),
+            cohort_digest=attribution_scope.get("cohort_digest"),
+            candidate_identity=compiled_candidate_identity(proposal.metadata, proposal.changes,
+                policy=task.metadata.get("behavior_diagnostics_policy")),
+        )
+        if attribution is not None:
+            sample_execution_summary[METRIC_KEY] = attribution
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scored_feedback_rows)
+        from ..evolution.behavior_comparison import build_execution_behavior
+        behavior = build_execution_behavior(task, sample_records, scored_feedback_rows, normalization_scales)
+        if behavior is not None:
+            sample_execution_summary["execution_behavior"] = behavior
         from ..core.prediction_policy import CONTRIBUTION_POLICIES
         contribution_policy = task.metadata.get("behavior_diagnostics_policy")
         if contribution_policy in CONTRIBUTION_POLICIES:
-            from .prediction_contribution import summarize_contribution
+            from .prediction_contribution import summarize_contribution, compiled_candidate_identity
             scope = task.metadata.get("_evaluation_scope") or {}
             sample_execution_summary["prediction_contribution"] = summarize_contribution(
                 sample_records, scored_feedback_rows, cohort_digest=scope.get("cohort_digest"), source_phase=scope.get("phase"),
-                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy)
+                review_policy=_candidate_remote_critic_policy(task, proposal), policy=contribution_policy,
+                candidate_identity=compiled_candidate_identity(proposal.metadata, proposal.changes, policy=contribution_policy))
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -3698,6 +3757,12 @@ class EvaluationPipeline:
             "evaluation_scope": "visible/training_feedback/historical_replay",
             "causal_interpretation": False,
         }
+        from ..knowledge.comparison_retrieval import comparison_retrieval_snapshot_digest
+        comparison_snapshot_digest = comparison_retrieval_snapshot_digest(task.metadata)
+        if comparison_snapshot_digest is not None:
+            evaluation_metrics["comparison_retrieval_snapshot_digest"] = comparison_snapshot_digest
+        if task.metadata.get("prediction_formula_policy") is not None:
+            evaluation_metrics["prediction_formula_policy"] = task.metadata["prediction_formula_policy"]
         if agent_model_tools is not None:
             evaluation_metrics["prediction_owner"] = "sample_agent"
             evaluation_metrics["agent_inference_stability_status"] = "requires_independent_holdout_replicas"

@@ -79,6 +79,44 @@ test("feedback is bounded even for oversized submissions and long schema field n
   assert.ok(Buffer.byteLength(researchMissingFieldFeedback(long, value)) <= 4096);
 });
 
+test("a copied digest typo identifies both citation paths without rewriting source identity", () => {
+  const allowed = "836a9a3f46f0a35f8a7daae1e82190f0de949d28ec96d89f851d3f6cd4ecec03";
+  const typo = "836a9a3f46f0a35f8a7daae1e82190f0de949d28ec6d89f851d3f6cd4ecec03";
+  const bound = prepareStageOutputSchema(stage, raw, {
+    ...context, knowledge_snapshot: { evidence_catalog: [{ knowledge_id: "paper:one", evidence_digest: allowed }] },
+  });
+  const value = output();
+  value.evidence = [{ evidence_ref: typo, finding: "claim", relevance: "hypothesis" }];
+  value.candidate_directions[1].evidence_refs = [typo];
+  const before = structuredClone(value), schemaBefore = structuredClone(bound);
+  const feedback = JSON.parse(researchMissingFieldFeedback(bound, value));
+  assert.deepEqual(feedback.missing_required_fields, []);
+  assert.deepEqual(feedback.invalid_evidence_references.map(item => item.path), [
+    "value.evidence[0].evidence_ref", "value.candidate_directions[1].evidence_refs[0]",
+  ]);
+  assert.ok(feedback.invalid_evidence_references.every(item =>
+    item.submitted_value === typo && item.allowed_identifiers_one_edit_away.length === 1
+    && item.allowed_identifiers_one_edit_away[0] === allowed));
+  assert.deepEqual(value, before);
+  assert.deepEqual(bound, schemaBefore);
+  value.evidence[0].evidence_ref = allowed;
+  value.candidate_directions[1].evidence_refs = [allowed];
+  assert.equal(researchMissingFieldFeedback(bound, value), null);
+});
+
+test("reference diagnostics do not guess unknown sources or suppress missing fields", () => {
+  const value = missingTitles();
+  value.evidence = [{ evidence_ref: "unrelated-source" }];
+  const feedback = JSON.parse(researchMissingFieldFeedback(schema, value));
+  assert.equal(feedback.missing_required_fields.length, 4);
+  assert.deepEqual(feedback.invalid_evidence_references[0].allowed_identifiers_one_edit_away, []);
+  value.evidence = Array.from({ length: 1000 }, () => ({ evidence_ref: "x".repeat(5000) }));
+  const bounded = researchMissingFieldFeedback(schema, value);
+  assert.ok(Buffer.byteLength(bounded) <= 4096);
+  assert.equal(JSON.parse(bounded).uninspected_evidence_count, 968);
+  assert.ok(JSON.parse(bounded).invalid_evidence_references.every(item => item.submitted_value_truncated));
+});
+
 function fixture() {
   let listener, unsubscriptions = 0;
   const ctx = { on(name, handler, options) {

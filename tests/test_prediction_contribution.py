@@ -2,7 +2,7 @@ import unittest
 from copy import deepcopy
 from dataclasses import replace
 from ecologyrsi_dsh.evaluators.prediction_contribution import summarize_contribution, paired_tool_effect
-from ecologyrsi_dsh.core.prediction_policy import CONTRIBUTION_POLICY, LEGACY_CONTRIBUTION_POLICY
+from ecologyrsi_dsh.core.prediction_policy import CONTRIBUTION_POLICY, LEGACY_CONTRIBUTION_POLICY, PREVIOUS_CONTRIBUTION_POLICY
 from ecologyrsi_dsh.evolution.local_edits import validate_local_edit_proposal
 from tests import test_local_edits as fixture
 
@@ -36,7 +36,7 @@ class ContributionTests(unittest.TestCase):
         changed[0]['label_free_context']['predictor_state']['ridge_alpha'] = .2
         changed[0]['agent_prediction']['tools'][0]['tool_predicted'] = 10.2
         after = summarize_contribution([], changed, cohort_digest='a')
-        self.assertEqual(before['schema_version'], 'ecologyrsi-dsh.prediction-contribution/2')
+        self.assertEqual(before['schema_version'], 'ecologyrsi-dsh.prediction-contribution/3')
         a, b = before['cells'][0], after['cells'][0]
         self.assertEqual(a['observation_vector_digest'], b['observation_vector_digest'])
         self.assertEqual(a['input_vector_digest'], a['observation_vector_digest'])
@@ -200,7 +200,7 @@ class PredictorContributionIntegrationTests(unittest.TestCase):
         candidate = Candidate(candidate_id='c:diagnostics', run_id=proposal.run_id,
                               proposal_id=proposal.proposal_id, generation=0)
         bundles=[]
-        for policy, version in ((LEGACY_CONTRIBUTION_POLICY, 1), (CONTRIBUTION_POLICY, 2)):
+        for policy, version in ((LEGACY_CONTRIBUTION_POLICY, 1), (PREVIOUS_CONTRIBUTION_POLICY, 2), (CONTRIBUTION_POLICY, 3)):
             task = TaskManifest(task_id='diagnostics', objective='diagnostics only',
                 domain_pack='greenhouse_environment@1', visible_datasets=(self.series.dataset_id,),
                 budget={'max_candidates': 1}, metadata={
@@ -214,9 +214,10 @@ class PredictorContributionIntegrationTests(unittest.TestCase):
             self.assertEqual(summary['policy'], policy)
             self.assertEqual(summary['schema_version'], f'ecologyrsi-dsh.prediction-contribution/{version}')
             bundles.append(bundle)
-        self.assertEqual(bundles[0].evaluation.score, bundles[1].evaluation.score)
-        self.assertEqual(bundles[0].evaluation.passed, bundles[1].evaluation.passed)
-        self.assertEqual(bundles[0].artifact.learned_parameters, bundles[1].artifact.learned_parameters)
+        for bundle in bundles[1:]:
+            self.assertEqual(bundles[0].evaluation.score, bundle.evaluation.score)
+            self.assertEqual(bundles[0].evaluation.passed, bundle.evaluation.passed)
+            self.assertEqual(bundles[0].artifact.learned_parameters, bundle.artifact.learned_parameters)
 
 class TargetedLocalEditTests(unittest.TestCase):
     def test_single_cell_edit_and_old_policy_unchanged(self):

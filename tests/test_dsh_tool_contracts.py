@@ -291,8 +291,20 @@ def _race_structured_append_winner(
 
 class DshToolServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        configured = patch(
+            "ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured",
+            return_value=False,
+        )
+        configured.start()
+        self.addCleanup(configured.stop)
         self.ledger = EventLedger(":memory:")
-        self.ledger.append("run:tool-test", "RunCreated", {"test": True})
+        self.ledger.append("run:tool-test", "RunCreated", {
+            "test": True,
+            "task_manifest": {"metadata": {
+                "knowledge_online_enabled": True,
+                "retrieval_policy": {"dynamic_max_calls_per_stage": 3},
+            }},
+        })
         self.service = DshToolService(self.ledger)
         self.service.open_admission("run:tool-test", 3, 2)
 
@@ -2152,6 +2164,12 @@ class DshToolServiceTests(unittest.TestCase):
 
 class DshToolHTTPAuthTests(unittest.TestCase):
     def setUp(self) -> None:
+        configured = patch(
+            "ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured",
+            return_value=False,
+        )
+        configured.start()
+        self.addCleanup(configured.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.environment = patch.dict(
             os.environ, {"ECOLOGYRSI_SIDECAR_TOOL_TOKEN": "tool-secret"}
@@ -2160,7 +2178,10 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         self.server = EvolutionHTTPServer(
             ("127.0.0.1", 0), Path(self.directory.name) / "events.sqlite3"
         )
-        self.server.ledger.append("run:tool-test", "RunCreated", {"test": True})
+        self.server.ledger.append("run:tool-test", "RunCreated", {
+            "test": True,
+            "task_manifest": {"metadata": {"knowledge_online_enabled": True}},
+        })
         self.server.dsh_tools.open_admission("run:tool-test", 3, 2)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -2264,7 +2285,10 @@ class DshToolHTTPAuthTests(unittest.TestCase):
             request,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(replay, {"found": False, "result": None})
+        self.assertFalse(replay["found"])
+        self.assertIsNone(replay["result"])
+        self.assertTrue(replay["policy"]["online_enabled"])
+        self.assertEqual(replay["policy"]["dynamic_max_calls_per_stage"], 8)
 
         status, completed = self._post(
             "/api/ecology-agent-sidecar/v1/retrievals/complete",

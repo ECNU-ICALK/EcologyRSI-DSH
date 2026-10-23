@@ -14,6 +14,23 @@ from ..core.research import DiagnosticReport
 from ..core.immutable import freeze_json, thaw_json
 
 RESEARCH_ITERATION_VERSION = "ecologyrsi-dsh.research-iteration/1"
+RESEARCH_PLAN_MAX_CHARS = 24_000
+RESEARCH_HOST_EXTENSIONS_MAX_CHARS = 12_000
+_HOST_EXTENSION_FIELDS = frozenset({"exploration_archive", "candidate_portfolio"})
+
+
+class ResearchPlanSizeError(ValueError):
+    """Research content exceeded the existing plan allowance after assembly."""
+
+    def __init__(self, actual_chars: int, *, assembled_chars: int | None = None,
+                 host_extension_chars: int = 0) -> None:
+        self.actual_chars = actual_chars
+        self.assembled_chars = assembled_chars if assembled_chars is not None else actual_chars
+        self.host_extension_chars = host_extension_chars
+        super().__init__(
+            "research iteration plan exceeds the bounded contract "
+            f"(maximum {RESEARCH_PLAN_MAX_CHARS} canonical JSON characters)"
+        )
 
 _STATUSES = frozenset(
     {
@@ -164,8 +181,19 @@ def validate_research_plan(value: Any) -> dict[str, Any]:
             value["exploration_archive"], name="research iteration plan.exploration_archive",
             project=_bounded_plan_value,
         )
-    if len(canonical_json(result)) > 24_000:
-        raise ValueError("research iteration plan exceeds the bounded contract (maximum 24000 canonical JSON characters)")
+    # These new Host-owned catalogs have their own bound; they must not consume
+    # the pre-existing research-plan allowance or make model repair impossible.
+    # All field, depth, executable-key and archive-entry checks above still run.
+    extensions = {key: item for key, item in result.items() if key in _HOST_EXTENSION_FIELDS}
+    extension_chars = len(canonical_json(extensions)) if extensions else 0
+    if extension_chars > RESEARCH_HOST_EXTENSIONS_MAX_CHARS:
+        raise ValueError("research Host extensions exceed the bounded contract "
+                         f"(maximum {RESEARCH_HOST_EXTENSIONS_MAX_CHARS} canonical JSON characters)")
+    model_plan = {key: item for key, item in result.items() if key not in _HOST_EXTENSION_FIELDS}
+    actual_chars = len(canonical_json(model_plan))
+    if actual_chars > RESEARCH_PLAN_MAX_CHARS:
+        raise ResearchPlanSizeError(actual_chars, assembled_chars=len(canonical_json(result)),
+                                    host_extension_chars=extension_chars)
     return result
 
 
@@ -431,6 +459,9 @@ class ResearchIteration:
 
 __all__ = [
     "RESEARCH_ITERATION_VERSION",
+    "RESEARCH_PLAN_MAX_CHARS",
+    "RESEARCH_HOST_EXTENSIONS_MAX_CHARS",
+    "ResearchPlanSizeError",
     "ResearchIteration",
     "build_deterministic_research_fallback_plan",
     "validate_research_plan",

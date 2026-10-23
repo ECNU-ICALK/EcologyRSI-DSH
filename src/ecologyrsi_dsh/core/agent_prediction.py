@@ -21,6 +21,7 @@ PREDICTION_TOOL_CALL_BUDGET = 4
 # this set for itself through `blend_rule`; the default is the full set, so a
 # genome that authored nothing is validated exactly as before.
 PREDICTION_METHODS = frozenset({"direct", "model", "blend", "adjusted"})
+EVIDENCE_FORMULA_POLICY = "evidence-mean-or-model@1"
 
 
 def successful_agent_provenance_passes(sample):
@@ -46,13 +47,118 @@ class PredictionContractViolation(ValueError):
         self.diagnostics = tuple(dict(item) for item in diagnostics[:32])
 
 
-def frozen_prediction_methods(allowed_methods=None):
-    if allowed_methods is None:
-        return PREDICTION_METHODS
-    permitted = frozenset(allowed_methods)
+def frozen_prediction_methods(allowed_methods=None, *, formula_policy=None):
+    permitted = PREDICTION_METHODS if allowed_methods is None else frozenset(allowed_methods)
     if not permitted or not permitted <= PREDICTION_METHODS:
         raise ValueError("allowed prediction methods are invalid")
+    if formula_policy == EVIDENCE_FORMULA_POLICY:
+        permitted &= {"model", "blend"}
+        if not permitted:
+            raise ValueError("candidate prediction methods conflict with frozen formula policy")
     return permitted
+
+
+def prediction_formula_contract(metadata):
+    """Prospective, run-frozen contract shared with proposer and local editor."""
+    if not isinstance(metadata, Mapping) or metadata.get("prediction_formula_policy") != EVIDENCE_FORMULA_POLICY:
+        return {}
+    return {
+        "formula_policy": EVIDENCE_FORMULA_POLICY,
+        "allowed_methods": ["model", "blend"],
+        "allowed_blend_rules": ["none", "mean"],
+        "model": "Copy one successful tool call's exact output for each sample; cite exactly that call.",
+        "blend": "Equal weights 1/n over at least two distinct successful computations; cite exactly those calls.",
+        "instruction": (
+            "The formula policy is immutable for this run. Do not author confidence_weighted, direct or "
+            "adjusted final predictions. Different executable calculations belong in a frozen candidate "
+            "strategy program whose actual result is then copied with method=model. Tool selection and "
+            "permitted mid-reasoning retrieval remain autonomous. No unsupported numeric adjustment or "
+            "silent fallback is accepted. Changing a parameter and changing fusion are separate experiments."
+        ),
+    }
+
+
+def validate_formula_profile(profile, formula_policy):
+    """Reject incompatible candidate instructions before scientific execution."""
+    if formula_policy != EVIDENCE_FORMULA_POLICY:
+        return
+    profile = profile if isinstance(profile, Mapping) else {}
+    frozen_prediction_methods(profile.get("allowed_prediction_methods"), formula_policy=formula_policy)
+    directive = profile.get("authored_directive")
+    if isinstance(directive, Mapping) and directive.get("blend_rule") not in {"none", "mean"}:
+        raise ValueError("frozen prediction formula conflicts with authored blend_rule; use none or mean")
+
+
+def unique_prediction_evidence(calls, *, provenance_calls=None):
+    """Keep one vote per executed computation, never deduplicate equal numbers.
+
+    Calls map IDs to (persisted payload, event ID). Reuse links cover equivalent
+    default/explicit parameters; exact argument identity also protects replay.
+    Distinct operators with coincident predictions remain distinct evidence.
+    """
+    by_event = {event_id: payload for payload, event_id in
+                (calls if provenance_calls is None else provenance_calls).values()}
+    seen_arguments, seen_sources, unique = set(), set(), []
+    for call_id, (payload, event_id) in calls.items():
+        if payload["result"]["status"] != "completed":
+            continue
+        arguments = payload["arguments"]
+        computation = digest({"tool_id": payload["tool_id"], "parameters": arguments["parameters"]})
+        source, visited = event_id, set()
+        while source in by_event and source not in visited:
+            visited.add(source)
+            previous = by_event[source]["result"].get("reused_from_event_id")
+            if previous is None:
+                break
+            source = previous
+        if computation not in seen_arguments and source not in seen_sources:
+            unique.append(call_id)
+        seen_arguments.add(computation)
+        seen_sources.add(source)
+    return unique
+
+
+def validate_evidence_formulas(rows, calls):
+    """Validate the new frozen formula using actual, sample-bound tool outputs.
+
+    The Agent submits every number. Host checks but never replaces it, chooses
+    a predictor, infers weights, clips values, or accesses evaluation labels.
+    """
+    issues = []
+    for index, row in enumerate(rows):
+        path = f"value.decisions[{index}]"
+        refs, method = row["evidence_call_ids"], row["method"]
+        if method not in {"model", "blend"}:
+            issues.append({"code": "prediction_method_forbidden", "path": path + ".method"})
+            continue
+        if method == "model" and len(refs) != 1:
+            issues.append({"code": "model_requires_one_result", "path": path + ".evidence_call_ids"})
+            continue
+        if method == "blend" and len(refs) < 2:
+            issues.append({"code": "blend_requires_two_results", "path": path + ".evidence_call_ids"})
+            continue
+        cited = {ref: calls[ref] for ref in refs if ref in calls}
+        values = []
+        for ref in refs:
+            payload = cited.get(ref, ({}, None))[0]
+            result = payload.get("result", {})
+            output = next((item for item in result.get("outputs", ())
+                           if item.get("sample_id") == row["sample_id"]), None)
+            if result.get("status") != "completed" or output is None:
+                break
+            values.append(output["predicted"])
+        if len(values) != len(refs):
+            issues.append({"code": "evidence_unavailable", "path": path + ".evidence_call_ids"})
+            continue
+        if len(unique_prediction_evidence(cited, provenance_calls=calls)) != len(refs):
+            issues.append({"code": "duplicate_computation_evidence", "path": path + ".evidence_call_ids"})
+            continue
+        expected = values[0] if method == "model" else math.fsum(value / len(values) for value in values)
+        if not math.isclose(row["predicted"], expected, rel_tol=1e-9, abs_tol=1e-9):
+            issues.append({"code": "model_copy_mismatch" if method == "model" else "mean_blend_mismatch",
+                           "path": path + ".predicted"})
+    if issues:
+        raise PredictionContractViolation("prediction does not match its frozen evidence formula", issues)
 
 
 def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str, allowed_methods=None):
@@ -127,9 +233,13 @@ def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str, 
 
 def validate_prediction_receipt(structured, receipt, *, event_lookup, identity, before_seq):
     """Validate replay from persisted evidence; never re-run a model during replay."""
-    if not isinstance(receipt, Mapping) or set(receipt) != {
+    formula_bound = isinstance(receipt, Mapping) and receipt.get("schema_version") == "ecologyrsi-dsh.agent-prediction-receipt/3"
+    fields = {
         "schema_version", "wave_digest", "sample_ids", "result_digest", "calls"
-    } or receipt["schema_version"] != "ecologyrsi-dsh.agent-prediction-receipt/2":
+    } | ({"formula_policy"} if formula_bound else set())
+    if not isinstance(receipt, Mapping) or set(receipt) != fields or (
+        receipt["schema_version"] != "ecologyrsi-dsh.agent-prediction-receipt/2" and not formula_bound
+    ) or (formula_bound and receipt["formula_policy"] != EVIDENCE_FORMULA_POLICY):
         raise ValueError("agent prediction receipt is invalid")
     sample_ids = receipt["sample_ids"]
     if not isinstance(sample_ids, list) or not sample_ids or not all(isinstance(s, str) for s in sample_ids) or len(set(sample_ids)) != len(sample_ids):
@@ -142,6 +252,7 @@ def validate_prediction_receipt(structured, receipt, *, event_lookup, identity, 
         raise ValueError("agent prediction call budget exceeded")
     successful = set()
     seen = set()
+    formula_calls = {}
     for call in calls:
         if not isinstance(call, Mapping) or set(call) != {"call_id", "event_id", "output_digest"} or call["call_id"] in seen:
             raise ValueError("agent prediction call receipt is invalid")
@@ -155,8 +266,14 @@ def validate_prediction_receipt(structured, receipt, *, event_lookup, identity, 
             raise ValueError("agent evidence belongs to another wave")
         if p["result"]["status"] == "completed":
             successful.add(call["call_id"])
+        # State replay deliberately exposes only the validated event payload,
+        # kind and sequence. The lookup key is already the receipt's event ID;
+        # requiring an event_id attribute would invalidate archived v2 runs.
+        formula_calls[call["call_id"]] = (p, call["event_id"])
     if any(set(row["evidence_call_ids"]) - successful for row in rows):
         raise ValueError("agent cites missing or failed prediction evidence")
+    if formula_bound:
+        validate_evidence_formulas(rows, formula_calls)
 
 
 def validate_tool_event(p):

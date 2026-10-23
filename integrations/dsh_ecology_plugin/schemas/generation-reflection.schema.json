@@ -32,11 +32,11 @@
     "recommended_search_queries": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 6,
+      "maxItems": 12,
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 180
+        "maxLength": 600
       }
     },
     "candidate_directions": {
@@ -130,6 +130,70 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1000
+          },
+          "mechanism_hypothesis": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema_version",
+              "mechanism_id",
+              "input_refs",
+              "target_cells",
+              "expected_observation_id",
+              "falsification_rule_id"
+            ],
+            "properties": {
+              "schema_version": {
+                "const": "ecologyrsi-dsh.mechanism-hypothesis/1",
+                "type": "string"
+              },
+              "mechanism_id": {
+                "type": "string",
+                "enum": [
+                  "parameter_adjustment",
+                  "prediction_structure",
+                  "feature_structure",
+                  "agent_decision",
+                  "execution_control"
+                ]
+              },
+              "input_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "maxLength": 160
+                }
+              },
+              "target_cells": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "maxLength": 160
+                }
+              },
+              "expected_observation_id": {
+                "type": "string",
+                "enum": [
+                  "paired_error_decreases",
+                  "tool_output_changes",
+                  "execution_branch_exercised"
+                ]
+              },
+              "falsification_rule_id": {
+                "type": "string",
+                "enum": [
+                  "no_paired_error_improvement",
+                  "no_tool_output_change",
+                  "branch_not_exercised"
+                ]
+              }
+            }
           }
         },
         "allOf": [

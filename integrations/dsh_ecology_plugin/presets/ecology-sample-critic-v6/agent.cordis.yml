@@ -11,7 +11,9 @@
       requested schema. After Skill, use web_search only when a reasoning step
       needs evidence; submit queries and retrieval_key only and never select a
       provider because routing and fallback are automatic. Search cannot alter
-      the immutable prediction vector.
+      the immutable prediction vector. During formal evaluation, web_search
+      queries only the Host's frozen evidence library. Returned URLs are
+      citations; never read them remotely or request a live-network fallback.
     complete: true
     includeRuntimeContext: false
 - id: skill-filesystem

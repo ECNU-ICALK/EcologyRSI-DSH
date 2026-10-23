@@ -6,6 +6,7 @@ from ..evaluators.skill_program import skill_grammar
 from ..evaluators.strategy_program import strategy_program_grammar
 
 from ..evolution.agent_policy import rebind_agent_policy
+from ..evolution.local_edit_memory import local_edit_memory_context
 
 import math
 from dataclasses import replace
@@ -50,6 +51,7 @@ from ..evolution.local_edits import (
     LocalEditResult,
     apply_or_reject_local_edit_bundle,
 )
+from ..core.agent_prediction import prediction_formula_contract, validate_formula_profile
 from ..evolution.strategies import (
     _host_validation_feedback,
     _output_budget_feedback,
@@ -224,10 +226,18 @@ def _durable_batch_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         # executed-behavior inheritance. The editor's compact metrics whitelist
         # must not erase their digest-bound evidence at the durable boundary.
         # Missing historical diagnostics stay missing; do not synthesize them.
-        for name in ("prediction_contribution", "observed_behavior"):
+        for name in ("prediction_contribution", "observed_behavior", "execution_behavior", "candidate_agent_attribution"):
             if isinstance(sample.get(name), Mapping):
                 result["sample_execution"][name] = sample[name]
+        # Later-generation tool experience is generated after scoring and is
+        # already bounded by the evaluator. Keep it at the durable boundary;
+        # the editor's smaller input whitelist must not erase this evidence.
+        # Absent historical aggregates remain absent, without reconstruction.
+        if isinstance(sample.get("agent_tool_performance"), (list, tuple)):
+            result["sample_execution"]["agent_tool_performance"] = sample["agent_tool_performance"]
     for name in (
+        "comparison_retrieval_snapshot_digest",
+        "prediction_formula_policy",
         "promotion_block_evidence",
         "baseline_metrics_digest",
         "baseline_profile_digest",
@@ -331,7 +341,7 @@ def _evaluate_formal_batch_arm(
         )
     metrics = dict(bundle.evaluation.metrics)
     from ..evaluators.execution_validity import require_valid_execution
-    require_valid_execution(metrics, scope.origin_count, phase="formal_batch")
+    require_valid_execution(metrics, scope.origin_count, phase="formal_batch", metadata=state.task_manifest.metadata)
     suffix = f":{arm.value}" if arm is not None else ""
     evaluation = BatchEvaluation(
         evaluation_id=(
@@ -1659,7 +1669,13 @@ def _validated_local_edit_response(runtime: DshStructuredRoleRuntime, **request:
             feedback = _output_budget_feedback(attempt=attempt, max_output_tokens=request.get("max_tokens"))
             continue
         try:
-            return LocalEditProposal.from_dict(result)
+            proposal = LocalEditProposal.from_dict(result)
+            formula = request["context"].get("prediction_formula_contract", {})
+            for operation in proposal.operations:
+                if operation.get("op") == "author_role_directive":
+                    validate_formula_profile({"authored_directive": operation.get("authored_directive")},
+                                             formula.get("formula_policy"))
+            return proposal
         except (TypeError, ValueError) as exc:
             if attempt == 2:
                 raise DshNativeRuntimeUnavailableError(
@@ -1755,8 +1771,12 @@ def _local_edit_proposal(
             "nothing read. Spend the operation on the Agent's instructions "
             "instead, so a later batch can measure the scientific parameters."
         )
+    from ..evaluators.repeatability import summary_for as repeatability_summary, enabled as repeatability_enabled
+    noise = (repeatability_summary(state, candidate.generation)
+             if repeatability_enabled(state.task_manifest.metadata) else None)
     context_payload = {
         **context.to_dict(),
+        **({"same_genome_repeatability": noise} if noise is not None else {}),
         "allowed_mutation_targets": advertised,
         # An axis name alone was not usable: the editor was shown six axes and
         # the operation names for three of them (the Skill documents only those),
@@ -1785,15 +1805,18 @@ def _local_edit_proposal(
         # replace: the editor would learn how to write a directive it cannot
         # submit.
         **(
-            {"legal_directive_grammar": _legal_directive_grammar(revision)}
+            {"legal_directive_grammar": _legal_directive_grammar(revision, metadata=state.task_manifest.metadata)}
             if advertised.get("instruction_directive")
             else {}
         ),
+        **({"prediction_formula_contract": formula}
+           if (formula := prediction_formula_contract(state.task_manifest.metadata)) else {}),
         **({"legal_strategy_program_grammar": strategy_program_grammar()} if advertised.get("strategy_program") else {}),
         **({"legal_skill_grammar": skill_grammar()} if advertised.get("skill_program") else {}),
         "recent_edit_history": _recent_local_edit_history(
             state, candidate.candidate_id, batch.batch_index
         ),
+        **local_edit_memory_context(state, generation=context.generation),
         **_trajectory_score_history(state, candidate.candidate_id, batch.batch_index),
         "decision_policy": decision_policy,
         "output_contract": {
@@ -1805,6 +1828,8 @@ def _local_edit_proposal(
            if _cohort_scoped_editor(state) else {}),
         **({"prediction_contribution": _local_edit_contribution(evaluation.metrics)}
            if context.search_policy == "cellwise_training_evidence@1" else {}),
+        **({"candidate_agent_attribution": _local_edit_attribution(evaluation.metrics)}
+           if state.task_manifest.metadata.get("candidate_attribution_policy") == "sealed_unique_origin_attribution@1" else {}),
         "batch_evidence": {
             "score": evaluation.score,
             "passed": evaluation.passed,
@@ -2038,7 +2063,7 @@ def _legal_instruction_parameter_bounds(
     return deep_thaw_json(result)
 
 
-def _legal_directive_grammar(revision: CandidateRevision) -> dict[str, Any]:
+def _legal_directive_grammar(revision: CandidateRevision, *, metadata=None) -> dict[str, Any]:
     """Publish the authoring grammar and the directive the candidate has now.
 
     Same intent as the bounds publishers above: an axis name plus an operation
@@ -2051,7 +2076,7 @@ def _legal_directive_grammar(revision: CandidateRevision) -> dict[str, Any]:
     """
 
     genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
-    return deep_thaw_json(_directive_authoring_contract(genome))
+    return deep_thaw_json(_directive_authoring_contract(genome, metadata=metadata))
 
 
 def _recent_local_edit_history(
@@ -2260,6 +2285,12 @@ def _inactive_axis_rejection_reason(
             return _INACTIVE_AXIS_REJECTION_REASON
     return None
 
+
+
+def _local_edit_attribution(metrics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Complete bounded grid from this sealed training batch, no raw labels."""
+    from ..evaluators.candidate_attribution import METRIC_KEY, validated_summary
+    return validated_summary(metrics.get("sample_execution", {}).get(METRIC_KEY))
 
 
 def _local_edit_contribution(metrics: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -56,8 +56,11 @@ const server=createServer(async(req,res)=>{try{
    if(s.kind==='malformed')return respond(res,200,{valid:true});
    if(s.kind==='wrong-digest')return respond(res,200,{schema_version:schemaVersion,valid:true,result_digest:'f'.repeat(64),diagnostics:[]});
    if(s.kind==='deadline'){await new Promise(resolve=>setTimeout(resolve,500));return respond(res,200,{schema_version:schemaVersion,valid:true,result_digest:body.result_digest,diagnostics:[]});}
-   const invalid=body.structured.decisions.some(d=>d.method==='blend'&&d.evidence_call_ids.length<2);
-   const diagnostics=invalid?body.structured.decisions.map((_,i)=>({code:'blend_requires_two_results',path:`value.decisions[${i}].evidence_call_ids`})) : [];
+   let diagnostics=[];
+   if(!Array.isArray(body.structured.decisions))diagnostics=[{code:'sample_coverage_invalid',path:'value.decisions'}];
+   else if(body.structured.decisions.some(d=>!s.context.samples.some(sample=>sample.sample_id===d.sample_id)))diagnostics=[{code:'sample_identity_invalid',path:'value.decisions[8].sample_id'}];
+   else if(body.structured.decisions.some(d=>d.method==='blend'&&d.evidence_call_ids.length<2))diagnostics=body.structured.decisions.map((_,i)=>({code:'blend_requires_two_results',path:`value.decisions[${i}].evidence_call_ids`}));
+   const invalid=diagnostics.length>0;
    return respond(res,200,{schema_version:schemaVersion,valid:!invalid,result_digest:body.result_digest,diagnostics});
   }
   assert.ok(req.url.endsWith('/structured-results'));
@@ -70,7 +73,11 @@ const server=createServer(async(req,res)=>{try{
  if(!outsider&&index===0&&s.isolation)await runOutsider(s);
  const feedback=body.messages.filter(m=>m.role==='tool').map(textOf).filter(t=>t.includes(schemaVersion));
  if(outsider)assert.equal(feedback.length,0);
- if(!outsider&&index===3&&s.invalidAttempts&&!s.nativeInvalid){assert.equal(feedback.length,1);assert.ok(feedback[0].includes('value.decisions[8].evidence_call_ids'));s.feedbackReachedNextHttp=true;}
+ if(!outsider&&index===3&&s.invalidAttempts&&!s.nativeInvalid){assert.equal(feedback.length,1);
+  if(s.feedbackKind==='array'){assert.match(feedback[0],/native JSON array of decision objects/);assert.match(feedback[0],/optional Host-bound metadata/);}
+  else if(s.feedbackKind==='identity'){assert.match(feedback[0],/Missing frozen sample IDs/);assert.ok(feedback[0].includes(s.context.samples[8].sample_id));}
+  else assert.ok(feedback[0].includes('value.decisions[8].evidence_call_ids'));
+  assert.doesNotMatch(feedback[0],/untrusted-model-value/);s.feedbackReachedNextHttp=true;}
  const tool=outsider?'structured_output':index===0?'skill':index===1||(s.predictionRepair&&index===3)?'ecology_execute_prediction_tool':'structured_output';
  const outputNumber=calls.filter(call=>call.tool==='structured_output').length+1;
  const invalid=outsider||(tool==='structured_output'&&outputNumber<=s.invalidAttempts);
@@ -121,12 +128,15 @@ try{
  offEvents=host.ctx.on('session/event',(session,event)=>{if(state?.role&&session.header?.parentSession===state.role.sessionId)state.events.push({session_id:session.id,event});},{global:true});
  const repairSpecs=[{name:'T-blend-repair-extra-tool',invalidAttempts:1,predictionRepair:true},{name:'blend-only-repair-extra-tool',invalidAttempts:1,predictionRepair:true,blendOnly:true},{name:'two-blend-invalid-with-tool',invalidAttempts:2,predictionRepair:true},{name:'ordinary-schema-extra-tool-denied',invalidAttempts:1,predictionRepair:true,nativeInvalid:'wave',expectedFailure:'structured_result_persist_tool_evidence'}];
  const specs=[{name:'S-nine-blend-single-ref-corrected',invalidAttempts:1,isolation:true},{name:'two-invalid-no-third',invalidAttempts:2},{name:'wrong-wave-native-schema',invalidAttempts:1,nativeInvalid:'wave'},{name:'array-native-schema',invalidAttempts:1,nativeInvalid:'array'},...['unavailable','authorization','closed','malformed','wrong-digest','deadline','persist-closed'].map(kind=>({name:kind,kind,invalidAttempts:0}))];
- for(const spec of authoritative?[...specs.slice(0,2),{name:'persist-revoked',kind:'persist-revoked',invalidAttempts:0},...repairSpecs]:[...specs,...repairSpecs]){
+ const exactFeedbackSpecs=['array','identity'].flatMap(feedbackKind=>[1,2].map(invalidAttempts=>({name:`${feedbackKind}-${invalidAttempts===1?'corrected':'two-invalid-no-third'}`,feedbackKind,invalidAttempts})));
+ for(const spec of authoritative?[...specs.slice(0,2),{name:'persist-revoked',kind:'persist-revoked',invalidAttempts:0},...repairSpecs]:[...specs,...repairSpecs,...exactFeedbackSpecs]){
   state={...spec,runId:`local-${spec.name}`,requests:[],outsider:[],events:[],reservations:0,validations:[],toolCalls:0,persisted:[],persistAttempts:0,failures:[],feedbackReachedNextHttp:false};const s=state;
   s.context=sampleContextFixture();if(s.blendOnly)s.context.context.prediction_contract.allowed_methods=['blend'];s.toolResult=predictionResultFixture(s.context);
   s.role=await manager.createRoleAgent({run_id:s.runId,role:'sample-planner',preset_id:manifest.presets.find(p=>p.role==='sample-planner').preset_id,model:'local-fixture/model',cwd:home});
   const transport=sampleOutputTransport('sample.plan',native.prepareStageOutputSchema('sample.plan',await runner.schema(native.STAGES['sample.plan'].file),s.context));s.schema=transport.schema;
   s.validOutput={decisions:s.context.samples.map((sample,i)=>({sample_id:sample.sample_id,predicted:10+i,confidence:.8,method:'model',reason_code:'agent_model',evidence_call_ids:['cm1']}))};s.invalidOutput=structuredClone(s.validOutput);if(s.predictionRepair&&!s.nativeInvalid)s.validOutput.decisions.forEach(d=>{d.method='blend';d.reason_code='agent_blend';d.evidence_call_ids=['cm1','cm2'];});s.invalidOutput.decisions.forEach(d=>{d.method='blend';d.reason_code='agent_blend';});if(s.nativeInvalid==='wave')s.invalidOutput={...s.validOutput,wave_digest:'e'.repeat(64)};if(s.nativeInvalid==='array')s.invalidOutput=[];
+  if(s.feedbackKind==='array')s.invalidOutput={decisions:JSON.stringify(s.validOutput.decisions)+', "schema_version": "untrusted-model-value"}'};
+  if(s.feedbackKind==='identity'){s.invalidOutput=structuredClone(s.validOutput);s.invalidOutput.decisions[8].sample_id='untrusted-model-value';}
   s.binding={run_id:s.runId,stage:'sample.plan',run_state_revision:1,stage_attempt:1,ledger_expected_revision:1,admission_id:`admission-${s.name}`,idempotency_key:`idempotency-${s.name}`,request:{role:'sample-planner',output_schema_id:'ecology-sample-predictions@2',max_tokens:2048,context:s.context,context_canonical_json:canonical(s.context),context_digest:jsonDigest(s.context),identity_digests:{genome_digest:'a'.repeat(64),compiled_behavior_digest:'b'.repeat(64),phenotype_instance_digest:'c'.repeat(64)}}};
   if(authoritative){s.binding.admission_id=hostMetadata.cases[s.name].admission_id;}
   runner.samplePlannerStageTimeoutMs=s.kind==='deadline'?250:15000;

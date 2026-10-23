@@ -21,6 +21,23 @@ const CONTROL_TRANSITIONS = Object.freeze({
   resume: Object.freeze(["pausing", "paused"]),
 });
 
+const FORMAL_EXECUTION_FIELDS = [
+  "artifact_digest", "candidate_id", "candidate_revision_id", "execution_id", "snapshot_digest", "stage",
+];
+
+function requireFormalExecution(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !isDeepStrictEqual(Object.keys(value).sort(), FORMAL_EXECUTION_FIELDS)
+    || !["validation", "final_test"].includes(value.stage)
+    || !["execution_id", "artifact_digest", "snapshot_digest"]
+      .every(key => typeof value[key] === "string" && /^[a-f0-9]{64}$/.test(value[key]))
+    || !["candidate_id", "candidate_revision_id"]
+      .every(key => typeof value[key] === "string" && value[key].length > 0 && value[key].length <= 512)) {
+    throw new Error("invalid formal runtime execution contract");
+  }
+  return structuredClone(value);
+}
+
 export class RuntimeController {
   constructor(ctx, { registry = new RuntimeRunRegistry(), presetCatalog = DEFAULT_PRESETS, stageRunner = null } = {}) {
     this.ctx = ctx;
@@ -81,8 +98,56 @@ export class RuntimeController {
   }
 
   startRun(binding) {
+    return this.#startRun(binding);
+  }
+
+  async prepareFormalRun(request) {
+    const formal = requireFormalExecution(request.formal_execution);
+    if (!request.binding || typeof request.binding !== "object" || Array.isArray(request.binding)
+      || ["formal_execution", "initial_run_status", "restore_provenance"]
+        .some(key => Object.hasOwn(request.binding, key))) {
+      throw new Error("invalid formal runtime frozen binding");
+    }
+    const { formal_execution, ...identity } = request;
+    const binding = { ...identity, binding: { ...request.binding,
+      initial_run_status: "running", formal_execution: formal } };
+    await this.#startRun(binding, true);
+    const current = this.#current(request.run_id);
+    if (current.status !== "running"
+      || !isDeepStrictEqual(current.binding?.formal_execution, formal)
+      || !this.#hostsReadyFor(this.runLifecycles.get(request.run_id), current)) {
+      throw new Error("formal runtime preparation did not complete");
+    }
+    return { ...this.#response(request), status: current.status, formal_execution_id: formal.execution_id };
+  }
+
+  async closeFormalRun(request) {
+    const current = this.#current(request.run_id);
+    const executionId = current.binding?.formal_execution?.execution_id;
+    if (typeof request.formal_execution_id !== "string" || executionId !== request.formal_execution_id) {
+      throw new Error("formal runtime cleanup identity mismatch");
+    }
+    const { formal_execution_id, ...identity } = request;
+    const lifecycle = this.runLifecycles.get(request.run_id);
+    // Multiple Host cleanup paths may carry newer ledger cursors for the same
+    // formal execution. Join its drain, or retry its exact failed command.
+    const draining = [...(lifecycle?.controls || [])].find(token => token.action === "cancel");
+    if (draining) await draining.promise;
+    else await this.#cancel(lifecycle?.failed.cancel || identity, executionId);
+    const closed = this.#current(request.run_id);
+    if (closed.status !== "cancelled" || closed.binding?.formal_execution?.execution_id !== executionId) {
+      throw new Error("formal runtime cleanup did not complete");
+    }
+    return { ...this.#response(identity), status: closed.status, formal_execution_id: executionId };
+  }
+
+  #startRun(binding, formal = false) {
     const current = this.registry.get(binding.run_id);
-    if (current && TERMINAL_START_STATUSES.includes(current.status)) {
+    if (!formal && (current?.binding?.formal_execution || binding.binding?.formal_execution)) {
+      return Promise.reject(new Error("formal runtime requires its dedicated control entry"));
+    }
+    const replacesCancelled = formal && current?.status === "cancelled";
+    if (current && TERMINAL_START_STATUSES.includes(current.status) && !replacesCancelled) {
       return Promise.reject(this.#startTransitionError(current.status));
     }
     const lifecycle = this.#lifecycle(binding.run_id);
@@ -90,6 +155,7 @@ export class RuntimeController {
     if (
       lifecycle.start !== null
       && lifecycle.start.generation === currentGeneration
+      && !replacesCancelled
     ) {
       if (isDeepStrictEqual(lifecycle.start.binding, binding)) {
         return lifecycle.start.promise;
@@ -101,7 +167,7 @@ export class RuntimeController {
     }
     let accepted;
     try {
-      accepted = this.registry.start(binding);
+      accepted = formal ? this.registry.startFormal(binding) : this.registry.start(binding);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -127,6 +193,7 @@ export class RuntimeController {
       releaseFinalization,
       finalized: false,
       status: "pending",
+      previous: formal ? current : null,
     };
     lifecycle.start = startToken;
     lifecycle.hosts = "creating";
@@ -159,6 +226,8 @@ export class RuntimeController {
           route_config_digest: reviewRole
             ? frozen.resolved_review_route_config_digest
             : frozen.resolved_policy_route_config_digest,
+          ...(frozen.formal_execution
+            ? { formal_execution_id: frozen.formal_execution.execution_id } : {}),
         });
       }));
       const failed = creations.find((item) => item.status === "rejected");
@@ -207,7 +276,8 @@ export class RuntimeController {
           lifecycle.epoch === startToken.startEpoch
           && current === startToken.accepted
         ) {
-          this.registry.delete(binding.run_id);
+          if (startToken.previous) this.registry.restore(startToken.previous);
+          else this.registry.delete(binding.run_id);
         }
       }
       startToken.status = "rejected";
@@ -260,6 +330,7 @@ export class RuntimeController {
   }
   activate(binding) {
     const current = this.#current(binding.run_id);
+    if (current.binding?.formal_execution) return Promise.reject(new Error("formal runtime requires its dedicated control entry"));
     const lifecycle = this.#lifecycle(binding.run_id);
     const generation = this.registry.generationOf(current);
     if (current.status === "running") {
@@ -280,6 +351,7 @@ export class RuntimeController {
   }
   pause(binding) {
     const current = this.#current(binding.run_id);
+    if (current.binding?.formal_execution) return Promise.reject(new Error("formal runtime requires its dedicated control entry"));
     const lifecycle = this.#lifecycle(binding.run_id);
     const existing = this.#matchingControl(lifecycle, "pause", binding);
     if (existing) return existing.promise;
@@ -333,7 +405,15 @@ export class RuntimeController {
   }
 
   cancel(binding) {
+    return this.#cancel(binding);
+  }
+
+  #cancel(binding, formalExecutionId = null) {
     const current = this.#current(binding.run_id);
+    if (current.binding?.formal_execution
+      && current.binding.formal_execution.execution_id !== formalExecutionId) {
+      return Promise.reject(new Error("formal runtime requires its dedicated control entry"));
+    }
     const lifecycle = this.#lifecycle(binding.run_id);
     const existing = this.#matchingControl(lifecycle, "cancel", binding);
     if (existing) return existing.promise;
@@ -371,6 +451,7 @@ export class RuntimeController {
   }
   resume(binding) {
     const current = this.#current(binding.run_id);
+    if (current.binding?.formal_execution) return Promise.reject(new Error("formal runtime requires its dedicated control entry"));
     const lifecycle = this.#lifecycle(binding.run_id);
     const existing = this.#matchingControl(lifecycle, "resume", binding);
     if (existing) return existing.promise;

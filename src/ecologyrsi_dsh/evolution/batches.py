@@ -1335,6 +1335,11 @@ def _adaptive_reflection_analysis(
 
     reflection_analysis = analysis.to_dict()
     reflection_analysis.pop("ranking", None)
+    from ..evaluators.candidate_attribution import enabled as attribution_enabled, validated_summary, METRIC_KEY
+    if attribution_enabled(state.task_manifest.metadata):
+        reports = [validated_summary(row.get(METRIC_KEY), phases={"formal_batch"})
+                   for row in analysis.ranking]
+        reflection_analysis["candidate_attribution"] = [r for r in reports if r is not None][:4]
     if (
         state.task_manifest.metadata.get("optimization_protocol")
         not in ADAPTIVE_PROTOCOLS

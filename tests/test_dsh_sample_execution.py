@@ -910,6 +910,49 @@ class DshSampleExecutionTests(unittest.TestCase):
             runtime.requests[1]["request"]["context"]["allowed_reason_codes"],
             sorted(REMOTE_REASON_CODES),
         )
+        self.assertNotIn(
+            "evaluation_scope", runtime.requests[1]["request"]["context"]["context"],
+        )
+
+    def test_formal_critic_preserves_phase_and_replica_in_the_native_wave(self) -> None:
+        runtime = _SampleRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-formal-scope",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {"run_state_revision": 7, "ledger_expected_revision": 11},
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy", review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+        )
+        for phase in ("validation", "final_test"):
+            requests = []
+            for replica in (0, 1):
+                scope = {"phase": phase, "inference_replica": replica, "cohort_digest": "e" * 64}
+                plan = adapter.plan_batch({
+                    "run_id": "run-formal-scope", "candidate_id": "candidate-1",
+                    "dataset_digest": "d" * 64, "partition": "training_feedback",
+                    "algorithm_id": "registered-predictor", "algorithm_version": "1",
+                    "evaluation_scope": scope,
+                })
+                result = adapter.predict_samples((_request("same-origin"),), (plan,), attempts=(1,))[0]
+                self.assertIsNone(result.error)
+                planner, critic = runtime.requests[-2:]
+                for request in (planner, critic):
+                    # JS receives the routing wave as request.context and checks
+                    # its nested context.evaluation_scope before child launch.
+                    self.assertEqual(request["request"]["context"]["context"]["evaluation_scope"], scope)
+                wave = critic["request"]["context"]
+                self.assertEqual(wave["wave_digest"], digest({
+                    key: value for key, value in wave.items() if key != "wave_digest"
+                }))
+                requests.append(critic)
+            self.assertNotEqual(requests[0]["idempotency_key"], requests[1]["idempotency_key"])
+            self.assertNotEqual(requests[0]["stage_attempt"], requests[1]["stage_attempt"])
 
     def test_executor_runs_one_post_score_reflection_per_origin(self) -> None:
         runtime = _SampleRuntime()

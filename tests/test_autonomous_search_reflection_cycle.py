@@ -459,6 +459,12 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         )
 
     def setUp(self) -> None:
+        provider = patch(
+            "ecologyrsi_dsh.knowledge.deepseek_search.is_deepseek_search_configured",
+            return_value=False,
+        )
+        provider.start()
+        self.addCleanup(provider.stop)
         self.ledger = EventLedger(":memory:")
         self.addCleanup(self.ledger.close)
         self.runtime = _CycleRuntime()

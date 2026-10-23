@@ -107,11 +107,11 @@ class ModelPreflightAuditTests(unittest.TestCase):
         from ecologyrsi_dsh.integrations import model_canary
         _body, state = self.create()
         task = replace(state.task_manifest, metadata={**state.task_manifest.metadata,
-            "dsh_preset_ids": [p.replace("ecology-sample-planner-v14", "ecology-sample-planner-v12")
+            "dsh_preset_ids": [p.replace("ecology-sample-planner-v15", "ecology-sample-planner-v12")
                                for p in state.task_manifest.metadata["dsh_preset_ids"]]})
         # Produce the audit exactly as the previous release did, then replay
         # under the current role inventory. No receipt is rewritten at replay.
-        previous_roles = tuple(tuple("ecology-sample-planner-v12" if v == "ecology-sample-planner-v14" else v
+        previous_roles = tuple(tuple("ecology-sample-planner-v12" if v == "ecology-sample-planner-v15" else v
                                      for v in row) for row in model_canary._ROLES)
         with patch.object(model_canary, "_ROLES", previous_roles):
             receipts = receipts_for(task.metadata)
@@ -120,14 +120,14 @@ class ModelPreflightAuditTests(unittest.TestCase):
         validate_preflight_audit(audit, task, state.run.run_id,
             recorded_at=audit["checked_at"], created_at=state.run.created_at)
         self.assertEqual(audit, before)
-        self.assertEqual(required_canary_identities(task.metadata)[-1]["preset_id"], "ecology-sample-planner-v14")
+        self.assertEqual(required_canary_identities(task.metadata)[-1]["preset_id"], "ecology-sample-planner-v15")
         with self.assertRaises(ValueError):
             canary_request(receipts[-1]["identity"])
         with self.assertRaises(ValueError):
             build_preflight_audit(task, state.run.run_id, receipts)
         for preset_ids in (
             [p.replace("planner-v12", "planner-v999") for p in task.metadata["dsh_preset_ids"]],
-            [*task.metadata["dsh_preset_ids"], "ecology-sample-planner-v14"],
+            [*task.metadata["dsh_preset_ids"], "ecology-sample-planner-v15"],
             [p for p in task.metadata["dsh_preset_ids"] if "sample-planner" not in p],
         ):
             with self.subTest(preset_ids=preset_ids), self.assertRaises(ValueError):
@@ -139,10 +139,10 @@ class ModelPreflightAuditTests(unittest.TestCase):
         from ecologyrsi_dsh.integrations import model_canary
         _body, state = self.create()
         for researcher in ('ecology-researcher-v15', 'ecology-researcher-v16'):
-            for planner in ('ecology-sample-planner-v12', 'ecology-sample-planner-v13'):
+            for planner in ('ecology-sample-planner-v12', 'ecology-sample-planner-v13', 'ecology-sample-planner-v14'):
                 with self.subTest(researcher=researcher, planner=planner):
                     replacements={'ecology-researcher-v17': researcher,
-                                  'ecology-sample-planner-v14': planner}
+                                  'ecology-sample-planner-v15': planner}
                     task=replace(state.task_manifest, metadata={**state.task_manifest.metadata,
                         'dsh_preset_ids': [replacements.get(p,p)
                                           for p in state.task_manifest.metadata['dsh_preset_ids']]})

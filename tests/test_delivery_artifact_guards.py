@@ -22,6 +22,22 @@ with mock.patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]):
     from create_delivery_archive import ROOT_FILES, included_source_files, project_version
 
 
+class DeliveryPresetInventoryTests(unittest.TestCase):
+    def test_current_roster_accepts_only_explicit_historical_resources(self):
+        current = {f"package/presets/{preset_id}/preset.yml"
+                   for preset_id in verifier.CURRENT_DSH_PRESET_IDS}
+        history = {"package/presets/ecology-sample-planner-v14/preset.yml"}
+        verifier.assert_current_dsh_presets(current, "current")
+        verifier.assert_current_dsh_presets(current | history, "history")
+        with self.assertRaisesRegex(RuntimeError, "obsolete: ecology-sample-planner-v13"):
+            verifier.assert_current_dsh_presets(
+                current | {"package/presets/ecology-sample-planner-v13/preset.yml"}, "unexpected")
+        with self.assertRaisesRegex(RuntimeError, "missing: ecology-sample-planner-v15"):
+            verifier.assert_current_dsh_presets(
+                {name for name in current if "planner-v15" not in name} | history,
+                "historical cannot replace current")
+
+
 class DeliveryArtifactGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

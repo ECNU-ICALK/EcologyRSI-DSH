@@ -40,7 +40,7 @@ class EvidenceProjectionTests(unittest.TestCase):
         self.assertFalse(legacy["enabled"])
         self.assertEqual(legacy["status"], "not_enabled")
         self.assertEqual(legacy["latest_training_summary"], summary)
-        for policy in ("prediction_contribution@1", "prediction_contribution@2"):
+        for policy in ("prediction_contribution@1", "prediction_contribution@2", "prediction_contribution@3"):
             s.task_manifest.metadata["behavior_diagnostics_policy"] = policy
             self.assertEqual(contribution_observations(s)["status"], "recorded")
             self.assertEqual(contribution_observations(s)["latest_training_summary"], summary)

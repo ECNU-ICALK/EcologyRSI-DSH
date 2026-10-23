@@ -311,6 +311,9 @@ def build_generation_comparison(
 
     if len({item.evaluator_digest for item in evaluations}) != 1:
         raise ValueError("holdout evaluations must share one evaluator digest")
+    for contract_key in ("comparison_retrieval_snapshot_digest", "prediction_formula_policy"):
+        if len({item.metrics.get(contract_key) for item in evaluations}) != 1:
+            raise ValueError("holdout evaluations differ in " + contract_key)
     profile = fitness_profile or FitnessProfile()
     expected_grid = {
         (target, horizon)

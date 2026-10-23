@@ -79,6 +79,37 @@ test("runtime prefix cannot proxy arbitrary methods or paths", async () => {
   assert.equal(res.statusCode, 404);
 });
 
+test("formal lifecycle routes enforce existing authentication and exact identity envelopes", async () => {
+  const calls = [];
+  const routes = route({
+    prepareFormalRun: async body => { calls.push(["prepare", body]); return { accepted: true }; },
+    closeFormalRun: async body => { calls.push(["close", body]); return { accepted: true }; },
+  }, 4096);
+  const identity = { run_id: "run:1", run_state_revision: 2, stage_attempt: 0,
+    ledger_expected_revision: 3, idempotency_key: "formal:1" };
+  for (const action of ["prepare", "close"]) {
+    const body = { ...identity, ...(action === "prepare"
+      ? { binding: {}, formal_execution: {} } : { formal_execution_id: "d".repeat(64) }) };
+    const path = `/api/ecology-agent-runtime/v1/runs/run%3A1/formal/${action}`;
+    for (const options of [{ token: "wrong" }, { address: "10.0.0.2" },
+      { headers: { origin: "https://untrusted.example" } }]) {
+      const res = new Response();
+      await routes.handler(request(path, { ...options, body }), res);
+      assert.ok([401, 403].includes(res.statusCode));
+    }
+    for (const invalid of [{ ...body, unknown: true }, { ...body, run_id: "run:other" },
+      { ...body, stage_attempt: undefined }]) {
+      const res = new Response();
+      await routes.handler(request(path, { body: invalid }), res);
+      assert.equal(res.statusCode, 400);
+    }
+    const res = new Response();
+    await routes.handler(request(path, { body }), res);
+    assert.equal(res.statusCode, 200);
+  }
+  assert.deepEqual(calls.map(item => item[0]), ["prepare", "close"]);
+});
+
 test("runtime API distinguishes bounded sample failure from runtime outage", async () => {
   const valid = {
     run_id: "run:1", run_state_revision: 2, stage_attempt: 1,

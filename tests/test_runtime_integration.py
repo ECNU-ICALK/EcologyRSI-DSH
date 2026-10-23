@@ -768,7 +768,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "ecology-coordinator-v6",
                     "ecology-researcher-v17",
                     "ecology-candidate-proposer-v9",
-                    "ecology-sample-planner-v14",
+                    "ecology-sample-planner-v15",
                     "ecology-sample-critic-v6",
                     "ecology-generation-judge-v10",
                 )
@@ -944,6 +944,12 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 )
         self.assertEqual(status, 201, created)
         self.assertEqual(strict_status, 201, strict_created)
+        self.assertEqual(strict_created["projection"]["configuration"]["local_edit_memory_policy"],
+                         "prior_generation_pairs@1")
+        self.assertIsNone(created["projection"]["configuration"]["local_edit_memory_policy"])
+        strict_state = self.server.director.state(strict_created["projection"]["run_id"])
+        self.assertEqual(strict_state.task_manifest.metadata["local_edit_memory_policy"],
+                         "prior_generation_pairs@1")
         self.assertEqual(explicit_status, 201, explicit_created)
         self.assertEqual(
             explicit_formal_status, 400, explicit_formal_created
@@ -987,6 +993,13 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         explicit_configuration = explicit_created["projection"]["configuration"]
         self.assertEqual(strict_created["projection"]["configuration"]["candidate_executability_policy"],
                          "strategy_tool_input_contract@1")
+        self.assertEqual(
+            strict_created["projection"]["configuration"]["mutation_effect_scope_policy"],
+            "per_predicate_impact@1",
+        )
+        self.assertIsNone(
+            created["projection"]["configuration"]["mutation_effect_scope_policy"]
+        )
         self.assertIsNone(created["projection"]["configuration"]["candidate_executability_policy"])
         self.assertIsNone(explicit_configuration["samples_per_update"])
         self.assertEqual(explicit_configuration["sample_budget_class"], "selection_eligible")

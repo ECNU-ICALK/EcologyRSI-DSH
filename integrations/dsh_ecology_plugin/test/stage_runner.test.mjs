@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SidecarError } from "../lib/sidecar/client.js";
+import { RETRIEVAL_KEY_ERROR } from "../lib/tools/retrieval.js";
 import { RESEARCH_EXECUTION_POLICY } from "../lib/runtime/research-execution-policy.js";
 import { researchOutputTransport } from "../lib/runtime/research-contract.js";
 import { sampleOutputTransport } from "../lib/runtime/sample-output-transport.js";
@@ -309,6 +310,7 @@ function directSampleHarness({
   timing = {},
   startDelayMs = 0,
   reportedOutputTokens = null,
+  onStart = null,
 }) {
   const starts = [];
   const reservations = [];
@@ -339,6 +341,7 @@ function directSampleHarness({
           events: sessionEvents(attempt),
         });
         starts.push({ id, request });
+        if (onStart) await onStart({ runner, agent: { id }, request, parentSessionId: roleHost.sessionId });
         if (failurePhase === "start") {
           const error = new Error(`private ${failurePhase} failure`);
           error.code = failureCode;
@@ -505,12 +508,218 @@ test("Skill-first evidence permits optional retrieval before the terminal tool",
   assert.equal(evidence.next_tool_call_seq, 5);
 });
 
+test("planning and synthesis admit iterative retrieval within the configured Host budget", () => {
+  for (const stage of ["generation.search-plan", "generation.research-synthesis", "candidate.propose"]) {
+    const skillName = STAGES[stage].skillName;
+    const events = [
+      { seq: 1, type: "tool/call", data: { callId: "skill", name: "skill", arguments: { name: skillName } } },
+      { seq: 2, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "skill", isError: false }] } } },
+    ];
+    for (let index = 0; index < 8; index += 1) {
+      events.push(
+        { seq: 3 + index * 2, type: "tool/call", data: { callId: `search-${index}`, name: "web_search",
+          arguments: { queries: [`refined evidence ${index}`], retrieval_key: `refinement-${index}` } } },
+        { seq: 4 + index * 2, type: "tool/result", data: { message: { content: [
+          { type: "tool-result", toolCallId: `search-${index}`, isError: false },
+        ] } } },
+      );
+    }
+    events.push({ seq: 19, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } });
+    const options = { stage, skillName, allowDynamicRetrieval: true };
+    assert.equal(skillInvocationEvidence(events, options).next_tool_call_seq, 19);
+    assert.throws(() => skillInvocationEvidence(events, {
+      ...options, retrievalPolicy: { dynamic_max_calls_per_stage: 7 },
+    }), /Host dynamic retrieval call budget/);
+  }
+});
+
+test("stage prompts expose the frozen retrieval policy and offline choice", async () => {
+  for (const online of [true, false]) {
+    const stage = "generation.reflect";
+    const binding = directSampleBinding(stage, {
+      retrieval_policy: { online_enabled: online, dynamic_max_calls_per_stage: 5,
+        max_queries_per_call: 7, max_query_chars: 400, max_results: 24 },
+    });
+    binding.request.role = "generation-judge";
+    binding.request.output_schema_id = "ecology-generation-reflection@1";
+    const harness = directSampleHarness({
+      stage, results: [{ stopReason: "completed", structured: { summary: "Check evidence." } }],
+      sessionEvents: () => skillFirstEvents("batch-scientific-reflection"),
+    });
+    await harness.runner.run(binding);
+    const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+    if (online) {
+      assert.match(prompt.instruction, /up to 5 web_search calls/);
+      assert.match(prompt.instruction, /up to 7 queries of 400 characters per call and 24 returned sources/);
+      assert.match(prompt.instruction, /at most 128 Unicode characters/);
+      assert.match(prompt.instruction, /site:, lang:, after: and before:/);
+    } else {
+      assert.match(prompt.instruction, /Online retrieval is disabled by the Host/);
+      assert.doesNotMatch(prompt.instruction, /You may interleave up to/);
+    }
+  }
+});
+
+test("formal stages bind a frozen library to search only and preserve closed tool identities", async () => {
+  const formal = {
+    mode: "frozen_snapshot", snapshot_digest: "d".repeat(64), document_count: 7, online_enabled: false,
+  };
+  for (const phase of ["validation", "final_test"]) {
+    const stage = "sample.critic";
+    const binding = directSampleBinding(stage, {
+      wave_digest: "e".repeat(64),
+      samples: [{ sample_id: "formal-origin", partition: phase === "validation" ? "training_feedback" : phase }],
+      context: { evaluation_scope: { phase, inference_replica: phase === "validation" ? 0 : 1 } },
+      formal_retrieval: formal,
+      retrieval_policy: { online_enabled: false, dynamic_max_calls_per_stage: 4,
+        max_queries_per_call: 5, max_query_chars: 320, max_results: 16 },
+    });
+    let capturedSearchBinding;
+    const harness = directSampleHarness({
+      stage, results: [{ stopReason: "completed", structured: {
+        schema_version: "ecology-sample-review@2", wave_digest: "e".repeat(64),
+        decisions: [{ sample_id: "formal-origin", action: "accept", reason_code: "evidence_consistent", confidence: 0.9 }],
+      } }],
+      onStart: async ({ runner, agent, request, parentSessionId }) => {
+        runner.childBindings.claimPublished(parentSessionId, request.label, agent.id);
+        capturedSearchBinding = runner.bridge.bindingFor(agent, { role: "sample-critic", toolName: "web_search" });
+        assert.deepEqual(capturedSearchBinding.formal_retrieval, formal);
+        assert.equal(Object.isFrozen(capturedSearchBinding.formal_retrieval), true);
+        const skillBinding = runner.bridge.bindingFor(agent, { role: "sample-critic", toolName: "skill" });
+        assert.equal(Object.hasOwn(skillBinding, "formal_retrieval"), false);
+      },
+    });
+    harness.runner.runRegistry = { get: () => ({ status: "running", binding: {
+      formal_execution: { stage: phase, snapshot_digest: formal.snapshot_digest },
+    } }) };
+    await harness.runner.run(binding);
+    const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+    assert.match(prompt.instruction, /web_search at any reasoning step/);
+    assert.match(prompt.instruction, /frozen evidence snapshot.*7 documents/);
+    assert.match(prompt.instruction, /Live network retrieval and external fallback are forbidden/);
+    assert.match(prompt.instruction, /URLs are citations only/);
+    assert.doesNotMatch(prompt.instruction, /do not call web_search|When the Host enables online retrieval/);
+    assert.equal(Object.hasOwn(harness.persisted[0].identity, "formal_retrieval"), false);
+    assert.throws(() => harness.runner.bridge.bindingFor({ id: capturedSearchBinding.session_id },
+      { role: "sample-critic", toolName: "web_search" }), /missing reservation/);
+  }
+});
+
+test("comparison stages bind the same method library without requiring formal runtime admission", async () => {
+  const frozen = { mode: "frozen_snapshot", snapshot_digest: "d".repeat(64),
+    document_count: 8, online_enabled: false };
+  for (const phase of ["screening", "formal_batch", "selection_holdout"]) {
+    const stage = "sample.critic";
+    const harness = directSampleHarness({
+      stage, results: [{ stopReason: "completed", structured: {
+        schema_version: "ecology-sample-review@2", wave_digest: "e".repeat(64),
+        decisions: [{ sample_id: "comparison-origin", action: "accept", reason_code: "evidence_consistent", confidence: 0.9 }],
+      } }],
+      onStart: async ({ runner, agent, request, parentSessionId }) => {
+        runner.childBindings.claimPublished(parentSessionId, request.label, agent.id);
+        const bound = runner.bridge.bindingFor(agent, { role: "sample-critic", toolName: "web_search" });
+        assert.deepEqual(bound.formal_retrieval, frozen);
+        assert.equal(Object.hasOwn(bound, "comparison_retrieval"), false);
+      },
+    });
+    await harness.runner.run(directSampleBinding(stage, {
+      wave_digest: "e".repeat(64), samples: [{ sample_id: "comparison-origin", partition: "training_feedback" }],
+      context: { evaluation_scope: { phase } },
+      comparison_retrieval: frozen, comparison_retrieval_policy: "paired_method_snapshot@1",
+      comparison_retrieval_scope: "methods_only_no_dataset_results",
+      retrieval_policy: { online_enabled: false },
+    }));
+    const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+    assert.match(prompt.instruction, /web_search at any reasoning step/);
+    assert.match(prompt.instruction, /Live network retrieval and external fallback are forbidden/);
+    assert.doesNotMatch(prompt.instruction, /do not call web_search/);
+  }
+});
+
+test("comparison snapshot cannot substitute for formal validation admission", async () => {
+  const stage = "sample.critic";
+  const harness = directSampleHarness({ stage, results: [] });
+  await assert.rejects(harness.runner.run(directSampleBinding(stage, {
+    context: { evaluation_scope: { phase: "validation" } },
+    comparison_retrieval: { mode: "frozen_snapshot", snapshot_digest: "d".repeat(64),
+      document_count: 8, online_enabled: false },
+    comparison_retrieval_policy: "paired_method_snapshot@1",
+    comparison_retrieval_scope: "methods_only_no_dataset_results",
+  })), /formal retrieval requires/);
+  assert.equal(harness.starts.length, 0);
+});
+
+test("formal scope without a valid snapshot fails before any child launch even with online enabled", async () => {
+  for (const context of [
+    { evaluation_scope: { phase: "validation" } },
+    { context: { evaluation_scope: { phase: "final_test" } } },
+    { samples: [{ partition: "validation" }] },
+    { formal_retrieval: { mode: "frozen_snapshot", online_enabled: true } },
+  ]) {
+    const stage = "sample.critic";
+    const harness = directSampleHarness({ stage, results: [] });
+    await assert.rejects(harness.runner.run(directSampleBinding(stage, {
+      ...context, retrieval_policy: { online_enabled: true },
+    })), /formal retrieval requires/);
+    assert.equal(harness.starts.length, 0);
+    assert.equal(harness.reservations.length, 0);
+  }
+});
+
+test("formal runtime rejects training calls, wrong partitions, wrong snapshots and unprepared holdout calls", async () => {
+  const formal = { mode: "frozen_snapshot", snapshot_digest: "d".repeat(64),
+    document_count: 7, online_enabled: false };
+  for (const [context, prepared] of [
+    [{ formal_retrieval: formal, context: { evaluation_scope: { phase: "validation" } } }, false],
+    [{ context: { evaluation_scope: { phase: "train" } } }, true],
+    [{ formal_retrieval: formal, context: { evaluation_scope: { phase: "final_test" } } }, true],
+    [{ formal_retrieval: { ...formal, snapshot_digest: "e".repeat(64) },
+      context: { evaluation_scope: { phase: "validation" } } }, true],
+    [{ formal_retrieval: formal, context: { evaluation_scope: { phase: "validation" } },
+      samples: [{ partition: "train" }] }, true],
+    [{ formal_retrieval: formal, samples: [{ partition: "training_feedback" }] }, true],
+  ]) {
+    const stage = "sample.critic";
+    const harness = directSampleHarness({ stage, results: [] });
+    if (prepared) harness.runner.runRegistry = { get: () => ({ status: "running", binding: {
+      formal_execution: { stage: "validation", snapshot_digest: formal.snapshot_digest },
+    } }) };
+    await assert.rejects(harness.runner.run(directSampleBinding(stage, context)), /formal (runtime|stage)/);
+    assert.equal(harness.starts.length, 0);
+    assert.equal(harness.reservations.length, 0);
+  }
+});
+
+test("formal planner nested scope and critic top-level scope accept the numerical feedback slot", async () => {
+  for (const stage of ["sample.plan", "sample.critic"]) {
+    const planner = stage === "sample.plan";
+    const context = samplePlanContext();
+    context.samples = context.samples.map(sample => ({ ...sample, partition: "training_feedback" }));
+    const scope = { phase: "validation", candidate_id: "candidate:1", candidate_revision_id: "revision:1",
+      inference_replica: 0 };
+    if (planner) context.context.evaluation_scope = scope;
+    else context.evaluation_scope = scope;
+    context.formal_retrieval = { mode: "frozen_snapshot", snapshot_digest: "d".repeat(64),
+      document_count: 7, online_enabled: false };
+    const structured = { schema_version: planner ? "ecology-sample-predictions@2" : "ecology-sample-review@2",
+      wave_digest: context.wave_digest, decisions: [] };
+    const harness = directSampleHarness({ stage, results: [{ stopReason: "completed", structured }],
+      sessionEvents: () => skillFirstEvents(planner ? "origin-vector-forecasting" : "origin-vector-review",
+        planner ? { prediction: true } : {}) });
+    harness.runner.runRegistry = { get: () => ({ status: "running", binding: {
+      formal_execution: { stage: "validation", snapshot_digest: context.formal_retrieval.snapshot_digest },
+    } }) };
+    assert.deepEqual((await harness.runner.run(directSampleBinding(stage, context))).structured, structured);
+    assert.equal(harness.starts.length, 1);
+  }
+});
+
 function correctedRetrievalEvents() {
   return [
     { seq: 1, type: "tool/call", data: { callId: "skill", name: "skill", arguments: { name: "autonomous-ecology-research" } } },
     { seq: 2, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "skill", isError: false }] } } },
     { seq: 3, type: "tool/call", data: { turn: 1, step: 2, callId: "bad-search", name: "web_search", arguments: JSON.stringify({ queries: "greenhouse forecast", retrieval_key: "evidence" }) } },
-    { seq: 4, type: "tool/result", sourceEventSeqs: [3], data: { turn: 1, step: 2, message: { content: [{ type: "tool-result", toolCallId: "bad-search", isError: true, content: [{ type: "text", text: "Error: web_search requires one to four queries" }] }] } } },
+    { seq: 4, type: "tool/result", sourceEventSeqs: [3], data: { turn: 1, step: 2, message: { content: [{ type: "tool-result", toolCallId: "bad-search", isError: true, content: [{ type: "text", text: "Error: web_search requires one to 12 queries" }] }] } } },
     { seq: 5, type: "tool/call", data: { callId: "good-search", name: "web_search", arguments: { queries: ["greenhouse forecast"], retrieval_key: "evidence" } } },
     { seq: 6, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "good-search", isError: false }] } } },
     { seq: 7, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
@@ -545,10 +754,55 @@ function emptyRetrievalEvents() {
   return events;
 }
 
-test("two empty retrieval calls can recover within the original three-call budget", () => {
+function invalidRetrievalKeyEvents() {
+  const events = correctedRetrievalEvents();
+  events[0].data.arguments.name = "origin-vector-review";
+  events[2].data.arguments = {
+    queries: ["nighttime greenhouse CO2"],
+    retrieval_key: "origin-vector-review/co2-6h-plausibility",
+  };
+  events[3].data.message.content[0].content[0].text = "Error: web_search retrieval_key is invalid";
+  events[4].data.arguments.retrieval_key = "co2_6h_plausibility_1";
+  return events;
+}
+
+test("critic can replace a rejected invalid retrieval key before final output", () => {
+  for (const errorText of ["Error: web_search retrieval_key is invalid", `Error: ${RETRIEVAL_KEY_ERROR}`]) {
+    const events = invalidRetrievalKeyEvents();
+    events[3].data.message.content[0].content[0].text = errorText;
+    const evidence = skillInvocationEvidence(events, {
+      stage: "sample.critic", skillName: "origin-vector-review", allowDynamicRetrieval: true,
+    });
+    assert.equal(evidence.next_tool_call_seq, 7);
+  }
+});
+
+test("invalid retrieval key recovery still requires exact rejection, correction and budget", () => {
+  const mutations = {
+    "authorization failure": events => { events[3].data.message.content[0].content[0].text = "Error: stage admission is closed"; },
+    "wrong attribution": events => { events[3].sourceEventSeqs = [99]; },
+    "valid original key": events => { events[2].data.arguments.retrieval_key = "valid-key"; },
+    "no successful correction": events => { events[5].data.message.content[0].isError = true; },
+    "still invalid key": events => { events[4].data.arguments.retrieval_key = "still/invalid"; },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const events = invalidRetrievalKeyEvents();
+    mutate(events);
+    assert.throws(() => skillInvocationEvidence(events, {
+      stage: "sample.critic", skillName: "origin-vector-review", allowDynamicRetrieval: true,
+    }), /dynamic retrieval must succeed/, name);
+  }
+  assert.throws(() => skillInvocationEvidence(invalidRetrievalKeyEvents(), {
+    stage: "sample.critic", skillName: "origin-vector-review", allowDynamicRetrieval: true,
+    retrievalPolicy: { dynamic_max_calls_per_stage: 1 },
+  }), /budget/);
+});
+
+test("two empty retrieval calls can recover within a configured three-call budget", () => {
   const evidence = skillInvocationEvidence(emptyRetrievalEvents(), {
     stage: "generation.research-synthesis", skillName: "autonomous-ecology-research",
     allowDynamicRetrieval: true,
+    retrievalPolicy: { dynamic_max_calls_per_stage: 3 },
   });
   assert.equal(evidence.first_tool_call_verified, true);
   assert.equal(evidence.next_tool_call_seq, 9);
@@ -575,7 +829,7 @@ test("empty retrieval recovery does not admit uncorrected, unauthorized or unatt
   }
 });
 
-test("empty retrieval recovery cannot increase the three-call budget", () => {
+test("empty retrieval recovery cannot increase the Host call budget", () => {
   const events = emptyRetrievalEvents();
   const extraCall = structuredClone(events[2]);
   extraCall.seq = 7;
@@ -589,6 +843,7 @@ test("empty retrieval recovery cannot increase the three-call budget", () => {
   assert.throws(() => skillInvocationEvidence(events, {
     stage: "generation.research-synthesis", skillName: "autonomous-ecology-research",
     allowDynamicRetrieval: true,
+    retrievalPolicy: { dynamic_max_calls_per_stage: 3 },
   }), /retrieval/);
 });
 
@@ -649,6 +904,7 @@ test("Skill-first evidence rejects excessive or post-terminal retrieval", () => 
     stage: "generation.research",
     skillName: "autonomous-ecology-research",
     allowDynamicRetrieval: true,
+    retrievalPolicy: { dynamic_max_calls_per_stage: 3 },
   };
   assert.throws(
     () => skillInvocationEvidence([
@@ -841,7 +1097,9 @@ test("native stage runner reserves before first child tool and durably persists 
         assert.match(prompt.instruction, /first response/i);
         assert.match(prompt.instruction, /call skill exactly once/i);
         assert.match(prompt.instruction, /structured_output exactly once/i);
-        assert.match(prompt.instruction, /zero to three web_search calls/i);
+        assert.match(prompt.instruction, /up to 8 web_search calls/i);
+        assert.match(prompt.instruction, /including generation.search-plan and generation.research-synthesis/i);
+        assert.doesNotMatch(prompt.instruction, /Do not call web_search in this stage/);
         assert.match(prompt.instruction, /mutation delta/i);
         assert.match(prompt.instruction, /omit every unchanged/i);
         assert.match(prompt.instruction, /exactly one operation/i);
@@ -2499,6 +2757,21 @@ test('real failed planner first submission binds without changing scientific dec
   }
   assert.equal(Object.hasOwn(transport.bind({}), 'decisions'), false);
   assert.deepEqual(sampleOutputTransport('sample.critic', schema).schema, schema);
+});
+
+test('frozen evidence formula narrows native methods while legacy schema stays unchanged', async () => {
+  const raw = JSON.parse(await readFile(new URL('../schemas/sample-decisions.schema.json', import.meta.url)));
+  const context = { wave_digest: 'a'.repeat(64), samples: [{ sample_id: 'one' }] };
+  const legacy = prepareStageOutputSchema('sample.plan', raw, context);
+  assert.deepEqual(legacy.properties.decisions.items.properties.method.enum, ['direct', 'model', 'blend', 'adjusted']);
+  for (const methods of [['model', 'blend'], ['model']]) {
+    const frozen = prepareStageOutputSchema('sample.plan', raw, { ...context, context: {
+      prediction_contract: { formula_policy: 'evidence-mean-or-model@1', allowed_methods: methods },
+    } });
+    assert.deepEqual(frozen.properties.decisions.items.properties.method.enum, methods);
+    assert.deepEqual(sampleOutputTransport('sample.plan', frozen).schema.properties.decisions.items.properties.method.enum, methods);
+  }
+  assert.deepEqual(raw.properties.decisions.items.properties.method.enum, ['direct', 'model', 'blend', 'adjusted']);
 });
 
 test('planner supplied wrong metadata is rejected before persistence', async () => {
