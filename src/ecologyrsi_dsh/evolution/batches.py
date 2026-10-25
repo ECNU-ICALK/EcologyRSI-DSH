@@ -1335,10 +1335,16 @@ def _adaptive_reflection_analysis(
 
     reflection_analysis = analysis.to_dict()
     reflection_analysis.pop("ranking", None)
-    from ..evaluators.candidate_attribution import enabled as attribution_enabled, validated_summary, METRIC_KEY
+    from ..evaluators.repeatability import summary_for as repeatability_summary
+    noise = repeatability_summary(state, analysis.generation)
+    if noise is not None:
+        # Ranking is removed for the compact paired view. Preserve this one
+        # generation-level diagnostic independently of its candidate rows.
+        reflection_analysis["same_genome_repeatability"] = noise
+    from ..evaluators.candidate_attribution import enabled as attribution_enabled
+    from .agent_policy import candidate_result_attribution
     if attribution_enabled(state.task_manifest.metadata):
-        reports = [validated_summary(row.get(METRIC_KEY), phases={"formal_batch"})
-                   for row in analysis.ranking]
+        reports = [candidate_result_attribution(row) for row in analysis.ranking]
         reflection_analysis["candidate_attribution"] = [r for r in reports if r is not None][:4]
     if (
         state.task_manifest.metadata.get("optimization_protocol")

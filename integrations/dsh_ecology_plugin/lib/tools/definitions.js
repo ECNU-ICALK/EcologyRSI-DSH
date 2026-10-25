@@ -22,12 +22,21 @@ export const TOOL_DEFINITIONS = Object.freeze({
   },
   ecology_execute_prediction_tool: {
     name: "ecology_execute_prediction_tool",
-    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id for new computation. After interruption, an exact recoverable_call_requests entry may be replayed using its original call_id and parameters to retrieve existing evidence even with remaining_calls=0; wait for its result before citing it. Results are evidence for your final prediction. Follow the current frozen prediction_contract.max_prediction_tool_calls budget and the Host-reported remaining_calls. Failed computations also consume budget.",
+    description: "Call an available prediction capability for this origin. Choose tool_id and only parameter names listed in that tool's available_tools catalog entry; never borrow names from another tool. Use parameters={} for its defaults. A supplied feature_recipe replaces the whole recipe: copy and edit the catalog's complete default, never send feature_recipe={}. Recipe regularization is feature_recipe.model.alpha; history is expressed by recipe features, not top-level ridge_alpha or history_steps. For targetwise tools copy the exact target/horizon-specific residual-scale names from that tool's catalog. The Host enforces the catalog whitelist and recipe grammar. Use a unique call_id for new computation. After interruption, an exact recoverable_call_requests entry may be replayed using its original call_id and parameters to retrieve existing evidence even with remaining_calls=0; wait for its result before citing it. Results are evidence for your final prediction. Follow the current frozen prediction_contract.max_prediction_tool_calls budget and the Host-reported remaining_calls. Failed computations also consume budget.",
     parameters: objectInput({
       tool_id: text(160),
       wave_digest: text(64),
       call_id: text(80),
-      parameters: { type: "object", additionalProperties: { type: "number" } },
+      parameters: {
+        type: "object",
+        properties: {
+          feature_recipe: {
+            type: "object",
+            description: "Complete declarative recipe object, only for a tool whose catalog advertises feature_recipe. Its exact fields and bounds are enforced by the Host's recipe grammar.",
+          },
+        },
+        additionalProperties: { type: "number" },
+      },
     }),
   },
 });

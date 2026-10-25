@@ -174,6 +174,88 @@ class CandidateAttributionTests(unittest.TestCase):
         self.assertIn('not a confidence bound',delivered['interpretation'])
         self.assertIn('no new independent observations',delivered['interpretation'])
 
+    def test_retained_revision_attribution_excludes_later_rejected_challenger(self):
+        _, state, candidate = self.delivered()
+        champion = state.formal_batch_evaluations[1]
+        challenger = state.formal_batch_evaluations[2]
+        # Both arms are measured on the same latest cohort. The rejected
+        # challenger is persisted last, exactly as in the paired workflow.
+        champion.scope.batch_index = challenger.scope.batch_index = 2
+        state.formal_batch_evaluations = (champion, challenger)
+        state.trajectory_for = lambda _cid: NS(final_revision_id='revision:1')
+        report = prior_candidate_attribution(state, candidate)
+        self.assertEqual(report['source_candidate_revision_id'], 'revision:1')
+        self.assertEqual(report['sealed_summary_digest'], self.summary()['summary_digest'])
+        self.assertEqual(len(report['cells']), 9)
+        self.assertIsNone(prior_candidate_attribution(
+            state, candidate, candidate_revision_id='revision:without-training-evidence'))
+        self.assertEqual(prior_candidate_attribution(
+            state, candidate, candidate_revision_id='revision:2')['source_candidate_revision_id'], 'revision:2')
+
+    def test_historical_misbound_report_cannot_teach_next_policy_as_retained_revision(self):
+        report, _, _ = self.delivered()
+        row = {METRIC_KEY: report, 'final_revision_id': 'revision:1'}
+        original = deepcopy(row)
+        policy = build_agent_policy(genome_digest='c'*64, profile={}, parameters={}, generation=1,
+            previous_analysis={'generation': 0, 'ranking': [row]})
+        self.assertNotIn('candidate_attribution', policy['experience'])
+        self.assertEqual(row, original)  # Archived evidence is never rewritten.
+
+    def test_paired_reflection_keeps_one_full_aa_diagnostic_and_bound_attribution(self):
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        from ecologyrsi_dsh.evolution.batches import _adaptive_reflection_analysis
+        from ecologyrsi_dsh.evaluators.repeatability import POLICY_KEY as AA_KEY, POLICY as AA_POLICY
+        report, _, _ = self.delivered()
+        noise = {'paired_origin_count': 10, 'paired_prediction_count': 90,
+            'changed_prediction_count': 84, 'absolute_score_drift': .02163476387433745,
+            'reference_score': .054304800786523076, 'repeat_score': .032670036912185625,
+            'independent_observation_count_multiplier': 1, 'selection_score_replaced': False,
+            'interpretation': 'One A/A pair measures realized Agent drift, not a confidence bound or a causal attribution; do not select the better repeat.',
+            'cells': [{'target': t, 'horizon_hours': h, 'skill_delta': -.01}
+                      for t in ('air_temperature', 'relative_humidity', 'co2_concentration') for h in (1, 6, 24)]}
+        ranking = [{METRIC_KEY: report, 'candidate_id': 'candidate:1', 'final_revision_id': 'revision:1', 'score': .02},
+                   {METRIC_KEY: report, 'candidate_id': 'candidate:2', 'final_revision_id': 'revision:2', 'score': .01}]
+        analysis = NS(generation=0, ranking=ranking, to_dict=lambda: {'generation': 0, 'ranking': deepcopy(ranking)})
+        incumbent = NS(scope=NS(holdout_arm=NS(value='incumbent'), candidate_id='incumbent',
+                              candidate_revision_id='revision:incumbent'), score=.03)
+        comparison = NS(holdout_evaluations=(incumbent,), selected_candidate_id='incumbent',
+            selected_revision_id='revision:incumbent', comparison_digest='d'*64,
+            gate_results={'selected_arm': 'incumbent', 'delta_to_incumbent': 0})
+        state = NS(task_manifest=NS(metadata={**self.metadata, AA_KEY: AA_POLICY,
+            'optimization_protocol': 'joint_plugin_epoch@2',
+            'optimization_schedule': OptimizationSchedule.default().to_dict()}),
+            events=(NS(kind='ScreeningRepeatabilityRecorded', payload={'generation': 0, 'summary': freeze_json(noise)}),),
+            comparison_for=lambda _gen: comparison,
+            revision=lambda rid: NS(candidate_id='incumbent', revision_id=rid,
+                revision_digest='a'*64, genome_digest='b'*64, behavior_digest='c'*64))
+        reflection = safe_aggregate_feedback(_adaptive_reflection_analysis(state, analysis), name='reflection')
+        self.assertEqual(reflection['same_genome_repeatability'], noise)
+        self.assertEqual(len(reflection['same_genome_repeatability']['cells']), 9)
+        self.assertNotIn('ranking', reflection)
+        self.assertEqual(reflection['candidate_attribution'], [report])
+        rows = reflection['adaptive_epoch_evidence']['candidate_results']
+        self.assertEqual([r['score'] for r in rows], [.02, .01])
+        self.assertTrue(all('same_genome_repeatability' not in r for r in rows))
+        # A legacy run does not acquire evidence or need an event collection.
+        state.task_manifest.metadata.pop(AA_KEY)
+        del state.events
+        self.assertNotIn('same_genome_repeatability', _adaptive_reflection_analysis(state, analysis))
+
+    def test_local_editor_attributes_rejected_metrics_to_their_actual_revision(self):
+        from ecologyrsi_dsh.application.formal_trajectory import _local_edit_attribution
+        from ecologyrsi_dsh.evaluators.candidate_attribution import validated_summary
+        summary = self.summary()
+        metrics = freeze_json({'sample_execution': {METRIC_KEY: summary}})
+        scope = NS(scope_key='e'*64, candidate_revision_id='revision:rejected')
+        report = _local_edit_attribution(metrics, scope=scope, current_revision_id='revision:retained')
+        self.assertEqual(report['source_candidate_revision_id'], 'revision:rejected')
+        self.assertEqual(report['current_candidate_revision_id'], 'revision:retained')
+        self.assertEqual(report['revision_relation'], 'different_evaluated_revision')
+        self.assertEqual(report['cells'], summary['cells'])
+        self.assertEqual(validated_summary(report), report)
+        self.assertEqual(_local_edit_attribution(metrics, scope=scope,
+            current_revision_id='revision:rejected')['revision_relation'], 'current_candidate_revision')
+
     def test_formula_policy_is_frozen_rebound_and_rejects_incompatible_directives(self):
         kwargs=dict(genome_digest='c'*64,parameters={},generation=0,previous_analysis=None,
             prediction_formula_policy='evidence-mean-or-model@1')

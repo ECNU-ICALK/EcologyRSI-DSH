@@ -1397,7 +1397,7 @@
       ["留出评测", progress.holdout_skipped_origins]
     ].map(function (entry) {
       var count = executionDiagnosticNumber(entry[1]);
-      return count != null && count > 0 ? entry[0] + "跳过/提前终止 " + formatNumber(count) : "";
+      return count != null && count > 0 ? entry[0] + "未执行 " + formatNumber(count) : "";
     }).filter(Boolean).join(" · ");
   }
 
@@ -1491,7 +1491,7 @@
     var explicitVerification = heartbeat && (heartbeat.outcomes_verified === true || heartbeat.outcome_counts_verified === true || String(heartbeat.verification_status || "").toLowerCase() === "verified");
     var completeTerminalBreakdown = !snapshot.live && snapshot.succeeded_samples != null && snapshot.failed_samples != null && Number(snapshot.succeeded_samples) + Number(snapshot.failed_samples) === completed;
     snapshot.outcomes_verified = Boolean(explicitVerification || completeTerminalBreakdown);
-    if (snapshot.settled_origins == null && originBundleProtocol) {
+    if (snapshot.settled_origins == null && originBundleProtocol && snapshot.execution_counts_known !== false) {
       // A DSH heartbeat can be ahead of Host scoring (or can end in a
       // structured child error after the prediction tool returned). Only
       // durable Host rows are settled; never relabel remote completion as
@@ -1973,14 +1973,18 @@
     var verifiedOutcomeText = outcomesVerified && Number.isFinite(succeeded) && Number.isFinite(failedSamples) ? " · " + outcomeScopeLabel + "成功 " + formatNumber(succeeded) + " · " + outcomeScopeLabel + "失败 " + formatNumber(failedSamples) : "";
     var settled = stageProgress && stageProgress.settled_origins != null ? Number(stageProgress.settled_origins) : NaN;
     var displayedCompleted = stageProgress && Number(stageProgress.completed_samples);
-    var settledText = Number.isFinite(settled) && settled >= 0 && (!Number.isFinite(displayedCompleted) || settled !== displayedCompleted) ? " · Host 已结算 " + formatNumber(settled) : "";
+    var executed = executionDiagnosticNumber(stageProgress && stageProgress.executed_origins);
+    var repeatExecutions = executionDiagnosticNumber(stageProgress && stageProgress.repeatability_completed_origins);
+    var actualExecutionText = stageProgress && stageProgress.execution_counts_known === false ? " · 实际执行次数待核验" : executed == null ? "" : " · 实际执行 " + formatNumber(executed) + " 次时点评测"
+      + (repeatExecutions > 0 ? "（含同方案复测 " + formatNumber(repeatExecutions) + " 次）" : "");
+    var settledText = executed == null && Number.isFinite(settled) && settled >= 0 && (!Number.isFinite(displayedCompleted) || settled !== displayedCompleted) ? " · Host 已结算 " + formatNumber(settled) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
     var phaseProgressText = executionAdaptivePhaseProgressText(stageProgress, progressUnitLabel);
     var skippedProgressText = executionAdaptiveSkippedProgressText(stageProgress);
     if (stageProgress && stageProgress.eta_status === "collecting_after_resume") {
       remainingText = "恢复后正在重新估算耗时";
     }
-    sampleNode.textContent = stageProgress ? "全轮" + progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + (phaseProgressText ? " · " + phaseProgressText : "") + (skippedProgressText ? " · " + skippedProgressText : "") + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + admissionText + admissionWaitingText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? (stageProgress.completion_count_semantics || executed != null ? "全轮计划进度：" : "全轮" + progressUnitLabel + "进度：") + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + actualExecutionText + (phaseProgressText ? " · " + phaseProgressText : "") + (skippedProgressText ? " · " + skippedProgressText : "") + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + admissionText + admissionWaitingText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (stageProgress && conditionalRecheckBudget) {
       sampleNode.textContent += " · 总量含条件复核预留，未触发时不执行";
     }

@@ -1985,15 +1985,29 @@ const screeningSkippedRun = {
     },
   },
 };
-assert.equal(modelSandbox.executionAdaptiveSkippedProgressText(screeningSkippedRun.execution_progress.stage_progress), "初筛跳过/提前终止 32");
+assert.equal(modelSandbox.executionAdaptiveSkippedProgressText(screeningSkippedRun.execution_progress.stage_progress), "初筛未执行 32");
 assert.equal(
   modelSandbox.executionAdaptiveSkippedProgressText({screening_skipped_origins: 32, formal_skipped_origins: 100, holdout_skipped_origins: 12}),
-  "初筛跳过/提前终止 32 · 正式评测跳过/提前终止 100 · 留出评测跳过/提前终止 12",
+  "初筛未执行 32 · 正式评测未执行 100 · 留出评测未执行 12",
 );
 modelSandbox.renderExecutionMonitor(screeningSkippedRun);
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("初筛跳过/提前终止 32"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("初筛未执行 32"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("成功 1"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("成功 33"), false);
+// Budget completion includes unused conditional work; execution does not.
+modelSandbox.renderExecutionMonitor({
+  ...screeningRun,
+  execution_progress: {...screeningRun.execution_progress, stage_progress: {
+    ...screeningRun.execution_progress.stage_progress,
+    evaluation_phase: "decision", completed_samples: 310, total_samples: 310,
+    completed_origins: 310, total_origins: 310, executed_origins: 210,
+    settled_origins: 210, repeatability_completed_origins: 10,
+    holdout_skipped_origins: 100, terminal_skipped_origins: 100,
+  }},
+});
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("全轮计划进度：310 / 310 · 实际执行 210 次时点评测（含同方案复测 10 次）"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("留出评测未执行 100"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("实际执行 310"), false);
 const failedSettlementRun = {
   ...screeningRun,
   execution_progress: {

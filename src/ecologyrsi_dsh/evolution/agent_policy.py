@@ -111,16 +111,22 @@ def prior_candidate_tool_experience(state, candidate, metrics):
     return result[-64:]
 
 
-def prior_candidate_attribution(state, candidate):
-    """Latest sealed adaptation report, never holdout or independent labels.
+def prior_candidate_attribution(state, candidate, *, candidate_revision_id=None):
+    """Latest sealed adaptation report for the retained candidate revision.
 
     Keep the entire target/horizon grid of one revision. Mixing revisions or
     truncating cells by call frequency would hide adverse local-edit evidence.
+    A rejected challenger remains in trajectory evidence, never in the retained
+    revision's attribution. Holdout identifies the revision but supplies no labels.
     """
     from ..evaluators.candidate_attribution import enabled, validated_summary, METRIC_KEY
     if (not enabled(state.task_manifest.metadata)
             or state.task_manifest.metadata.get("evaluation_partition", "training_feedback") != "training_feedback"):
         return None
+    if candidate_revision_id is None:
+        trajectory_for = getattr(state, 'trajectory_for', None)
+        trajectory = trajectory_for(candidate.candidate_id) if callable(trajectory_for) else None
+        candidate_revision_id = getattr(trajectory, 'final_revision_id', None)
     selected = None
     selected_index = -1
     for evaluation in getattr(state, 'formal_batch_evaluations', ()):
@@ -128,6 +134,7 @@ def prior_candidate_attribution(state, candidate):
         index = getattr(scope, 'batch_index', None)
         if (scope.candidate_id != candidate.candidate_id or scope.generation != candidate.generation
                 or getattr(scope.phase, 'value', scope.phase) != 'formal_batch'
+                or (candidate_revision_id is not None and scope.candidate_revision_id != candidate_revision_id)
                 or type(index) is not int or index <= 0 or index < selected_index):
             continue
         summary = evaluation.metrics.get('sample_execution', {}).get(METRIC_KEY)
@@ -141,6 +148,16 @@ def prior_candidate_attribution(state, candidate):
         selected = {**body, 'summary_digest': digest(body)}
         selected_index = index
     return selected
+
+
+def candidate_result_attribution(candidate):
+    """Reject old/mismatched reports at the model-facing result boundary."""
+    from ..evaluators.candidate_attribution import validated_summary, METRIC_KEY
+    checked = validated_summary(candidate.get(METRIC_KEY), phases={'formal_batch'})
+    if (checked is not None and candidate.get('final_revision_id') is not None
+            and checked.get('source_candidate_revision_id') != candidate['final_revision_id']):
+        return None
+    return checked
 
 
 def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis, generation,
@@ -173,9 +190,8 @@ def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis,
             if len(experience) == 32:
                 break
     if isinstance(previous_analysis, Mapping):
-        from ..evaluators.candidate_attribution import validated_summary, METRIC_KEY
         for candidate in previous_analysis.get('ranking', ())[:8]:
-            checked = validated_summary(candidate.get(METRIC_KEY), phases={'formal_batch'})
+            checked = candidate_result_attribution(candidate)
             if checked is None:
                 continue
             source_generation = checked.get('source_generation')

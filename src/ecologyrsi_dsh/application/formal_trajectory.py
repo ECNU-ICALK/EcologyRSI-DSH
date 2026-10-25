@@ -1828,7 +1828,8 @@ def _local_edit_proposal(
            if _cohort_scoped_editor(state) else {}),
         **({"prediction_contribution": _local_edit_contribution(evaluation.metrics)}
            if context.search_policy == "cellwise_training_evidence@1" else {}),
-        **({"candidate_agent_attribution": _local_edit_attribution(evaluation.metrics)}
+        **({"candidate_agent_attribution": _local_edit_attribution(
+            evaluation.metrics, scope=evaluation.scope, current_revision_id=context.candidate_revision_id)}
            if state.task_manifest.metadata.get("candidate_attribution_policy") == "sealed_unique_origin_attribution@1" else {}),
         "batch_evidence": {
             "score": evaluation.score,
@@ -2287,10 +2288,22 @@ def _inactive_axis_rejection_reason(
 
 
 
-def _local_edit_attribution(metrics: Mapping[str, Any]) -> dict[str, Any] | None:
+def _local_edit_attribution(metrics: Mapping[str, Any], *, scope=None,
+                            current_revision_id: str | None = None) -> dict[str, Any] | None:
     """Complete bounded grid from this sealed training batch, no raw labels."""
     from ..evaluators.candidate_attribution import METRIC_KEY, validated_summary
-    return validated_summary(metrics.get("sample_execution", {}).get(METRIC_KEY))
+    report = validated_summary(metrics.get("sample_execution", {}).get(METRIC_KEY))
+    if report is None or scope is None:
+        return report
+    body = {key: value for key, value in report.items() if key != "summary_digest"}
+    body.update(source_scope_digest=scope.scope_key,
+                source_candidate_revision_id=scope.candidate_revision_id,
+                current_candidate_revision_id=current_revision_id,
+                revision_relation=("current_candidate_revision"
+                    if scope.candidate_revision_id == current_revision_id else "different_evaluated_revision"),
+                sealed_summary_digest=report["summary_digest"],
+                revision_interpretation="This report describes only its source revision; a rejected challenger is not evidence about the retained revision.")
+    return {**body, "summary_digest": digest(body)}
 
 
 def _local_edit_contribution(metrics: Mapping[str, Any]) -> dict[str, Any] | None:

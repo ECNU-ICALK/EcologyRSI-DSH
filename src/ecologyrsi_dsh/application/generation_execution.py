@@ -3686,7 +3686,8 @@ def _build_adaptive_analysis(
         if noise is not None:
             ranking[-1]["same_genome_repeatability"] = noise
         from ..evolution.agent_policy import prior_candidate_attribution
-        attribution = prior_candidate_attribution(state, candidate)
+        attribution = prior_candidate_attribution(
+            state, candidate, candidate_revision_id=ranking[-1].get("final_revision_id"))
         if attribution is not None:
             ranking[-1]["candidate_agent_attribution"] = attribution
     ranking.sort(

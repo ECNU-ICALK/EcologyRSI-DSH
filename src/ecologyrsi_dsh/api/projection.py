@@ -992,7 +992,15 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         int(event.payload.get("origin_count") or 0)
         for event in getattr(state, "candidate_screening_events", ())
     )
-    adaptive_all_settled_origins = screening_settled_origins + adaptive_settled_origins
+    repeatability_settled_origins = sum(
+        int(event.payload.get("scope", {}).get("origin_count") or 0)
+        for event in state.events
+        if event.kind == "ScreeningRepeatabilityRecorded"
+    )
+    adaptive_all_settled_origins = (
+        screening_settled_origins + adaptive_settled_origins
+        + repeatability_settled_origins
+    )
     cells_per_origin = state.task_manifest.metadata.get("prediction_cells_per_origin")
     adaptive_scored_cells = (
         adaptive_all_settled_origins * cells_per_origin
@@ -1002,10 +1010,17 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     )
     adaptive_progress = _adaptive_progress_projection(state)
     adaptive_live_completed_origins = (
-        metric_count(adaptive_progress, "completed_origins")
+        metric_count(adaptive_progress, "executed_origins")
         if adaptive_progress is not None
         else None
     )
+    if (adaptive_live_completed_origins is None and adaptive_progress is not None
+            and adaptive_progress.get("execution_counts_known") is not False):
+        closed = metric_count(adaptive_progress, "completed_origins")
+        if closed is not None:
+            adaptive_live_completed_origins = max(
+                0, closed - (metric_count(adaptive_progress, "terminal_skipped_origins") or 0)
+            )
     return {
         "execution_mode": modes[0] if len(modes) == 1 else modes or "pending",
         "fit_method": fit_methods[0] if len(fit_methods) == 1 else fit_methods or None,
@@ -1057,6 +1072,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         "adaptive_outcome_counts_known": adaptive_outcome_counts_known,
         "adaptive_settled_origins": adaptive_settled_origins if adaptive_execution_counts_known else None,
         "adaptive_all_settled_origins": adaptive_all_settled_origins if adaptive_execution_counts_known else None,
+        "repeatability_settled_origins": repeatability_settled_origins,
         "adaptive_scored_cells": adaptive_scored_cells,
         "adaptive_live_completed_origins": adaptive_live_completed_origins,
         "adaptive_succeeded_origins": (
@@ -3986,6 +4002,54 @@ def _adaptive_progress_projection(
         max(0, int(generation)) * total + completed,
     )
     run_remaining_origins = max(0, run_total_origins - run_completed_origins)
+    # Completed budget slots include conditionally unused work. Physical
+    # executions must instead come from settled evaluations, including A/A,
+    # and must not count the reused screening evidence a second time.
+    relevant_holdouts = [item for item in state.holdout_evaluations
+                         if 0 <= item.scope.generation <= generation]
+    holdout_execution_multipliers = [
+        _sealed_holdout_execution_multiplier(state, item) for item in relevant_holdouts
+    ]
+    execution_counts_known = all(
+        multiplier is not None
+        for item, multiplier in zip(relevant_holdouts, holdout_execution_multipliers)
+        if item.scope.generation == generation
+    )
+    run_execution_counts_known = all(m is not None for m in holdout_execution_multipliers)
+    executed_holdout_origins = sum(
+        int(item.scope.origin_count) * (multiplier or 0)
+        for item, multiplier in zip(relevant_holdouts, holdout_execution_multipliers)
+        if item.scope.generation == generation
+    ) + sum(int(item.scope.origin_count) for item in getattr(state, "holdout_rechecks", ())
+            if item.scope.generation == generation)
+    executed_origins = (
+        screening_completed + formal_completed + executed_holdout_origins
+        + repeatability_completed + live_formal_completed + live_holdout_completed
+    )
+    prior_executed_origins = sum(
+        int(event.payload.get("origin_count") or 0)
+        for event in state.candidate_screening_events
+        if 0 <= int(event.payload.get("generation", -1)) < generation
+    ) + sum(
+        int(item.scope.origin_count)
+        for item in state.formal_batch_evaluations
+        if 0 <= item.scope.generation < generation
+        and getattr(item, "metrics", {}).get("reused_screening_evidence") is not True
+    ) + sum(
+        (multiplier or 0) * int(item.scope.origin_count)
+        for item, multiplier in zip(relevant_holdouts, holdout_execution_multipliers)
+        if 0 <= item.scope.generation < generation
+    ) + sum(
+        int(item.scope.origin_count)
+        for item in getattr(state, "holdout_rechecks", ())
+        if 0 <= item.scope.generation < generation
+    ) + sum(
+        int(event.payload.get("scope", {}).get("origin_count") or 0)
+        for event in runtime_events
+        if event.kind == "ScreeningRepeatabilityRecorded"
+        and 0 <= int(event.payload.get("generation", -1)) < generation
+    )
+    live_fields["settled_origins"] = executed_origins if execution_counts_known else None
     run_rolling_eta = (
         int(math.ceil(run_remaining_origins / rolling_rate * 60.0))
         if is_live and rolling_rate is not None and rolling_rate > 0
@@ -4019,6 +4083,12 @@ def _adaptive_progress_projection(
         "generation": generation,
         "run_completed_origins": run_completed_origins,
         "run_total_origins": run_total_origins,
+        "run_executed_origins": (prior_executed_origins + executed_origins
+                                 if run_execution_counts_known else None),
+        "executed_origins": executed_origins if execution_counts_known else None,
+        "execution_counts_known": execution_counts_known,
+        "run_execution_counts_known": run_execution_counts_known,
+        "completion_count_semantics": "executed_plus_terminally_skipped_budget_slots",
         "evaluation_phase": phase,
         "completed_origins": completed,
         "total_origins": total,
