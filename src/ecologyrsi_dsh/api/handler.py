@@ -573,6 +573,8 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             self.independent_evaluation = IndependentEvaluationService(self)
             self.independent_evaluation.recover_interrupted()
         except BaseException:
+            if hasattr(self, "idle_sleep"):
+                self.idle_sleep.close()
             if hasattr(self, "host_activity"):
                 self.host_activity.close()
             if hasattr(self, "socket"):
@@ -948,6 +950,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         }
 
     def close(self) -> None:
+        self.idle_sleep.close()
         self.host_activity.close()
         independent_stopped = self.independent_evaluation.close()
         worker_stopped = self.auto_progress.close()

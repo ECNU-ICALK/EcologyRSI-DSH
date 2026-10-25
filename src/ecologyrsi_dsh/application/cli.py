@@ -404,6 +404,7 @@ def advance_command(args: argparse.Namespace) -> int:
             print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2, allow_nan=False))
         finally:
             if services is not None:
+                services.idle_sleep.close()
                 services.host_activity.close()
             ledger.close()
     finally:

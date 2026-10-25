@@ -11,6 +11,7 @@ from ..core.errors import DshNativeRuntimeUnavailableError
 from ..core.models import digest
 from ..core.immutable import thaw_json
 from ..core.trajectory import EvaluationPhase, EvaluationScope
+from ..execution.idle_sleep import protect_independent_evaluation
 from ..data.adapters import dataset_adapter
 from ..evaluators.epoch_cohorts import PlannedCohort, _eligible_origins
 from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
@@ -303,6 +304,7 @@ class IndependentEvaluationService:
                             self._forget_formal_runtime(prepared)
                         reservation.release()
 
+    @protect_independent_evaluation
     def _execute(self, run_id, token, plan, reservation, prepared):
         admissions_closed = False
         def evaluate():

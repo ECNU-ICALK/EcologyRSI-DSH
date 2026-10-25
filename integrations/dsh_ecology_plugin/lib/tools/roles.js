@@ -2,6 +2,7 @@ import { ROLE_CONTRACTS } from "../runtime/contracts.js";
 import { assertModelArgumentsSafe, TOOL_DEFINITIONS } from "./definitions.js";
 import { executeDynamicRetrieval } from "./retrieval.js";
 import { projectPredictionToolResult } from "../runtime/display-projection.js";
+import { SidecarError } from "../sidecar/client.js";
 
 export const DYNAMIC_RETRIEVAL_TOOL_PROFILE = "dynamic-retrieval-v1";
 
@@ -58,11 +59,23 @@ export function registerRoleTools(ctx, config = {}) {
         if (!bridge?.bindingFor || !bridge?.sidecar?.request) throw new Error("ecology role tool bridge is unavailable");
         const binding = await bridge.bindingFor(exec, { role, toolName: name });
         if (!binding || binding.role !== role) throw new Error("role tool authorization failed");
-        const result = await bridge.sidecar.request(`/api/ecology-agent-sidecar/v1/tools/${name}`, {
-          body: { identity: binding, arguments: structuredClone(args) },
-          signal: exec?.signal,
-        });
-        return result;
+        try {
+          return await bridge.sidecar.request(`/api/ecology-agent-sidecar/v1/tools/${name}`, {
+            body: { identity: binding, arguments: structuredClone(args) },
+            signal: exec?.signal,
+          });
+        } catch (error) {
+          // Explain this exact Host diagnostic without exposing arbitrary
+          // response text. Recovery replays an existing request, never grants
+          // additional computation or makes unseen evidence citeable.
+          if (name === "ecology_execute_prediction_tool" && error instanceof SidecarError
+            && error.code === "sidecar_rejected"
+            && error.publicDetail === "prediction tool call budget exhausted") {
+            throw new SidecarError(error.code,
+              "Prediction computation budget is exhausted. If prediction_contract.recoverable_call_requests is present, replay an exact listed request, including its original call_id, to receive already-computed evidence without a new computation. Otherwise use successful evidence already received. Do not invent call IDs or predictions; new computations remain unavailable.");
+          }
+          throw error;
+        }
       };
     const disposer = register.call(ctx.tools, {
       ...definition,

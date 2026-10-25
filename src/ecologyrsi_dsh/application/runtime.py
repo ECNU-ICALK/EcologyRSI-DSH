@@ -59,6 +59,8 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
                     event_id="host-gap:" + digest([run_id, created.seq, payload]),
                     expected_run_created_seq=created.seq)
     self.host_activity = HostActivityMonitor(on_gap=record_host_gap)
+    from ..execution.idle_sleep import IdleSleepInhibitor
+    self.idle_sleep = IdleSleepInhibitor()
     self.sample_admission = RunSampleAdmission(on_execution_failure=abort_failed_evaluation,
                                                host_activity=self.host_activity)
     self.datasets = DatasetRegistry()

@@ -21,6 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 from .ports import GenerationRuntime
+from ..execution.idle_sleep import protect_generation
 
 from ..core.errors import (
     dsh_native_runtime_error_in_chain,
@@ -4122,6 +4123,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
     return analysis
 
 
+@protect_generation
 def execute_generation(services: GenerationRuntime, run_id: str) -> Any:
     """Complete exactly one generation including its unified decision barrier."""
 

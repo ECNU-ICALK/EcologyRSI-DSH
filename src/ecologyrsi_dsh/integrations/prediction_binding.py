@@ -108,6 +108,29 @@ class DshPredictionToolBinding:
     def _spent(self):
         return sum(p["result"].get("charged_calls", 1) for p, _ in self.calls.values())
 
+    def recovery_context(self):
+        """Expose exact replay requests, never unreceived prediction evidence.
+
+        A replacement session shares this frozen wave's durable call budget.
+        It must explicitly fetch an original call before citing its result;
+        listing the request does not make that call visible to any session.
+        """
+        with self._lock:
+            return {
+                'remaining_calls': max(0, self.budget - self._spent()),
+                'recoverable_call_requests': [deepcopy(p['arguments'])
+                    for p, _ in self.calls.values() if p['result']['status'] == 'completed'],
+                'recovery_instruction': (
+                    'Recoverable requests belong to this exact frozen prediction wave. '
+                    'To obtain their evidence, call ecology_execute_prediction_tool with the '
+                    'listed original call_id, tool_id, wave_digest and parameters unchanged. '
+                    'Exact replay consumes no additional numerical budget and remains allowed '
+                    'when remaining_calls is zero. Only cite evidence actually returned to '
+                    'this session; the request list itself contains no prediction evidence. '
+                    'Use the returned call_id, do not replace it with a new identifier.'
+                ),
+            }
+
     def execute(self, arguments, *, session_id, persist):
         if set(arguments) != {'tool_id', 'wave_digest', 'call_id', 'parameters'}:
             raise ValueError('tool requires tool_id, wave_digest, call_id and parameters')

@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from threading import Lock
 from typing import Any
 from .ports import GenerationRuntime
+from ..execution.idle_sleep import protect_generation
 
 from ..core.errors import preferred_execution_failure
 
@@ -65,6 +66,7 @@ def _formal_lane_priority(
     return (0 if in_flight else 1, completed_pairs, selection_index)
 
 
+@protect_generation
 def execute_next_adaptive_work_unit(services: GenerationRuntime, run_id: str) -> bool:
     """Advance one durable boundary and return whether work was committed.
 

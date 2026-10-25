@@ -12,6 +12,21 @@ from tests.test_baseline_aligned_ridge import periodic_series
 
 
 class AgentModelToolsTests(unittest.TestCase):
+    def test_canonical_identity_uses_effective_parameters_and_training_resource(self):
+        series = periodic_series()
+        bank = AgentModelTools(series, targets=('air_temperature',), horizons=(1,))
+        tool = 'greenhouse-baseline-aligned-ridge@1'
+        output = bank.execute((self.request(series),), tool, {})['one']
+        proof = output['metadata']['canonical_computation']
+        self.assertEqual(proof, bank.computation_identity(tool, output['metadata']['parameters']))
+        self.assertEqual(proof['fit_resource_key'], output['metadata']['fit_resource_key'])
+        rescaled = bank.computation_identity(tool, {'residual_scale_1h': .9})
+        self.assertEqual(proof['fit_resource_key'], rescaled['fit_resource_key'])
+        self.assertNotEqual(proof['parameters_digest'], rescaled['parameters_digest'])
+        refitted = bank.computation_identity(tool, {'ridge_alpha': .2})
+        self.assertNotEqual(proof['fit_resource_key'], refitted['fit_resource_key'])
+        self.assertNotEqual(proof['parameters_digest'], refitted['parameters_digest'])
+
     def request(self, series):
         return SamplePredictionRequest(sample_id='one', candidate_id='candidate', dataset_digest=series.digest,
             partition='training_feedback', target='air_temperature', unit='degC', horizon_hours=1,

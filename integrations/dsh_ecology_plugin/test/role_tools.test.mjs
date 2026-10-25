@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { SidecarError } from "../lib/sidecar/client.js";
 
 import { BLOCKED_MODEL_IDENTITY_FIELDS, TOOL_DEFINITIONS } from "../lib/tools/definitions.js";
 import {
@@ -88,4 +89,27 @@ test("role guard allows only the frozen role tool and structured result channel"
   assert.equal(guard({ name: "skill" }), undefined);
   assert.equal(guard({ name: "structured_output" }), undefined);
   assert.match(guard({ name: "bash" }), /outside the frozen sample-planner role surface/);
+});
+
+test("exhausted prediction budget offers exact replay without leaking other Host diagnostics", async () => {
+  const handlers = new Map();
+  let failure = new SidecarError("sidecar_rejected", "sidecar_rejected", {
+    publicDetail: "prediction tool call budget exhausted",
+  });
+  registerRoleTools({ tools: { register: definition => handlers.set(definition.name, definition.execute) } }, {
+    role: "sample-planner",
+    bridge: {
+      bindingFor: async () => ({ role: "sample-planner" }),
+      sidecar: { request: async () => { throw failure; } },
+    },
+  });
+  const execute = () => handlers.get("ecology_execute_prediction_tool")({ tool_id: "candidate-model" }, {});
+  await assert.rejects(execute, error => error.code === "sidecar_rejected"
+    && /recoverable_call_requests/.test(error.message)
+    && /original call_id/.test(error.message)
+    && /new computations remain unavailable/.test(error.message));
+  for (const detail of ["private request contents", "prediction tool call budget exhausted; secret"] ) {
+    failure = new SidecarError("sidecar_rejected", "sidecar_rejected", { publicDetail: detail });
+    await assert.rejects(execute, error => error === failure && !error.message.includes(detail));
+  }
 });

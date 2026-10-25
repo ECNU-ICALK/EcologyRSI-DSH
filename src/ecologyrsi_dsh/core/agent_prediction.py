@@ -89,6 +89,28 @@ def validate_formula_profile(profile, formula_policy):
         raise ValueError("frozen prediction formula conflicts with authored blend_rule; use none or mean")
 
 
+def _canonical_computation_key(payload):
+    """Optional Host proof on new numerical results; never infer it for old events."""
+    outputs = payload["result"].get("outputs", ())
+    proofs = [(row["metadata"].get("canonical_computation")
+               if isinstance(row.get("metadata"), Mapping) else None) for row in outputs]
+    if not any(proof is not None for proof in proofs):
+        return None
+    for proof in proofs:
+        if (not isinstance(proof, Mapping) or set(proof) != {
+                "schema_version", "model_id", "parameters_digest", "fit_resource_key"}
+                or proof["schema_version"] != "ecologyrsi-dsh.canonical-computation/1"
+                or not isinstance(proof["model_id"], str) or not 1 <= len(proof["model_id"]) <= 160
+                or any(not isinstance(proof[key], str) or len(proof[key]) != 64
+                       or any(c not in "0123456789abcdef" for c in proof[key])
+                       for key in ("parameters_digest", "fit_resource_key"))):
+            raise ValueError("invalid Host canonical computation proof")
+    if any(proof != proofs[0] for proof in proofs):
+        raise ValueError("inconsistent Host canonical computation proof across samples")
+    return digest({"wave_digest": payload["wave_digest"],
+                   "sample_ids": payload["sample_ids"], "computation": proofs[0]})
+
+
 def unique_prediction_evidence(calls, *, provenance_calls=None):
     """Keep one vote per executed computation, never deduplicate equal numbers.
 
@@ -103,7 +125,13 @@ def unique_prediction_evidence(calls, *, provenance_calls=None):
         if payload["result"]["status"] != "completed":
             continue
         arguments = payload["arguments"]
-        computation = digest({"tool_id": payload["tool_id"], "parameters": arguments["parameters"]})
+        canonical = _canonical_computation_key(payload)
+        # New Host proofs bind the actual model, fit, parameters and wave.
+        # Old arguments cannot distinguish aliases or changed fit resources;
+        # retain that historical rule only for untagged archived events.
+        computation = (("canonical", canonical) if canonical is not None else
+                       ("legacy", digest({"tool_id": payload["tool_id"],
+                                          "parameters": arguments["parameters"]})))
         source, visited = event_id, set()
         while source in by_event and source not in visited:
             visited.add(source)
@@ -327,6 +355,7 @@ def validate_tool_event(p):
             value = row.get("predicted")
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError("prediction tool event output must be finite")
+        _canonical_computation_key(p)
 
 
 AGENT_REVIEW_SCHEMA = "ecology-sample-review@2"

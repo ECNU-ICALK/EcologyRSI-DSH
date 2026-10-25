@@ -124,6 +124,15 @@ class _DshSampleDecisionClient:
             identity_digests=self.identity_digests,
         )
         wave_digest = digest(wave)
+        wire_context = {**wave, "wave_digest": wave_digest}
+        recovery = options.get("prediction_recovery")
+        if recovery is not None and role in {"planner", "repair"}:
+            # Recovery describes existing ledger calls, not forecast inputs.
+            # Keep the original wave/idempotency identity so old durable calls
+            # remain bound to this same candidate, origin and frozen catalog.
+            wire_context["context"] = {**wave["context"], "prediction_contract": {
+                **wave["context"].get("prediction_contract", {}), **recovery,
+            }}
         revisions = dict(self.revision_provider(self.run_id))
         runtime = self.runtime_provider()
         if not isinstance(runtime, DshStructuredRoleRuntime):
@@ -132,7 +141,7 @@ class _DshSampleDecisionClient:
             run_id=self.run_id,
             stage=stage,
             role=dsh_role,
-            context={**wave, "wave_digest": wave_digest},
+            context=wire_context,
             output_schema_id=schema_id,
             run_state_revision=int(revisions["run_state_revision"]),
             stage_attempt=max(1, int(wave_digest[:12], 16)),
@@ -376,11 +385,13 @@ class DshSampleCollaborationAdapter:
         if status != "running":
             raise SampleExecutionControlUnavailableError("invalid run control state")
 
-    def _agent_decide(self, model_id, *, role, samples, context, available_tools, **_unused):
+    def _agent_decide(self, model_id, *, role, samples, context, available_tools,
+                      prediction_recovery=None, **_unused):
         self._check_control()
         try:
             result = self._decision_client.sample_decide(model_id, role=role, samples=samples,
-                context=context, available_tools=available_tools, max_tokens=self.operation_max_tokens["sample." + role])
+                context=context, available_tools=available_tools,
+                prediction_recovery=prediction_recovery, max_tokens=self.operation_max_tokens["sample." + role])
         except DshNativeRuntimeUnavailableError as exc:
             if role in {"planner", "repair"} and exc.error_code == "structured_child_output_budget_exhausted":
                 raise DshSamplePlannerOutputBudgetError() from exc
@@ -1019,6 +1030,7 @@ class DshSampleCollaborationAdapter:
                 raw = self._agent_decide(
                     self.strategy_model_id, role=role, samples=samples, context=context,
                     available_tools=catalog, allow_format_retry=False, diagnostics=diagnostics,
+                    prediction_recovery=binding.recovery_context(),
                 )
                 structured = {"schema_version": "ecology-sample-predictions@2", "wave_digest": binding.wave_digest, **raw}
                 rows = validate_predictions(structured, [r.sample_id for r in selected], wave_digest=binding.wave_digest,

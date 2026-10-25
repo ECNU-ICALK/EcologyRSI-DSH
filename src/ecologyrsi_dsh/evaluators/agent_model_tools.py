@@ -269,6 +269,14 @@ class AgentModelTools:
             plan=plan, index_by_timestamp=visible)
         return rows[0]['baseline'], rows[0]['label_free_context']
 
+    def computation_identity(self, tool_id, parameters):
+        """Host identity shared by the candidate alias and explicit model calls."""
+        config = _CONFIGS[tool_id].from_mapping({**self._tool_defaults(tool_id), **parameters})
+        key, _ = self._fit_identity(tool_id, config)
+        return {"schema_version": "ecologyrsi-dsh.canonical-computation/1",
+                "model_id": tool_id, "parameters_digest": digest(config.to_dict()),
+                "fit_resource_key": key}
+
     def execute(self, requests, tool_id, parameters):
         self._check_control()
         config = _CONFIGS[tool_id].from_mapping({**self._tool_defaults(tool_id), **parameters})
@@ -288,5 +296,6 @@ class AgentModelTools:
                     baseline=baseline, label_free_context=context, models=fit['models'], config=config)
                 output[request.sample_id] = {'predicted': value, 'metadata': {'model_id': tool_id,
                     'parameters': config.to_dict(), 'fit_digest': digest(fit['models']),
-                    'fit_resource_key': key, 'training_partition': 'training_fit'}}
+                    'fit_resource_key': key, 'training_partition': 'training_fit',
+                    'canonical_computation': self.computation_identity(tool_id, config.to_dict())}}
             return output

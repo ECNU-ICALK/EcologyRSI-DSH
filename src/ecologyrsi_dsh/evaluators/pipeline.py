@@ -3199,11 +3199,14 @@ class EvaluationPipeline:
             origin = requests[0].origin_timestamp
             if any(request.origin_timestamp != origin for request in requests):
                 raise ValueError("ridge origin bundle mixes forecast origins")
+            computation_metadata = ({"canonical_computation": agent_model_tools.computation_identity(
+                predictor_model_id, parameters.to_dict())} if agent_model_tools is not None else {})
             return {
                 request.sample_id: {
                     "predicted": candidate_forecast_tool(request),
                     "metadata": {
                         "source_model_id": predictor_model_id,
+                        **computation_metadata,
                         "prediction_unit": (
                             "forecast_origin_with_target_horizon_vector"
                         ),

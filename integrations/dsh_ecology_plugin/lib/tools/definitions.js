@@ -22,7 +22,7 @@ export const TOOL_DEFINITIONS = Object.freeze({
   },
   ecology_execute_prediction_tool: {
     name: "ecology_execute_prediction_tool",
-    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id. Results are evidence for your final prediction. Follow the current frozen prediction_contract.max_prediction_tool_calls budget and the Host-reported remaining_calls. Failed calls also consume budget.",
+    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id for new computation. After interruption, an exact recoverable_call_requests entry may be replayed using its original call_id and parameters to retrieve existing evidence even with remaining_calls=0; wait for its result before citing it. Results are evidence for your final prediction. Follow the current frozen prediction_contract.max_prediction_tool_calls budget and the Host-reported remaining_calls. Failed computations also consume budget.",
     parameters: objectInput({
       tool_id: text(160),
       wave_digest: text(64),
