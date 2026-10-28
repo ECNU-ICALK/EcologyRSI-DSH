@@ -130,6 +130,17 @@ Proposed edits with the host's trust-region check:
 %(edits)s"""
 
 
+NOTE_KEYS = ("observations", "hypotheses", "directions")
+
+
+def _as_note(reply: dict[str, Any]) -> dict[str, Any]:
+    """Accept a note sent without its {"note": ...} wrapper (common after a repair request)."""
+
+    if "note" not in reply and "tool" not in reply and any(key in reply for key in NOTE_KEYS):
+        return {"note": {key: reply.get(key, []) for key in NOTE_KEYS}}
+    return reply
+
+
 @dataclass
 class _Conversation:
     role: str
@@ -245,8 +256,11 @@ class LLMProposer:
     def _research(self, conversation: _Conversation, brief: str, tools: ResearchTools) -> dict[str, Any]:
         conversation.messages.append({"role": "system", "content": brief})
         prompt = RESEARCHER % {"budget": self.max_tool_calls, "tools": _short(tools.catalog())}
-        reply = conversation.ask(prompt + f"\n\nGeneration {conversation.context.generation}: begin.")
+        overview = _short(tools.call("overview", {}), 6000)
+        reply = conversation.ask(f"{prompt}\n\nGeneration {conversation.context.generation}: begin. "
+                                 f"Result of overview (already run for you):\n{overview}")
         for _ in range(self.max_tool_calls):
+            reply = _as_note(reply)
             if "note" in reply:
                 break
             if "tool" not in reply:
@@ -254,8 +268,9 @@ class LLMProposer:
                 continue
             result = tools.call(str(reply["tool"]), reply.get("args") or {})
             reply = conversation.ask(f"Tool result ({reply['tool']}):\n{_short(result, 6000)}")
+        reply = _as_note(reply)
         if "note" not in reply:
-            reply = conversation.ask("The tool budget is spent. Reply now with the note as one JSON object.")
+            reply = _as_note(conversation.ask("The tool budget is spent. Reply now with the note as one JSON object."))
         note = require(reply, "note", dict)
         return {key: note.get(key, []) for key in ("observations", "hypotheses", "directions")}
 

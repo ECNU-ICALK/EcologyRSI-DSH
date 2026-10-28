@@ -23,12 +23,13 @@ from pathlib import Path
 
 from ecologyrsi_dsh.data.adapters import dataset_adapter
 from ecologyrsi_dsh.data.registry import DatasetRegistry
-from ecologyrsi_dsh.evaluators import greenhouse_prediction as gp
 from ecologyrsi_dsh.evaluators.agent_model_tools import _CONFIGS, _defaults
 from ecologyrsi_dsh.evaluators.baselines import fit_baseline_profile
 from ecologyrsi_dsh.evaluators.metrics import _normalization_scale
 from ecologyrsi_dsh.evaluators.objectives import skill_score
 from ecologyrsi_dsh.evaluators.pipeline import _apply_scoring_baseline
+
+from ecologyrsi_dsh.evaluators import greenhouse_prediction as gp
 
 OUT = Path(__file__).resolve().parent
 DATASET = "agc_cucumber_2018"

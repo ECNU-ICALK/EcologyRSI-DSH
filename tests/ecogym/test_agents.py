@@ -43,7 +43,8 @@ def script(edits, *, review=None):
     replies = [
         json.dumps({"tool": "residual_profile", "args": {"cell": "y@1", "stage": "screening"}, "why": "look"}),
         "Here you go:\n```json\n" + json.dumps({"tool": "try_edit", "args": {"changes": edits[0]}}) + "\n```",
-        json.dumps({"note": {"observations": ["误差在白天更大"], "hypotheses": ["h"], "directions": ["d"]}}),
+        # a note without its {"note": ...} wrapper is accepted too
+        json.dumps({"observations": ["误差在白天更大"], "hypotheses": ["h"], "directions": ["d"]}),
         json.dumps({"edits": [{"changes": changes, "rationale": f"edit {i}"} for i, changes in enumerate(edits)]}),
     ]
     if review is not None:
@@ -83,6 +84,7 @@ class ReplyTests(unittest.TestCase):
 class _FakeProvider(BaseHTTPRequestHandler):
     calls: ClassVar[list[dict]] = []
     fail_first = False
+    cut_stream = False
 
     def log_message(self, *args):
         return None
@@ -101,6 +103,8 @@ class _FakeProvider(BaseHTTPRequestHandler):
             for piece in ('{"ok":', " true}"):
                 chunk = {"model": "fake", "choices": [{"delta": {"content": piece}}]}
                 self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                if type(self).cut_stream:
+                    return  # the connection closes after the first piece
             self.wfile.write(b'data: {"choices": [], "usage": {"total_tokens": 7}}\n\ndata: [DONE]\n\n')
         else:
             payload = json.dumps({"model": "fake", "choices": [{"message": {"content": '{"ok": false}'}}]}).encode()
@@ -140,6 +144,17 @@ class HttpClientTests(unittest.TestCase):
         client = make_client(options)
         self.assertEqual(client.describe()["fallbacks"][0]["model"], "fake")
         self.assertEqual(client.complete([{"role": "user", "content": "hi"}]).text, '{"ok": true}')
+
+    def test_a_cut_stream_is_not_taken_for_a_whole_reply(self):
+        _FakeProvider.cut_stream = True
+        try:
+            client = OpenAICompatibleClient(self.base, "fake", key_env="ECOGYM_TEST_KEY", retries=1)
+            with mock.patch("ecogym.agents.clients.time.sleep"), self.assertRaises(AgentError) as caught:
+                client.complete([{"role": "user", "content": "hi"}])
+            self.assertIn("IncompleteRead", str(caught.exception))
+            self.assertEqual(len(_FakeProvider.calls), 2)
+        finally:
+            _FakeProvider.cut_stream = False
 
     def test_transient_errors_are_retried(self):
         _FakeProvider.fail_first = True

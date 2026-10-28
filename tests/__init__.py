@@ -1,1 +1,1 @@
-"""EcologyRSI-DSH standard-library test suite."""
+"""Test suite: ``python -m unittest discover -s tests -t .`` (see tests/ecogym)."""

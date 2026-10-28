@@ -3,9 +3,9 @@ requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ecologyrsi-dsh"
-version = "0.10.33"
-description = "A small, replayable evolution core for EcologyRSI-DSH"
+name = "ecogym"
+version = "0.1.0"
+description = "A reproducible training ground for ecological forecasting methods"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
 license-files = ["LICENSE", "NOTICE"]
@@ -16,117 +16,21 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
 ]
 
 [project.scripts]
-ecologyrsi-dsh = "ecologyrsi_dsh.application.cli:main"
+ecogym = "ecogym.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 
-[tool.setuptools.package-data]
-"ecologyrsi_dsh.knowledge" = ["*.json"]
-"ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml"]
-"ecogym.web" = ["*.html", "*.js", "*.css"]
-
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["ecogym*"]
 
-[tool.setuptools.data-files]
-"share/ecologyrsi-dsh/datasets" = [
-    "datasets/*.json",
-]
-"share/ecologyrsi-dsh/plugins/ecology_evolution" = [
-    "plugins/ecology_evolution/README.md",
-    "plugins/ecology_evolution/app.js",
-    "plugins/ecology_evolution/index.html",
-    "plugins/ecology_evolution/plugin.json",
-    "plugins/ecology_evolution/styles.css",
-]
-"share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js" = [
-    "plugins/ecology_evolution/assets/js/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin" = [
-    "integrations/dsh_ecology_plugin/README.md",
-    "integrations/dsh_ecology_plugin/package.json",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib" = [
-    "integrations/dsh_ecology_plugin/lib/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/runtime" = [
-    "integrations/dsh_ecology_plugin/lib/runtime/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/sidecar" = [
-    "integrations/dsh_ecology_plugin/lib/sidecar/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/tools" = [
-    "integrations/dsh_ecology_plugin/lib/tools/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/web" = [
-    "integrations/dsh_ecology_plugin/lib/web/*.js",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas" = [
-    "integrations/dsh_ecology_plugin/schemas/*.json",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets" = [
-    "integrations/dsh_ecology_plugin/presets/preset-manifest.json",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v17" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/*.yml",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/skills/autonomous-ecology-research" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v17/skills/autonomous-ecology-research/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v9/skills/bounded-plugin-experiment/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/skills/origin-vector-forecasting" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v15/skills/origin-vector-forecasting/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v14/skills/origin-vector-forecasting/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/batch-scientific-reflection" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/batch-scientific-reflection/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.33.tgz",
-]
-"share/ecologyrsi-dsh/scripts" = [
-    "scripts/install_dsh_ecology_runtime.mjs",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+[tool.setuptools.package-data]
+"ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml"]
+"ecogym.web" = ["*.html", "*.js", "*.css"]

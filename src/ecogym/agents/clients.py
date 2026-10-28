@@ -122,19 +122,24 @@ class OpenAICompatibleClient:
             payload = json.loads(response.read().decode("utf-8"))
             return (payload["choices"][0]["message"].get("content") or "", str(payload.get("model", self.model)),
                     dict(payload.get("usage") or {}))
-        parts, model, usage = [], self.model, {}
+        parts, model, usage, finished = [], self.model, {}, False
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
             if data == "[DONE]":
+                finished = True
                 break
             chunk = json.loads(data)
             model = str(chunk.get("model") or model)
             usage = dict(chunk.get("usage") or usage)
             for choice in chunk.get("choices") or []:
                 parts.append((choice.get("delta") or {}).get("content") or "")
+                finished = finished or bool(choice.get("finish_reason"))
+        if not finished:
+            # The connection closed mid-reply; a partial answer must not pass as a whole one.
+            raise http.client.IncompleteRead("".join(parts).encode("utf-8"))
         return "".join(parts), model, usage
 
     def complete(self, messages: Sequence[Message]) -> Reply:

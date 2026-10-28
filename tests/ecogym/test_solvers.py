@@ -57,7 +57,8 @@ class GenomeTests(unittest.TestCase):
         genome = Genome.from_dict(RECIPE, task)
         self.assertEqual(genome.params["scale"], {"y@1": 1.0, "y@6": 1.0})
         self.assertEqual(genome.params["anchor"], "baseline")
-        reordered = Genome.from_dict({"params": dict(reversed(list(RECIPE["params"].items()))), "solver": RECIPE["solver"]}, task)
+        params = dict(reversed(list(RECIPE["params"].items())))
+        reordered = Genome.from_dict({"params": params, "solver": RECIPE["solver"]}, task)
         self.assertEqual(genome.digest, reordered.digest)
         with self.assertRaises(SolverError):
             Genome.from_dict({"solver": "recipe_ridge@1", "params": {"alpah": 0.1}}, task)

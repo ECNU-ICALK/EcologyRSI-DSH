@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from itertools import pairwise
 
 import numpy as np
 
@@ -37,7 +38,7 @@ class PartitionTests(unittest.TestCase):
 
     def test_stages_are_ordered_disjoint_and_embargoed(self):
         intervals = [self.partitions.intervals[stage]["A"] for stage in STAGES]
-        for (start, end), (next_start, _) in zip(intervals, intervals[1:]):
+        for (start, end), (next_start, _) in pairwise(intervals):
             self.assertLess(start, end)
             self.assertGreaterEqual(next_start - end, self.task.protocol.embargo - 1)
         masks = [self.partitions.mask(self.frame, stage) for stage in STAGES]
@@ -48,7 +49,8 @@ class PartitionTests(unittest.TestCase):
             open_stage(self.frame, self.partitions, self.task, "validation")
         with self.assertRaises(PermissionError):
             open_stage(self.frame, self.partitions, self.task, "final_test", sealed=SealedAccess("validation", "k"))
-        opened = open_stage(self.frame, self.partitions, self.task, "validation", sealed=SealedAccess("validation", "k"))
+        access = SealedAccess("validation", "k")
+        opened = open_stage(self.frame, self.partitions, self.task, "validation", sealed=access)
         self.assertGreater(opened.size, 0)
 
 
