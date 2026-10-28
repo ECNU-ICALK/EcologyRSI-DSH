@@ -9,7 +9,7 @@ only usable once the day is over. The first table's steps define an
 episode's rows; values outside the declared valid range are dropped.
 
 The arithmetic (``statistics.fmean`` at both averaging levels, the time
-codecs, alias matching) reproduces the v0.10.33 greenhouse loader bit for bit.
+codecs, alias matching) reproduces the v0.10.33 loader bit for bit.
 """
 
 from __future__ import annotations

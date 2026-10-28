@@ -5,3 +5,5 @@ line-length = 120
 
 [lint]
 select = ["E", "F", "W", "B", "I", "UP", "SIM", "RUF"]
+# Typographic characters (–, ×, Chinese text) are intended in user-facing strings.
+ignore = ["RUF001", "RUF002", "RUF003"]

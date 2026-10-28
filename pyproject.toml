@@ -9,8 +9,8 @@ description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -30,6 +30,7 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "ecologyrsi_dsh.knowledge" = ["*.json"]
+"ecogym.domains.greenhouse" = ["*.toml", "tasks/*.toml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
