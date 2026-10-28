@@ -1,6 +1,7 @@
 include README.md CHANGELOG.md LICENSE NOTICE pyproject.toml ruff.toml Makefile
+include docs/*.md
 recursive-include src/ecogym *.py *.toml *.md *.html *.js *.css
-recursive-include docs/ecogym *.md
+include tests/__init__.py
 recursive-include tests/ecogym *.py *.json
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
 global-exclude .env .env.* *.pem *.key *credentials*

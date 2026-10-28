@@ -29,8 +29,6 @@ from ..protocol.baselines import BaselineProfile, baseline_values
 from ..protocol.views import Origins
 from ..task.spec import TaskSpec
 
-PARAM_KINDS = ("float", "int", "choice", "cells", "json")
-
 
 class SolverError(ValueError):
     """A genome is invalid or its solver cannot fit."""
@@ -232,7 +230,6 @@ def solver_specs() -> list[SolverSpec]:
 
 
 __all__ = [
-    "PARAM_KINDS",
     "Genome",
     "Param",
     "SolverContext",

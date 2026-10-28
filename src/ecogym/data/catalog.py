@@ -1,8 +1,7 @@
 """Dataset registry, data-root resolution and a load cache.
 
 Domain packs register their dataset specs here. Source files live under a
-data root: ``$ECOGYM_DATA_ROOT`` if set, otherwise the first existing of
-``~/.ecogym/data`` and the pre-ecogym location ``~/.ecologyrsi-dsh/data``.
+data root: ``$ECOGYM_DATA_ROOT`` if set, otherwise ``~/.ecogym/data``.
 Parsed frames are cached as ``.npz`` under ``$ECOGYM_CACHE_DIR`` (default
 ``~/.cache/ecogym``), keyed by the spec digest, the loader version and the
 size and modification time of every source file.
@@ -46,10 +45,7 @@ def dataset_specs() -> list[DatasetSpec]:
 
 def data_root() -> Path:
     configured = os.environ.get("ECOGYM_DATA_ROOT")
-    if configured:
-        return Path(configured).expanduser()
-    candidates = [Path.home() / ".ecogym" / "data", Path.home() / ".ecologyrsi-dsh" / "data"]
-    return next((path for path in candidates if path.is_dir()), candidates[0])
+    return Path(configured).expanduser() if configured else Path.home() / ".ecogym" / "data"
 
 
 def dataset_dir(spec: DatasetSpec, root: Path | None = None) -> Path:

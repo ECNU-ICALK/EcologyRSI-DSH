@@ -202,13 +202,12 @@ class LLMProposer:
     patches: tuple[str, ...] = ()
     path_prepend: str | None = None
     name: str = field(default="llm", init=False)
-    deterministic: bool = field(default=False, init=False)
     client: ChatClient | None = field(default=None, repr=False)
 
     def options(self) -> dict[str, Any]:
         """Constructor options (no secrets: keys are named by ``key_env``, never stored)."""
 
-        skip = {"name", "deterministic", "client"}
+        skip = {"name", "client"}
         return {item.name: getattr(self, item.name) for item in fields(self) if item.name not in skip}
 
     def _client(self) -> ChatClient:

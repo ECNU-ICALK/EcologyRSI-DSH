@@ -2,11 +2,9 @@
 
 **ecogym 是一个生态学预测训练场**：基线、专家模型、参数搜索和 LLM 研究智能体在同一套可复现的规则下比较。训练场负责定义任务、控制信息集（不能看未来，不能看封存分区）、用统一的统计门槛判断“是否真的更好”、记录完整来源，并保证每个方法在封存的验证集和最终测试集上各只评一次。
 
-> 当前版本 **ecogym 0.1.0**（取代 EcologyRSI-DSH 0.10.33）· Python 3.11+ · 依赖 numpy
->
-> 旧系统的运行记录留在标签 `v0.10.33` 中查看，见[从 0.10.33 迁移](#从-01033-迁移)。
+> ecogym 0.1.0 · Python 3.11+ · 依赖 numpy
 
-[快速开始](#快速开始) · [核心概念](#核心概念) · [评测规则](#评测规则) · [LLM 研究智能体](#llm-研究智能体) · [网页工作台](#网页工作台) · [代码结构](#代码结构) · [新增领域](docs/ecogym/new-domain.md)
+[快速开始](#快速开始) · [核心概念](#核心概念) · [评测规则](#评测规则) · [LLM 研究智能体](#llm-研究智能体) · [网页工作台](#网页工作台) · [代码结构](#代码结构) · [新增领域](docs/new-domain.md)
 
 ## 快速开始
 
@@ -15,7 +13,7 @@ python3 -m venv .venv && source .venv/bin/activate
 python -m pip install -e .
 ```
 
-数据放在数据根目录下：`$ECOGYM_DATA_ROOT`，未设置时依次使用 `~/.ecogym/data` 和旧位置 `~/.ecologyrsi-dsh/data`。自带的温室领域需要 Autonomous Greenhouse Challenge 数据，解压到 `greenhouse/agc_cucumber_2018/`（[2018 黄瓜](https://doi.org/10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a)）和 `greenhouse/agc_tomato_2019/`（[2019 番茄](https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7)），每个团队一个子目录。
+数据放在数据根目录 `$ECOGYM_DATA_ROOT`（默认 `~/.ecogym/data`）下。自带的温室领域需要 Autonomous Greenhouse Challenge 数据，解压到 `greenhouse/agc_cucumber_2018/`（[2018 黄瓜](https://doi.org/10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a)）和 `greenhouse/agc_tomato_2019/`（[2019 番茄](https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7)），每个团队一个子目录。
 
 ```bash
 ecogym list                                                # 数据集、任务、求解器
@@ -62,7 +60,7 @@ ecogym serve                                               # 网页工作台 htt
 | 协议 Protocol | 时间前向的五个分区、因果读取视图、计分起点、逐格基线、初筛／留出队列 | `protocol/` |
 | 求解器 Solver | `fit(拟合起点)` 与 `predict(预报起点)`，参数表登记一次，搜索坐标、校验和提案说明都由它派生 | `solvers/` |
 | 基因组 Genome | 求解器引用加完整参数；它的摘要就是一个方法的身份 | `solvers/base.py` |
-| 提案者 Proposer | 产生有界修改：扫描、随机、LLM 研究智能体，或人工 | `arena/proposers.py`、`agents/` |
+| 提案者 Proposer | 产生有界修改：扫描、随机或 LLM 研究智能体；人写的方法用 `--genome` 文件评测或作为种子 | `arena/proposers.py`、`agents/` |
 | 竞技循环 Arena | 每代：提案 → 初筛 → 留出比较 → 晋级 | `arena/loop.py` |
 | 账本 Ledger | 追加写、带哈希链的 SQLite 事件日志，外加封存曝光登记 | `kernel/ledger.py` |
 | 领域包 Domain pack | 数据集规格、任务卡、领域知识、领域求解器 | `domains/` |
@@ -99,7 +97,7 @@ ecogym run ... --proposer llm --option transport=dsh --option model=provider/mod
 
 其他常用选项：`proxy=none`（不走系统代理；本机代理会中断部分国内接口的 TLS 连接）、`max_tool_calls`（研究员每代的工具调用数，默认 5）、`max_tokens`（推理模型的回复若被长度截断，会自动加倍预算重试）、`review=false`（关闭评审）。
 
-`ecogym replay` 对 LLM 运行同样有效：它按账本中记录的修改重新拟合、评分和判定，逐事件比对（智能体对话本身不重放）。2026-10-28 的验收记录见 [docs/ecogym/implementation-2026-10-28.md](docs/ecogym/implementation-2026-10-28.md)。
+`ecogym replay` 对 LLM 运行同样有效：它按账本中记录的修改重新拟合、评分和判定，逐事件比对（智能体对话本身不重放）。2026-10-28 的验收记录见 [docs/implementation-2026-10-28.md](docs/implementation-2026-10-28.md)。
 
 ## 网页工作台
 
@@ -123,17 +121,11 @@ src/ecogym/
 
 上层只依赖下层，框架代码不出现任何领域名称，这两点由 `tests/ecogym/test_layers.py` 检查。
 
-## 从 0.10.33 迁移
+## 文档
 
-ecogym 是重写，不兼容旧运行。旧系统（Python 宿主、DSH 插件、旧网页）保留在标签 `v0.10.33`：
-
-```bash
-git worktree add ../ecologyrsi-v0.10.33 v0.10.33
-```
-
-迁移时用金标准对照测试（`tests/ecogym/golden/`，由旧系统生成）保证数值一致：两个数据集全部列逐位一致；各分区边界、逐格基线选择和计分起点集合（449／154／683）完全一致；专家模型（model_selection +0.1292、calibration_uq +0.1769）和 recipe 种子（+0.0878、+0.1179）的逐格 RMSE 与旧系统相差小于 1e-12。
-
-有意的改变：逐样本 LLM 链取消，预测由宿主直接计算；逐格非劣检验的对照从朴素基线改为在任方法；每代队列改为按天分组的初筛／留出划分；预测裁剪到目标的物理范围。
+- [新增领域指南](docs/new-domain.md)
+- [温室专家模型研究](docs/greenhouse-forecasting-study-2026-10-28.md)：专家模型的假设、实验、消融与结果
+- [重构方案](docs/refactor-proposal-2026-10-28.md)与[实施记录](docs/implementation-2026-10-28.md)：架构设计、各阶段验收、LLM 运行和封存评测
 
 ## 开发
 
@@ -142,7 +134,9 @@ make test        # python -m unittest discover -s tests -t .
 make lint        # ruff
 ```
 
-需要真实数据的测试在数据缺失时跳过。金标准文件由 `tests/ecogym/golden/make_golden.py` 在 `v0.10.33` 检出上生成。
+需要真实数据的测试在数据缺失时跳过。
+
+ecogym 是 EcologyRSI-DSH 0.10.33（标签 `v0.10.33`）的重写，不读取旧系统的运行。`tests/ecogym/golden/` 中的金标准文件由 0.10.33 生成，`test_parity.py` 用它们检查两个数据集的全部列、分区边界、逐格基线、计分起点集合（449／154／683），以及专家模型和 recipe 种子的逐格 RMSE（相差小于 1e-12）。生成脚本需要旧包，不在当前版本中，见提交 `6c51c8c` 的 `tests/ecogym/golden/make_golden.py`。有意的改变：取消逐样本 LLM 链，预测由宿主直接计算；逐格非劣检验的对照从朴素基线改为在任方法；每代队列按天分组划分初筛与留出；预测裁剪到目标的物理范围。
 
 ## 许可
 

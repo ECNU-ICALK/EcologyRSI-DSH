@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..kernel.canonical import digest
-from ..solvers.base import Genome, get_solver
+from ..solvers.base import Genome
 from ..task.spec import TaskSpec
 from .genome import Edit, axes
 
@@ -36,16 +36,12 @@ class ProposalContext:
     screening: Any = None  # this generation's screening positions in the selection stage
     log: Callable[[dict[str, Any]], None] | None = None  # records an agent exchange in the ledger
 
-    def solver(self) -> dict[str, Any]:
-        return get_solver(self.incumbent.solver).describe()
-
     def axes(self) -> list[dict[str, Any]]:
         return [axis.describe(self.max_step) for axis in axes(self.incumbent)]
 
 
 class Proposer(Protocol):
     name: str
-    deterministic: bool
 
     def options(self) -> dict[str, Any]: ...
 
@@ -63,7 +59,6 @@ class SweepProposer:
 
     step: float | None = None  # fraction of an axis range; defaults to the trust region
     name: str = "sweep"
-    deterministic: bool = field(default=True, init=False)
     _cursor: int = field(default=0, init=False)
 
     def options(self) -> dict[str, Any]:
@@ -94,7 +89,6 @@ class RandomProposer:
     """Random search inside the trust region: 1..max_changes axes per edit."""
 
     name: str = "random"
-    deterministic: bool = field(default=True, init=False)
 
     def options(self) -> dict[str, Any]:
         return {}
@@ -127,7 +121,6 @@ class RecordedProposer:
 
     edits: dict[int, list[Edit]]
     name: str = "recorded"
-    deterministic: bool = field(default=True, init=False)
 
     def options(self) -> dict[str, Any]:
         return {}

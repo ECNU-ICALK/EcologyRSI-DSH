@@ -166,10 +166,6 @@ class Origins:
         return Origins(self._frame, self._rows, stage=self.stage, history=self._history, _fill_cache=self._fill_cache)
 
 
-def stage_rows(frame: Frame, partitions: Partitions, stage: str) -> np.ndarray:
-    return np.flatnonzero(partitions.mask(frame, stage))
-
-
 def open_stage(
     frame: Frame,
     partitions: Partitions,
@@ -191,4 +187,4 @@ def open_stage(
     return Origins(frame, np.flatnonzero(mask), stage=stage, history=history, labels=mask)
 
 
-__all__ = ["LeakageError", "Origins", "SealedAccess", "forward_fill", "open_stage", "stage_rows"]
+__all__ = ["LeakageError", "Origins", "SealedAccess", "forward_fill", "open_stage"]

@@ -2,6 +2,8 @@
 
 日期：2026-10-28 · 数据：AGC 2018 黄瓜，AiCU 团队温室 · 版本：Host／插件 0.10.33
 
+> 研究在 EcologyRSI-DSH 0.10.33 上完成，文中的“宿主”“selection view”“评测通道”都指旧系统。得到的模型 `greenhouse-diurnal-profile-ensemble@1` 在 ecogym 中是求解器 `greenhouse.diurnal_profile@1`（黄瓜任务卡的预设 `expert`），逐格 RMSE 与 0.10.33 相差小于 3e-14。用法与复现见第 7、8 节。
+
 ## 摘要
 
 任务是在每个预报起点 t，同时预测室内气温（T）、相对湿度（RH）和 CO2 浓度在 t+1、t+6、t+24 小时的值，共 9 个目标-时距格。评分沿用项目宿主的规则：每格以对称 RMSE 技能 `(RMSE_基线 − RMSE_模型) / max(两者)` 对比“拟合选定基线”（只用 `calibration_fit` 为每格选持续性或 24 小时季节值），总分为 9 格等权平均。
@@ -197,16 +199,17 @@ RMSE 为物理单位，括号内为技能。
 3. 气温 6 和 24 小时以及 RH 6 和 24 小时的增益在 model_selection 上区间跨 0。RH@1h 在 calibration_uq 上不如另外两个模型。
 4. 结果属于历史回放预测，不支持任何关于控制干预效果的因果结论。
 
-**封存评测。** 正式结论要以 validation 和 final_test 为准。项目规定这两个分区只能对已完成运行的冻结候选、通过正式独立评测通道各评测一次。计划做法：以专家模型为第 0 代在任者创建运行；运行结束后对选定候选执行一次独立验证，通过后再执行一次最终测试。
+**封存评测。** 正式结论以 validation 和 final_test 为准，每个方法在每个分区只评一次。2026-10-28 在 ecogym 中以专家模型为种子运行了 3 代 LLM 研究智能体（`run:b45a841c6bdc`），没有候选通过晋级门槛，所以封存评测的对象就是专家模型：validation 406 个起点，总技能 +0.127 [+0.085, +0.167]；final_test 407 个起点，+0.130 [+0.097, +0.153]，与开发期结果一致。CO2@6h 在两个封存时期都略差于朴素基线（−0.02），CO2@24h 在 final_test 上为 −0.06，预报整体偏低。逐格结果见 README。
 
-## 7. 与自进化的关系
+## 7. 在 ecogym 中使用
 
-- 新运行可在网页“新运行的初始模型”中选择“专家先验”（`seed_prior_policy=expert_diurnal_profile@1`）。第 0 代在任者为专家模型（种子模板 `greenhouse-diurnal-profile-expert@3`，评测器 `greenhouse_multihorizon_time_forward@6`，评分与门槛和 @5 完全相同）。
-- 进化可调整 `ridge_alpha`、`ensemble_weight`、九格残差系数，也可以编写策略程序，例如在 RH@24h 上与 recipe 岭回归混合，因为该格 recipe 在两个时期都略好。挑战者必须在同一冻结评分、逐格非劣和时间块门槛下超过专家模型。
-- 创建期的残差面板对专家运行改用专家模型作为 `candidate-model` 族，给出各格在不同残差系数下仅用 `training_fit` 的前向折技能。
-- 默认仍为基线锚点种子，已有运行和冻结配置不受影响。
+- 专家模型是黄瓜任务卡的预设 `expert`。`ecogym evaluate greenhouse.agc2018.cucumber.climate@1 --preset expert` 给出 model_selection 上的结果，加 `--stage calibration_uq` 给出复核期的结果。
+- 以它为种子运行竞技循环：`ecogym run greenhouse.agc2018.cucumber.climate@1 --preset expert --proposer sweep`（或 `random`、`llm`）。可调参数为 `alpha`、`ensemble_weight`、九格残差系数 `scale.<格>`、`profile_days` 和逐目标的机理项 `terms`。挑战者必须在当代留出日上通过总分、区间和逐格非劣门槛，才能取代专家模型。
+- 2026-10-28 的两次 LLM 研究智能体运行（deepseek-v4-pro，各 3 代）都没有候选通过门槛，过程见[实施记录](implementation-2026-10-28.md)。
+- AGC 2019 番茄任务卡沿用同一结构，没有在番茄上重新调整。
 
 ## 8. 复现
 
-- 宿主实现：`src/ecologyrsi_dsh/evaluators/diurnal_profile.py`（读取计划与集成）以及 `greenhouse_prediction.py` 中的 `DiurnalProfileEnsembleConfig`。
-- 研究脚本（本地，位于被 Git 忽略的 `.runtime/kiro-research-20261028/`）：`eda_variables.py`、`eda_control.py`、`study1_baselines.py` 至 `study9_spec.py`，以及 `verify_host_predictor.py`（宿主路径、工具一致性和 s=0 还原检查）和 `report_numbers.py`（第 5 节表格）。数值研究脚本用 numpy 运行于导出的 selection view（`export_view.py`），其中不含 validation 和 final_test。
+- 实现：`src/ecogym/domains/greenhouse/expert.py`；预设在 `src/ecogym/domains/greenhouse/tasks/cucumber_climate.toml`。
+- 第 5 节中专家模型和 recipe 种子两列：`ecogym evaluate greenhouse.agc2018.cucumber.climate@1 --preset expert`（或 `--preset recipe_seed`），`--stage` 取 `model_selection` 或 `calibration_uq`。与 0.10.33 的一致性由 `tests/ecogym/test_parity.py` 对照金标准文件检查。“基线对齐岭回归”一列是 0.10.33 的另一个预测器，没有迁移到 ecogym。
+- Study 1–9 的研究脚本读取从 0.10.33 导出的开发期视图（不含 validation 和 final_test），保存在本地被 Git 忽略的 `.runtime/kiro-research-20261028/` 中，不随仓库发布。

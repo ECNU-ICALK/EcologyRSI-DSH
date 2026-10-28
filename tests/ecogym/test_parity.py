@@ -1,8 +1,9 @@
 """Golden parity with v0.10.33 on AGC 2018 cucumber, team AiCU.
 
-The fixture was produced by ``golden/make_golden.py`` from the retired
-implementation. Data, partitions, baselines and origin sets must match
-exactly; forecasts within 1e-9.
+The fixtures in ``golden/`` were produced from the retired implementation by
+``tests/ecogym/golden/make_golden.py``, which needs that package and is no
+longer in the tree (see commit 6c51c8c). Data, partitions, baselines and
+origin sets must match exactly; forecasts within 1e-9.
 """
 
 from __future__ import annotations

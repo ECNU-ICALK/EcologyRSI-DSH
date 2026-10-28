@@ -271,7 +271,7 @@ class LLMProposerTests(unittest.TestCase):
 
     def test_registered_as_a_proposer(self):
         proposer = make_proposer("llm", {"model": "m", "base_url": "http://127.0.0.1:9/v1"})
-        self.assertFalse(proposer.deterministic)
+        self.assertEqual(proposer.name, "llm")
         self.assertEqual(proposer.options()["key_env"], "ECOGYM_LLM_API_KEY")
 
 

@@ -68,7 +68,6 @@ class DatasetSpec:
     columns: tuple[ColumnSpec, ...]
     tables: tuple[TableSpec, ...]
     derived: tuple[DerivedSpec, ...]
-    origin: str
     digest: str
 
     @property
@@ -154,7 +153,6 @@ def load_dataset_spec(path: str | Path) -> DatasetSpec:
         columns=columns,
         tables=tables,
         derived=derived,
-        origin=str(path),
         digest=digest(raw),
     )
     fields.done()

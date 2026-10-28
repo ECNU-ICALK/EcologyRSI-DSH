@@ -11,8 +11,8 @@ Each generation:
 5. a passing finalist becomes the incumbent.
 
 All randomness derives from the run seed, every step is a ledger event, and
-the host computes every forecast, so a run with a deterministic proposer can
-be replayed event for event (``replay``).
+the host computes every forecast, so any run can be replayed event for event
+from its recorded edits (``replay``).
 """
 
 from __future__ import annotations

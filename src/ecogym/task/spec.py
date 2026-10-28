@@ -37,13 +37,6 @@ class Cell:
     def key(self) -> str:
         return f"{self.target}@{self.horizon}"
 
-    @staticmethod
-    def parse(key: str) -> Cell:
-        target, _, horizon = key.rpartition("@")
-        if not target or not horizon.isdigit():
-            raise ValueError(f"cell key must look like target@horizon: {key!r}")
-        return Cell(target, int(horizon))
-
 
 @dataclass(frozen=True, slots=True)
 class ProtocolSpec:
@@ -99,7 +92,6 @@ class TaskSpec:
     presets: dict[str, dict[str, Any]] = field(default_factory=dict)
     notes: str = ""
     knowledge: str = ""  # domain knowledge for research agents; does not affect scores
-    origin: str = ""
     digest: str = ""
 
     @property
@@ -246,7 +238,6 @@ def load_task_spec(path: str | Path) -> TaskSpec:
         presets=presets,
         notes=fields.raw("notes", ""),
         knowledge=_knowledge(Path(path), fields.strs("knowledge_files", ())),
-        origin=str(path),
     )
     fields.done()
     missing_ages = sorted(set(spec.exogenous_roles) - set(spec.fill_age))

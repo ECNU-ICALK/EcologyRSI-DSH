@@ -1,4 +1,7 @@
-# Converted from agc_tomato_2019.json (ecologyrsi-dsh v0.10.33).
+# Autonomous Greenhouse Challenge 2019 (tomato), Wageningen University & Research.
+# Five teams and a grower reference each ran one greenhouse compartment; climate
+# and setpoints are logged every five minutes, crop, yield and resource tables
+# daily to every two weeks.
 id = "agc_tomato_2019"
 title = "Autonomous Greenhouse Challenge 2019, tomato"
 source = "https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7"
