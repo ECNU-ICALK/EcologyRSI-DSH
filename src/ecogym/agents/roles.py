@@ -108,7 +108,9 @@ or, when you are done, the note
 You have %(budget)d tool calls. Tools: %(tools)s"""
 
 PROPOSER = """## Your role: proposer
-Turn the research note into at most %(k)d concrete, mutually different edits of the current method.
+Turn the research note into %(k)d concrete edits of the current method (fewer only if you cannot find %(k)d
+well-founded ones). Only the best edit on the screening days goes on to the holdout comparison, so make the edits
+explore different directions (different cells, parameters or mechanisms), not small variations of one idea.
 Reply with exactly one JSON object:
   {"edits": [{"changes": {"<path>": <value>}, "rationale": "<why, citing the note>"}]}
 A path is a parameter name ("alpha"), a per-cell parameter "<name>.<cell>", or a key of a mapping parameter
