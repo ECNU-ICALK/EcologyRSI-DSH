@@ -135,9 +135,14 @@ class Ledger:
             for seq, run, event_kind, at, body, event_hash in self._db.execute(query, values)
         ]
 
-    def runs(self) -> list[str]:
-        rows = self._db.execute("SELECT run_id, MIN(seq) FROM events GROUP BY run_id ORDER BY MIN(seq)")
-        return [run_id for run_id, _ in rows]
+    def runs(self, first: str | None = None) -> list[str]:
+        """Run ids in order of their first event; ``first`` keeps runs whose first event has that kind."""
+
+        rows = self._db.execute(
+            "SELECT e.run_id, e.kind FROM events e JOIN (SELECT run_id, MIN(seq) AS seq FROM events GROUP BY run_id) f "
+            "ON e.seq = f.seq ORDER BY e.seq"
+        )
+        return [run_id for run_id, kind in rows if first is None or kind == first]
 
     def verify(self) -> int:
         """Re-derive the hash chain; return the number of events checked."""

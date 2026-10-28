@@ -1,0 +1,9 @@
+name = "seed"
+parent = ""
+author = "human"
+summary = "初始版本：研究流程指令、三个技能（实验、特征与模型、从文献到方法）、朴素基线模板与小工具库"
+
+[agent]
+model = "deepseek-v4-pro"
+web_search = true
+subagent_depth = 1

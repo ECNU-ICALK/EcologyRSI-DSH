@@ -168,7 +168,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _run_view(ledger: Ledger, run_id: str) -> dict[str, Any]:
-    matches = [run for run in ledger.runs() if run == run_id or run.startswith(run_id) or run == f"run:{run_id}"]
+    matches = [run for run in ledger.runs(first="run_started")
+               if run == run_id or run.startswith(run_id) or run == f"run:{run_id}"]
     if len(matches) != 1:
         raise SystemExit(f"run {run_id!r} matches {len(matches)} runs in {ledger.path}")
     return fold(ledger.events(matches[0]))
@@ -176,7 +177,7 @@ def _run_view(ledger: Ledger, run_id: str) -> dict[str, Any]:
 
 def cmd_runs(args: argparse.Namespace) -> int:
     with Ledger(args.ledger) as ledger:
-        runs = [fold(ledger.events(run_id)) for run_id in ledger.runs()]
+        runs = [fold(ledger.events(run_id)) for run_id in ledger.runs(first="run_started")]
     rows = []
     for run in runs:
         result = run.get("result", {})
@@ -250,6 +251,123 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+RUNTIME_PACKAGES = ("numpy", "pandas", "scipy", "scikit-learn", "statsmodels")
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Create the agent runtime: a Python venv with the scientific stack, outside any project."""
+
+    import shutil
+    import subprocess
+
+    from .episodes.sandbox import runtime_python
+
+    python = runtime_python()
+    venv = python.parent.parent
+    if python.exists() and not args.force:
+        print(f"agent runtime already at {venv} (use --force to rebuild)")
+    else:
+        uv = shutil.which("uv")
+        if uv:
+            subprocess.run([uv, "venv", "-q", "--python", "3.12", str(venv), *(["--clear"] if args.force else [])],
+                           check=True)
+            subprocess.run([uv, "pip", "install", "-q", "--python", str(python), *RUNTIME_PACKAGES], check=True)
+        else:
+            subprocess.run([sys.executable, "-m", "venv", *(["--clear"] if args.force else []), str(venv)], check=True)
+            subprocess.run([str(python), "-m", "pip", "install", "-q", *RUNTIME_PACKAGES], check=True)
+        print(f"agent runtime ready at {venv}")
+    dsh = shutil.which("dsh")
+    print(f"dsh: {dsh or 'not found (install DeepSeek Harness, or set ECOGYM_DSH_BIN)'}")
+    return 0
+
+
+def cmd_episode_run(args: argparse.Namespace) -> int:
+    from .episodes.runner import EpisodeConfig, run_episode
+
+    config = EpisodeConfig(task=args.task, harness=args.harness, minutes=args.minutes, tokens=args.tokens,
+                           model=args.model, label=args.label, keep=args.keep)
+    print(f"episode on {args.task} with harness {args.harness}, {args.minutes:g} min; this runs the agent end to end")
+    result = run_episode(config, args.ledger)
+    if args.json:
+        _print_json(result)
+        return 0
+    _print_episode(result)
+    return 0
+
+
+def _print_episode(result: dict[str, Any]) -> None:
+    scored = result.get("scored")
+    print(f"\n{result['episode']}  {result['status']}  {result['seconds']:.0f} s  {result['tokens']:,} tokens  "
+          f"{result['llm_calls']} model calls  {result['submissions']} submissions")
+    if scored:
+        low, high = scored["interval"]
+        print(f"\nhidden {scored['stage']}: {scored['score']:+.4f}  95% day-block interval [{low:+.4f}, {high:+.4f}]  "
+              f"coverage {scored['coverage']:.0%}  ({scored['status']}{', auto-submitted' if scored['auto'] else ''})")
+        print("references on the same origins: "
+              + ", ".join(f"{name} {value:+.4f}" for name, value in scored["references"].items()))
+        print(_cells(scored["cells"]))
+    print(f"\ntrajectory: {result['trajectory']['dir']}")
+
+
+def _episodes(ledger: Ledger) -> list[dict[str, Any]]:
+    found = []
+    for run_id in ledger.runs(first="episode_started"):
+        record: dict[str, Any] = {"episode": run_id}
+        for event in ledger.events(run_id):
+            if event.kind == "episode_started":
+                record.update(started_at=event.at, task_id=event.body["task_id"], label=event.body.get("label", ""),
+                              harness=event.body["harness"], model=event.body["model"])
+            elif event.kind == "episode_scored":
+                record["scored"] = event.body
+            elif event.kind == "episode_finished":
+                record["finished"] = event.body
+        found.append(record)
+    return found
+
+
+def cmd_episode_list(args: argparse.Namespace) -> int:
+    with Ledger(args.ledger) as ledger:
+        episodes = _episodes(ledger)
+    if args.json:
+        _print_json(episodes)
+        return 0
+    rows = []
+    for item in episodes:
+        finished, scored = item.get("finished") or {}, item.get("scored") or {}
+        rows.append([item["episode"], item["started_at"][:16].replace("T", " "), item["task_id"],
+                     item["harness"]["digest"][:12], item["model"], finished.get("status", "running"),
+                     f"{scored['score']:+.4f}" if scored else "", item["label"]])
+    print(_table(["episode", "started", "task", "harness", "model", "status", "hidden score", "label"], rows)
+          if rows else "no episodes in this ledger")
+    return 0
+
+
+def cmd_episode_show(args: argparse.Namespace) -> int:
+    with Ledger(args.ledger) as ledger:
+        matches = [run for run in ledger.runs(first="episode_started") if run.startswith(args.episode)
+                   or run == f"ep:{args.episode}"]
+        if len(matches) != 1:
+            raise SystemExit(f"episode {args.episode!r} matches {len(matches)} episodes in {ledger.path}")
+        events = [{"seq": event.seq, "at": event.at, "kind": event.kind, "body": event.body}
+                  for event in ledger.events(matches[0])]
+    if args.json:
+        _print_json(events)
+        return 0
+    for event in events:
+        body = event["body"]
+        detail = ""
+        if event["kind"] in ("episode_evaluated", "episode_submitted"):
+            detail = f"local {body['local']['score']:+.4f} ({body['local']['status']})"
+        elif event["kind"] == "episode_note":
+            detail = f"[{body['kind']}] {body['text'][:120]}"
+        elif event["kind"] == "episode_scored":
+            detail = f"hidden {body['score']:+.4f}"
+        elif event["kind"] == "episode_finished":
+            detail = f"{body['status']}, {body['seconds']:.0f} s, {body['tokens']:,} tokens"
+        print(f"{event['at'][:19].replace('T', ' ')}  {event['kind']:<18} {detail}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ecogym", description="Ecological forecasting training ground")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -298,6 +416,29 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8850)
     serve.add_argument("--token", default=None, help="required for non-loopback hosts")
+    setup = command("setup", cmd_setup, "create the agent runtime (Python with the scientific stack)")
+    setup.add_argument("--force", action="store_true", help="rebuild it")
+
+    episode = commands.add_parser("episode", help="agent episodes: a DSH agent solves a task, the judge scores it")
+    episodes = episode.add_subparsers(dest="episode_command", required=True)
+
+    def episode_command(name: str, handler, help_text: str):
+        sub = episodes.add_parser(name, help=help_text)
+        sub.set_defaults(handler=handler)
+        sub.add_argument("--json", action="store_true", help="machine-readable output")
+        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
+        return sub
+
+    run_episode = episode_command("run", cmd_episode_run, "run one sandboxed agent episode on a task")
+    run_episode.add_argument("task", help="task id (see `ecogym list`)")
+    run_episode.add_argument("--harness", default="seed", help="seed, a harness directory, or a stored digest prefix")
+    run_episode.add_argument("--minutes", type=float, default=30.0, help="wall-clock budget")
+    run_episode.add_argument("--tokens", type=int, default=4_000_000, help="token budget (all model calls)")
+    run_episode.add_argument("--model", default=None, help="override the harness model (a DeepSeek model id)")
+    run_episode.add_argument("--label", default="")
+    run_episode.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
+    episode_command("list", cmd_episode_list, "episodes in the ledger")
+    episode_command("show", cmd_episode_show, "an episode's events").add_argument("episode")
     return parser
 
 
@@ -309,7 +450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(args, "task", None):
             task_spec(args.task)  # fail early with the list of known tasks
         return int(args.handler(args) or 0)
-    except (KeyError, ValueError, PermissionError, FileNotFoundError) as error:
+    except (KeyError, ValueError, PermissionError, FileNotFoundError, LookupError) as error:
         message = error.args[0] if isinstance(error, KeyError) and error.args else error
         print(f"ecogym: {message}", file=sys.stderr)
         return 2

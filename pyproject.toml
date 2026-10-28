@@ -34,3 +34,5 @@ include = ["ecogym*"]
 [tool.setuptools.package-data]
 "ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml"]
 "ecogym.web" = ["*.html", "*.js", "*.css"]
+"ecogym.harness" = ["seed/*.toml", "seed/*.md", "seed/skills/*/*.md", "seed/template/*.py", "seed/template/ecotk/*.py",
+                    "seed/memory/*.md"]

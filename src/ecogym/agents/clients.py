@@ -20,7 +20,6 @@ import http.client
 import json
 import logging
 import os
-import re
 import subprocess
 import tempfile
 import time
@@ -31,6 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
+
+from ..kernel.secrets import SecretMissing
+from ..kernel.secrets import resolve_secret as _resolve_secret
 
 Message = Mapping[str, str]  # {"role": "system" | "user" | "assistant", "content": str}
 LOG = logging.getLogger("ecogym.agents")
@@ -61,17 +63,10 @@ class ChatClient(Protocol):
 
 
 def resolve_secret(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if value:
-        return value
-    path = os.environ.get("ECOGYM_CREDENTIALS_FILE", "").strip()
-    if path:
-        pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.+?)\s*$")
-        for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines():
-            match = pattern.match(line)
-            if match:
-                return match.group(1).strip("'\"")
-    raise AgentError(f"no API key: set {name} or point ECOGYM_CREDENTIALS_FILE at a file with a '{name}: ...' line")
+    try:
+        return _resolve_secret(name)
+    except SecretMissing as error:
+        raise AgentError(str(error)) from None
 
 
 @dataclass

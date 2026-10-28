@@ -118,7 +118,7 @@ class Service:
 
     def runs(self) -> list[dict[str, Any]]:
         with Ledger(self.ledger_path) as ledger:
-            views = [self._run_view(ledger, run_id) for run_id in ledger.runs()]
+            views = [self._run_view(ledger, run_id) for run_id in ledger.runs(first="run_started")]
         summaries = []
         for view in reversed(views):
             result = view.get("result")
