@@ -1,8 +1,11 @@
 """Thin HTTP service: a JSON API over the ledger plus the static web workbench.
 
-    GET  /api/catalog                tasks (with presets), solvers, proposers
+    GET  /api/catalog                tasks (targets with labels and units, horizons, gates, presets),
+                                     solvers, proposers, ledger path
     GET  /api/runs                   run summaries
-    GET  /api/runs/<id>              one folded run (``active`` while it runs)
+    GET  /api/runs/<id>              one folded run (``active`` while it runs); finished runs carry
+                                     ``sealing``: per sealed stage, whether the final method has been
+                                     evaluated in any run of this ledger, and the result
     GET  /api/runs/<id>/cells        seed and final method per cell (model_selection, calibration_uq)
     GET  /api/runs/<id>/report       static HTML report
     POST /api/runs                   start a run in the background
@@ -26,19 +29,44 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from . import __version__
 from . import agents as _agents  # noqa: F401  (registers the llm proposer)
 from .arena import Arena, RunConfig, RunStopped, fold, make_proposer, seal
 from .arena.proposers import PROPOSERS
+from .arena.sealed import exposure_key
+from .data.catalog import dataset_spec
 from .evaluation.harness import Bench
 from .kernel.canonical import jsonable
 from .kernel.ledger import Ledger
+from .protocol.partitions import SEALED_STAGES, STAGES
 from .report import render_run
 from .solvers.base import solver_specs
-from .task.spec import task_specs
+from .task.spec import TaskSpec, task_specs
 
 MAX_BODY = 1_000_000
 STATIC = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
           "style.css": "text/css; charset=utf-8"}
+SEALED_ORDER = tuple(stage for stage in STAGES if stage in SEALED_STAGES)
+
+
+def _task_entry(task: TaskSpec) -> dict[str, Any]:
+    """What the workbench needs to label a task's cells and explain its gates."""
+
+    dataset = dataset_spec(task.dataset)
+    columns = {column.name: column for column in dataset.columns}
+    return {
+        "id": task.id,
+        "title": task.title,
+        "dataset": task.dataset,
+        "step": dataset.step,
+        "cells": [cell.key for cell in task.cells],
+        "targets": [{"name": target.name, "weight": target.weight, "label": columns[target.name].label,
+                     "unit": columns[target.name].unit} for target in task.targets],
+        "horizons": list(task.horizons),
+        "gates": {"min_delta": task.gates.min_delta, "confidence": task.gates.confidence,
+                  "cell_cap": task.gates.cell_cap, "cell_alpha": task.gates.cell_alpha},
+        "presets": {name: body.get("note", "") for name, body in task.presets.items()},
+    }
 
 
 class ApiError(Exception):
@@ -55,6 +83,7 @@ class Service:
         self._lock = threading.Lock()
         self._stops: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._errors: dict[str, str] = {}  # failures raised before a run could log anything
         Ledger(self.ledger_path).close()  # create the file and schema up front
 
     def bench(self, task_id: str) -> Bench:
@@ -65,36 +94,90 @@ class Service:
 
     def catalog(self) -> dict[str, Any]:
         return {
-            "tasks": [{"id": t.id, "title": t.title, "cells": [c.key for c in t.cells],
-                       "presets": {name: body.get("note", "") for name, body in t.presets.items()}}
-                      for t in task_specs()],
+            "version": __version__,
+            "ledger": str(self.ledger_path),
+            "tasks": [_task_entry(task) for task in task_specs()],
             "solvers": [s.describe() for s in solver_specs()],
             "proposers": sorted(PROPOSERS),
         }
 
     def _run_view(self, ledger: Ledger, run_id: str) -> dict[str, Any]:
         events = ledger.events(run_id)
-        if not events and run_id in self._threads:
-            return {"run_id": run_id, "status": "starting", "active": True, "generations": [], "sealed": []}
+        thread = self._threads.get(run_id)
+        alive = thread is not None and thread.is_alive()
         if not events:
-            raise ApiError(HTTPStatus.NOT_FOUND, f"no run {run_id}")
+            if thread is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, f"no run {run_id}")
+            status = "starting" if alive else "failed"
+            return {"run_id": run_id, "status": status, "active": alive, "error": self._errors.get(run_id),
+                    "generations": [], "sealed": []}
         view = fold(events)
-        view["active"] = run_id in self._threads and self._threads[run_id].is_alive()
+        view["active"] = alive
+        view["updated_at"] = events[-1].at
         return view
 
     def runs(self) -> list[dict[str, Any]]:
         with Ledger(self.ledger_path) as ledger:
             views = [self._run_view(ledger, run_id) for run_id in ledger.runs()]
-        keys = ("run_id", "task_id", "label", "status", "active", "started_at", "proposer", "result", "config")
-        return [
-            {key: view.get(key) for key in keys}
-            | {"sealed": [item["stage"] for item in view["sealed"]], "generations_done": len(view["generations"])}
-            for view in reversed(views)
-        ]
+        summaries = []
+        for view in reversed(views):
+            result = view.get("result")
+            proposer = view.get("proposer") or {}
+            summaries.append({
+                "run_id": view["run_id"],
+                "task_id": view.get("task_id"),
+                "label": view.get("label", ""),
+                "status": view["status"],
+                "active": view["active"],
+                "error": (view.get("error") or "")[:300] or None,
+                "started_at": view.get("started_at"),
+                "finished_at": view.get("finished_at"),
+                "updated_at": view.get("updated_at"),
+                "proposer": {"name": proposer.get("name"), "model": (proposer.get("options") or {}).get("model")},
+                "result": {key: result.get(key) for key in ("seed_score", "incumbent_score", "promotions",
+                                                            "seconds")} if result else None,
+                "generations": (view.get("config") or {}).get("generations"),
+                "generations_done": len(view["generations"]),
+                "generations_finished": sum(1 for item in view["generations"] if "incumbent_after" in item),
+                "sealed": [item["stage"] for item in view["sealed"]],
+            })
+        return summaries
 
     def run(self, run_id: str) -> dict[str, Any]:
         with Ledger(self.ledger_path) as ledger:
-            return self._run_view(ledger, run_id)
+            view = self._run_view(ledger, run_id)
+            if view["status"] == "finished":
+                try:
+                    view["sealing"] = self._sealing(ledger, view)
+                except (OSError, KeyError, ValueError) as error:  # e.g. the data are not available here
+                    view["sealing"] = {"error": f"{type(error).__name__}: {error}"}
+            return view
+
+    def _sealing(self, ledger: Ledger, view: dict[str, Any]) -> dict[str, Any]:
+        """Per sealed stage: has the final method been evaluated in any run of this ledger, and with what result.
+
+        Exposures belong to the method and the data, not to a run, so a second run that ends with the same
+        method shows the first run's result and cannot evaluate again.
+        """
+
+        bench = self.bench(view["task_id"])
+        genome = bench.genome(view["result"]["incumbent"])
+        claimed = {item["key"]: item for item in ledger.exposures(method=genome.digest)}
+        sealing: dict[str, Any] = {"method": genome.digest}
+        for stage in SEALED_ORDER:
+            exposure = claimed.get(exposure_key(bench, genome, stage))
+            entry: dict[str, Any] = {"evaluated": exposure is not None}
+            if exposure is not None:
+                reports = view["sealed"] if exposure["run_id"] == view["run_id"] else [
+                    event.body for event in ledger.events(exposure["run_id"], kind="sealed_evaluated")]
+                entry |= {
+                    "run_id": exposure["run_id"],
+                    "at": exposure["at"],
+                    "report": next((item for item in reports
+                                    if item["stage"] == stage and item["digest"] == genome.digest), None),
+                }
+            sealing[stage] = entry
+        return sealing
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -113,14 +196,14 @@ class Service:
         stop = threading.Event()
 
         def work() -> None:
-            with Ledger(self.ledger_path) as ledger:
-                try:
+            try:
+                with Ledger(self.ledger_path) as ledger:
                     Arena(bench, ledger, config, proposer).run(seed, run_id=run_id, label=str(body.get("label", "")),
                                                                stop=stop.is_set)
-                except RunStopped:
-                    pass
-                except Exception:
-                    pass
+            except RunStopped:
+                pass
+            except Exception as error:  # logged as run_failed by the arena once the run has started
+                self._errors[run_id] = f"{type(error).__name__}: {error}"
 
         thread = threading.Thread(target=work, name=run_id, daemon=True)
         self._stops[run_id] = stop
