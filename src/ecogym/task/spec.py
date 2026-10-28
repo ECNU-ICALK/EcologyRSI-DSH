@@ -98,6 +98,7 @@ class TaskSpec:
     gates: GateSpec
     presets: dict[str, dict[str, Any]] = field(default_factory=dict)
     notes: str = ""
+    knowledge: str = ""  # domain knowledge for research agents; does not affect scores
     origin: str = ""
     digest: str = ""
 
@@ -244,6 +245,7 @@ def load_task_spec(path: str | Path) -> TaskSpec:
         gates=_gates(fields.table("gates")),
         presets=presets,
         notes=fields.raw("notes", ""),
+        knowledge=_knowledge(Path(path), fields.raw("knowledge_file", None)),
         origin=str(path),
     )
     fields.done()
@@ -251,6 +253,15 @@ def load_task_spec(path: str | Path) -> TaskSpec:
     if missing_ages:
         raise ConfigError(f"{spec.id}: exogenous.max_fill_age lacks roles {missing_ages}")
     return _with_digest(spec)
+
+
+def _knowledge(card: Path, relative: str | None) -> str:
+    if relative is None:
+        return ""
+    path = (card.parent / relative).resolve()
+    if not path.is_file():
+        raise ConfigError(f"{card.name}: knowledge_file {relative} not found")
+    return path.read_text(encoding="utf-8")
 
 
 def _with_digest(spec: TaskSpec) -> TaskSpec:

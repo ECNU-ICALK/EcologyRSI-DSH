@@ -30,7 +30,8 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "ecologyrsi_dsh.knowledge" = ["*.json"]
-"ecogym.domains.greenhouse" = ["*.toml", "tasks/*.toml"]
+"ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml"]
+"ecogym.web" = ["*.html", "*.js", "*.css"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

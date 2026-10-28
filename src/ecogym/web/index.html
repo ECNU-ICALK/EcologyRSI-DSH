@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ecogym 训练场</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>ecogym <span>生态预测训练场</span></h1>
+    <button id="new-run-toggle" type="button">新建运行</button>
+  </header>
+  <main>
+    <aside>
+      <h2>运行</h2>
+      <ul id="runs"></ul>
+    </aside>
+    <section id="content">
+      <form id="new-run" hidden>
+        <h2>新建运行</h2>
+        <div class="grid">
+          <label>任务<select name="task" required></select></label>
+          <label>种子方法<select name="preset" required></select></label>
+          <label>提案者<select name="proposer" required></select></label>
+          <label>代数<input name="generations" type="number" min="1" max="20" value="3"></label>
+          <label>每代候选<input name="candidates" type="number" min="1" max="12" value="4"></label>
+          <label>随机种子<input name="seed" type="number" value="0"></label>
+          <label class="wide">标签<input name="label" placeholder="说明这次运行"></label>
+        </div>
+        <fieldset id="llm-options" hidden>
+          <legend>LLM 设置（密钥只从环境变量或凭据文件读取）</legend>
+          <div class="grid">
+            <label>传输<select name="transport"><option>http</option><option>dsh</option></select></label>
+            <label>模型<input name="model" placeholder="glm-5.3 或 provider/model"></label>
+            <label class="wide">接口地址（http）<input name="base_url" placeholder="https://.../v1"></label>
+            <label>密钥变量名<input name="key_env" value="ECOGYM_LLM_API_KEY"></label>
+          </div>
+        </fieldset>
+        <p class="actions"><button type="submit">开始</button> <span id="new-run-error" class="bad"></span></p>
+      </form>
+      <div id="detail"><p class="muted">选择左侧的运行，或新建一个。</p></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

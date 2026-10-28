@@ -13,7 +13,7 @@ region; a proposer cannot change how candidates are scored.
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -32,6 +32,9 @@ class ProposalContext:
     max_step: float
     max_changes: int
     history: tuple[dict[str, Any], ...] = ()  # previous generation reports, oldest first
+    bench: Any = None  # the run's Bench, for proposers that study development data
+    screening: Any = None  # this generation's screening positions in the selection stage
+    log: Callable[[dict[str, Any]], None] | None = None  # records an agent exchange in the ledger
 
     def solver(self) -> dict[str, Any]:
         return get_solver(self.incumbent.solver).describe()
@@ -42,6 +45,7 @@ class ProposalContext:
 
 class Proposer(Protocol):
     name: str
+    deterministic: bool
 
     def options(self) -> dict[str, Any]: ...
 
@@ -59,6 +63,7 @@ class SweepProposer:
 
     step: float | None = None  # fraction of an axis range; defaults to the trust region
     name: str = "sweep"
+    deterministic: bool = field(default=True, init=False)
     _cursor: int = field(default=0, init=False)
 
     def options(self) -> dict[str, Any]:
@@ -89,6 +94,7 @@ class RandomProposer:
     """Random search inside the trust region: 1..max_changes axes per edit."""
 
     name: str = "random"
+    deterministic: bool = field(default=True, init=False)
 
     def options(self) -> dict[str, Any]:
         return {}
@@ -115,7 +121,29 @@ class RandomProposer:
         return None
 
 
-PROPOSERS = {"sweep": SweepProposer, "random": RandomProposer}
+@dataclass
+class RecordedProposer:
+    """Plays back the edits a run logged, generation by generation (used by ``replay``)."""
+
+    edits: dict[int, list[Edit]]
+    name: str = "recorded"
+    deterministic: bool = field(default=True, init=False)
+
+    def options(self) -> dict[str, Any]:
+        return {}
+
+    def propose(self, context: ProposalContext, k: int) -> list[Edit]:
+        return list(self.edits.get(context.generation, []))
+
+    def observe(self, report: Mapping[str, Any]) -> None:
+        return None
+
+
+PROPOSERS: dict[str, Callable[..., Proposer]] = {"sweep": SweepProposer, "random": RandomProposer}
+
+
+def register_proposer(name: str, factory: Callable[..., Proposer]) -> None:
+    PROPOSERS[name] = factory
 
 
 def make_proposer(name: str, options: Mapping[str, Any] | None = None) -> Proposer:
@@ -126,4 +154,13 @@ def make_proposer(name: str, options: Mapping[str, Any] | None = None) -> Propos
     return factory(**dict(options or {}))
 
 
-__all__ = ["PROPOSERS", "ProposalContext", "Proposer", "RandomProposer", "SweepProposer", "make_proposer"]
+__all__ = [
+    "PROPOSERS",
+    "ProposalContext",
+    "Proposer",
+    "RandomProposer",
+    "RecordedProposer",
+    "SweepProposer",
+    "make_proposer",
+    "register_proposer",
+]

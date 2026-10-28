@@ -34,6 +34,9 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
                 "screened": None,
                 "comparison": None,
                 "promoted": False,
+                "notes": [],
+                "dropped": [],
+                "agent_errors": [],
             }
             run["generations"].append(current)
         elif event.kind == "candidate_proposed" and current is not None:
@@ -58,7 +61,14 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
         elif event.kind == "sealed_evaluated":
             run["sealed"].append(body)
         elif event.kind == "agent_exchange":
-            run["agent_exchanges"] += 1
+            if "messages" in body:
+                run["agent_exchanges"] += 1
+            if current is not None:
+                if "note" in body:
+                    current["notes"].append({"role": body.get("role"), **body["note"]})
+                current["dropped"].extend(body.get("dropped", []))
+                if "error" in body:
+                    current["agent_errors"].append(body["error"])
     return run
 
 

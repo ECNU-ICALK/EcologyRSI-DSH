@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -32,8 +32,8 @@ from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger
 from ..protocol.cohorts import plan_generation
 from ..solvers.base import Genome, SolverError
-from .genome import apply_edit, check_edit
-from .proposers import ProposalContext, Proposer, make_proposer
+from .genome import Edit, apply_edit, check_edit, edit_from_dict
+from .proposers import ProposalContext, Proposer, RecordedProposer
 
 EVENT_KINDS = frozenset({
     "run_started",
@@ -49,6 +49,10 @@ EVENT_KINDS = frozenset({
     "sealed_evaluated",
     "agent_exchange",
 })
+
+
+class RunStopped(RuntimeError):
+    """The run was asked to stop."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,14 +92,20 @@ class Arena:
         self.ledger = ledger
         self.config = config
         self.proposer = proposer
+        self._stop: Callable[[], bool] | None = None
 
     def _log(self, run_id: str, kind: str, body: Mapping[str, Any]) -> None:
         if kind not in EVENT_KINDS:
             raise ValueError(f"unknown event kind {kind}")
         self.ledger.append(run_id, kind, body)
 
-    def run(self, seed: Genome, *, run_id: str | None = None, label: str = "") -> dict[str, Any]:
+    def run(
+        self, seed: Genome, *, run_id: str | None = None, label: str = "", stop: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """Run every generation; ``stop`` is polled between generations (a stopped run is logged as failed)."""
+
         run_id = run_id or f"run:{uuid.uuid4().hex[:12]}"
+        self._stop = stop
         started = time.monotonic()
         config, bench = self.config, self.bench
         self._log(run_id, "run_started", {
@@ -122,6 +132,8 @@ class Arena:
         incumbent = seed
         history: list[dict[str, Any]] = []
         for generation in range(config.generations):
+            if self._stop is not None and self._stop():
+                raise RunStopped(f"stopped before generation {generation}")
             screening, holdout = plan_generation(
                 stage.time, block_steps=bench.task.block_steps, chunk_blocks=config.chunk_blocks,
                 screen_fraction=config.screen_fraction, seed=config.seed, generation=generation,
@@ -132,8 +144,12 @@ class Arena:
                 "screening": {"origins": screening.size, "blocks": list(screening.blocks), "digest": screening.digest},
                 "holdout": {"origins": holdout.size, "blocks": list(holdout.blocks), "digest": holdout.digest},
             })
+            def log_exchange(body: Mapping[str, Any], generation: int = generation) -> None:
+                self._log(run_id, "agent_exchange", {"generation": generation, **body})
+
             context = ProposalContext(
-                bench.task, incumbent, generation, config.seed, config.max_step, config.max_changes, tuple(history)
+                bench.task, incumbent, generation, config.seed, config.max_step, config.max_changes, tuple(history),
+                bench=bench, screening=screening.index, log=log_exchange,
             )
             candidates: list[tuple[int, Genome, dict[str, Any]]] = []
             seen = {incumbent.digest}
@@ -228,8 +244,17 @@ class Arena:
         return report
 
 
+_NOT_REPLAYED = {"sealed_evaluated", "agent_exchange"}
+
+
 def replay(ledger: Ledger, run_id: str, bench: Bench) -> dict[str, Any]:
-    """Re-execute a run with a deterministic proposer and diff its events."""
+    """Re-score a run from its logged edits and diff every event.
+
+    The recorded edits are played back through a fresh arena, so this checks
+    data, partitions, fits, forecasts, cohorts, gates and promotions for any
+    proposer, including non-deterministic ones such as LLM agents. Agent
+    exchanges and sealed evaluations are not re-executed.
+    """
 
     events = ledger.events(run_id)
     if not events or events[0].kind != "run_started":
@@ -237,22 +262,26 @@ def replay(ledger: Ledger, run_id: str, bench: Bench) -> dict[str, Any]:
     start = events[0].body
     if start["bench"] != bench.identity:
         raise ValueError("the bench differs from the one the run used (data, task or partitions changed)")
-    proposer = make_proposer(start["proposer"]["name"], start["proposer"]["options"])
+    edits: dict[int, list[Edit]] = {}
+    for event in events:
+        if event.kind in ("candidate_proposed", "candidate_rejected"):
+            edits.setdefault(event.body["generation"], []).append(edit_from_dict(event.body["edit"]))
     seed = bench.genome(start["seed"])
     with Ledger(":memory:") as scratch:
-        Arena(bench, scratch, RunConfig.from_dict(start["config"]), proposer).run(seed, run_id=run_id,
-                                                                                   label=start.get("label", ""))
+        Arena(bench, scratch, RunConfig.from_dict(start["config"]), RecordedProposer(edits)).run(
+            seed, run_id=run_id, label=start.get("label", "")
+        )
         fresh = scratch.events(run_id)
 
     def comparable(event) -> tuple[str, str]:
-        body = {key: value for key, value in event.body.items() if key != "seconds"}
+        body = {key: value for key, value in event.body.items() if key not in ("seconds", "proposer")}
         return event.kind, digest(body)
 
-    recorded = [comparable(event) for event in events if event.kind != "sealed_evaluated"]
-    replayed = [comparable(event) for event in fresh]
+    recorded = [comparable(event) for event in events if event.kind not in _NOT_REPLAYED]
+    replayed = [comparable(event) for event in fresh if event.kind not in _NOT_REPLAYED]
     mismatches = [index for index, (a, b) in enumerate(zip(recorded, replayed, strict=False)) if a != b]
     return {"run_id": run_id, "events": len(recorded), "replayed": len(replayed),
             "identical": not mismatches and len(recorded) == len(replayed), "first_mismatch": mismatches[:1]}
 
 
-__all__ = ["EVENT_KINDS", "Arena", "RunConfig", "replay"]
+__all__ = ["EVENT_KINDS", "Arena", "RunConfig", "RunStopped", "replay"]

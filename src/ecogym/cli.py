@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from . import agents as _agents  # noqa: F401  (registers the llm proposer)
 from .arena import Arena, RunConfig, fold, make_proposer, replay, seal
 from .arena.proposers import PROPOSERS
 from .data.catalog import data_root, dataset_specs
@@ -126,13 +127,28 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _options(pairs: Sequence[str]) -> dict[str, Any]:
+    """``key=value`` pairs; values are parsed as JSON when they can be (numbers, lists, true)."""
+
+    options: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--option needs key=value, got {pair!r}")
+        try:
+            options[key] = json.loads(value)
+        except json.JSONDecodeError:
+            options[key] = value
+    return options
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     bench = Bench.open(args.task)
     seed = _genome(bench, args)
     config = RunConfig(generations=args.generations, candidates=args.candidates, seed=args.seed,
                        max_step=args.max_step, max_changes=args.max_changes)
     with Ledger(args.ledger) as ledger:
-        arena = Arena(bench, ledger, config, make_proposer(args.proposer))
+        arena = Arena(bench, ledger, config, make_proposer(args.proposer, _options(args.option)))
         result = arena.run(seed, label=args.label)
         view = fold(ledger.events(result["run_id"]))
     if args.json:
@@ -213,6 +229,20 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .service import Service, make_server
+
+    server = make_server(Service(args.ledger, token=args.token), args.host, args.port)
+    print(f"ecogym workbench on http://{args.host}:{args.port}/  (ledger {args.ledger}; Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     with Ledger(args.ledger) as ledger:
         print(f"{ledger.verify()} events verified in {args.ledger}")
@@ -248,6 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, default=0, help="run seed (cohorts, random proposals)")
     run.add_argument("--max-step", type=float, default=0.15, help="trust region per coordinate")
     run.add_argument("--max-changes", type=int, default=3, help="coordinates an edit may change")
+    run.add_argument("--option", action="append", default=[], metavar="KEY=VALUE",
+                     help="proposer option, e.g. model=glm-5.3 (repeatable)")
     run.add_argument("--label", default="")
     command("runs", cmd_runs, "list runs in the ledger", ledger=True)
     for name, handler, text in (("show", cmd_show, "a run's folded record"),
@@ -261,6 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("run")
     report.add_argument("--out")
     command("verify", cmd_verify, "check the ledger hash chain", ledger=True)
+    serve = command("serve", cmd_serve, "web workbench and JSON API", ledger=True)
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8850)
+    serve.add_argument("--token", default=None, help="required for non-loopback hosts")
     return parser
 
 

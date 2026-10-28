@@ -86,17 +86,21 @@ def axes(genome: Genome) -> list[Axis]:
 
 
 def _set(params: dict[str, Any], path: str, value: Any, genome: Genome) -> None:
+    """Set ``name`` or ``name.key`` (a cell of a per-cell parameter, or a key of a mapping parameter)."""
+
     spec = get_solver(genome.solver)
-    name, _, cell = path.partition(".")
+    name, _, key = path.partition(".")
     param = spec.param(name)
-    if cell:
-        if param.kind != "cells":
-            raise SolverError(f"{path}: only per-cell parameters take a cell suffix")
-        if cell not in params[name]:
-            raise SolverError(f"{path}: unknown cell {cell}")
-        params[name] = {**params[name], cell: value}
-    else:
+    if not key:
         params[name] = value
+    elif param.kind == "cells":
+        if key not in params[name]:
+            raise SolverError(f"{path}: unknown cell {key}")
+        params[name] = {**params[name], key: value}
+    elif param.kind == "json" and isinstance(params[name], Mapping):
+        params[name] = {**params[name], key: value}
+    else:
+        raise SolverError(f"{path}: {name} does not take a key suffix")
 
 
 def apply_edit(genome: Genome, edit: Edit, task: TaskSpec) -> Genome:
