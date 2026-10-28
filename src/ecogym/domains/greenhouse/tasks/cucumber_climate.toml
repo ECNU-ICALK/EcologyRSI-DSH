@@ -1,0 +1,114 @@
+# Forecast the indoor climate of one AGC 2018 compartment 1, 6 and 24 hours ahead.
+id = "greenhouse.agc2018.cucumber.climate@1"
+title = "AGC 2018 cucumber, team AiCU: indoor climate at 1, 6 and 24 h"
+dataset = "agc_cucumber_2018"
+episodes = ["AiCU"]
+horizons = [1, 6, 24]
+history_steps = 48          # every scored origin has 48 h of complete target history
+history_scope = "partition" # reads and forward-fill never leave the evaluated partition
+block_steps = 24            # bootstrap blocks are calendar days
+season_steps = 24           # the diurnal cycle: seasonal baseline period
+periods = [24, 168]         # seasonal periods recipe terms may use
+notes = """
+Climate is controlled: setpoints (role "action") are each team's strategy and
+are known at the origin. Outcomes (yield, resource use) are never inputs.
+"""
+
+[[targets]]
+name = "air_temperature"
+weight = 0.3333333333333333
+bounds = [-10.0, 60.0]
+
+[[targets]]
+name = "relative_humidity"
+weight = 0.3333333333333333
+bounds = [0.0, 100.0]
+
+[[targets]]
+name = "co2_concentration"
+weight = 0.3333333333333333
+bounds = [0.0, 5000.0]
+
+[exogenous]
+roles = ["environment", "outside_weather", "action", "crop", "root_zone", "resource"]
+min_coverage = 0.2  # a column must be observed (after forward-fill) at 20% of fit origins
+
+[exogenous.max_fill_age]  # steps a reading stays usable after it was taken
+environment = 6
+outside_weather = 6
+action = 6
+crop = 168
+root_zone = 168
+resource = 168
+
+[baselines]
+menu = ["persistence", "seasonal"]
+tie_tolerance = 1e-12
+
+[protocol]
+kind = "four_stage"
+train_fraction = 0.6
+feedback_fraction = 0.5
+development_fraction = 0.2
+feedback_gap = 1
+embargo = 24
+calibration_percent = 70
+
+[gates]
+min_delta = 0.005   # smallest overall skill gain worth promoting
+confidence = 0.95   # paired day-block bootstrap interval must exclude zero
+resamples = 1000
+min_blocks = 8
+moving_block = 3    # days per block in the per-cell moving-block bootstrap
+min_starts = 4
+cell_alpha = 0.05
+cell_cap = 0.03     # no cell may lose more than 3% normalized RMSE
+
+# ---- seed methods -----------------------------------------------------------
+# The expert prior from the October 2026 study (docs/greenhouse-forecasting-study-2026-10-28.md).
+[presets.expert]
+solver = "greenhouse.diurnal_profile@1"
+note = "two-day diurnal profile + mechanism terms, free/constrained ensemble"
+
+[presets.expert.params]
+alpha = 0.5
+ensemble_weight = 0.5
+scale = 1.0
+profile_days = [1, 2]
+
+[presets.expert.params.terms]
+air_temperature = [
+    { op = "trend" },
+    { op = "schedule_step", col = "heating_setpoint" },
+    { op = "schedule_step", col = "ventilation_setpoint" },
+]
+relative_humidity = [{ op = "trend" }]
+co2_concentration = [
+    { op = "exchange", col = "ventilation_leeward", reference = 400.0 },
+    { op = "exchange", col = "ventilation_windward", reference = 400.0 },
+    { op = "now", col = "outside_radiation" },
+    { op = "now", col = "supplemental_light" },
+    { op = "gap", col = "co2_setpoint" },
+    { op = "schedule_step", col = "co2_setpoint" },
+]
+
+# A generic target-history recipe, residuals shrunk by half.
+[presets.recipe_seed]
+solver = "recipe_ridge@1"
+note = "target lags, seasonal reference and delta, diurnal phase, 6 h mean"
+
+[presets.recipe_seed.params]
+alpha = 0.1
+anchor = "baseline"
+scale = 0.5
+terms = [
+    { op = "target_lag", k = 0 },
+    { op = "target_lag", k = 1 },
+    { op = "target_lag", k = 2 },
+    { op = "target_lag", k = 3 },
+    { op = "target_lag", k = 24 },
+    { op = "seasonal_reference", period = 24 },
+    { op = "seasonal_delta", period = 24 },
+    { op = "diurnal_sin_cos", period = 24 },
+    { op = "rolling_mean", w = 6 },
+]

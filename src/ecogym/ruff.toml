@@ -1,0 +1,7 @@
+# Lint rules for the ecogym package. The repository-root ruff.toml covers the
+# retired ecologyrsi_dsh tree and is replaced by this file when that tree is removed.
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM", "RUF"]

@@ -1,0 +1,3566 @@
+{
+ "schema": "ecogym.golden.agc_cucumber_2018/1",
+ "source": "ecologyrsi-dsh v0.10.33",
+ "dataset": {
+  "episodes": [
+   {
+    "episode_id": "agc_cucumber_2018:AiCU",
+    "role": "optimization",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   },
+   {
+    "episode_id": "agc_cucumber_2018:Croperators",
+    "role": "optimization",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   },
+   {
+    "episode_id": "agc_cucumber_2018:DeepGreens",
+    "role": "optimization",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   },
+   {
+    "episode_id": "agc_cucumber_2018:Reference(Growers)",
+    "role": "external_holdout",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   },
+   {
+    "episode_id": "agc_cucumber_2018:Sonoma",
+    "role": "optimization",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   },
+   {
+    "episode_id": "agc_cucumber_2018:iGrow",
+    "role": "optimization",
+    "row_count": 2754,
+    "first_timestamp": 1039824,
+    "last_timestamp": 1042584
+   }
+  ],
+  "aicu": {
+   "episode_id": "agc_cucumber_2018:AiCU",
+   "row_count": 2754,
+   "first_timestamp": 1039824,
+   "last_timestamp": 1042584,
+   "timestamps_digest": "03824197ad4d702326a9d6ad628f6da3c080cfbc942a63daf3ae7a201ee809a5",
+   "gaps": [
+    {
+     "after_row": 380,
+     "from": 1040204,
+     "to": 1040209
+    },
+    {
+     "after_row": 1578,
+     "from": 1041406,
+     "to": 1041408
+    },
+    {
+     "after_row": 1796,
+     "from": 1041625,
+     "to": 1041627
+    },
+    {
+     "after_row": 2483,
+     "from": 1042313,
+     "to": 1042315
+    }
+   ],
+   "content_sha256": "a186c470a12ae378b81206940565de4b67bf568a8d80c3467de53fa7c31f4b68",
+   "columns": {
+    "air_temperature": {
+     "finite": 2754,
+     "fsum": 58165.161399803124,
+     "digest": "fd5eeffe8692975f3bbd4afed333da8849e749e1f8da0035d52c60786e9e98ed"
+    },
+    "class_b_yield": {
+     "finite": 114,
+     "fsum": 451.02868852459005,
+     "digest": "f2badfdf10e75751b5a766450275de45511d8c031390e6e60fee6787ca95b748"
+    },
+    "co2_concentration": {
+     "finite": 2754,
+     "fsum": 1743745.8823364465,
+     "digest": "2353d413ae971c538b097bcb4b29affe42c8fcfa4d7f50e0ac65e68dca41b34e"
+    },
+    "co2_setpoint": {
+     "finite": 2718,
+     "fsum": 1437864.7222246716,
+     "digest": "15a1d70f05b6c4439ed1d36eabf5eedfff7edffd5dc86dd7e741f3ccc140bc00"
+    },
+    "co2_use": {
+     "finite": 114,
+     "fsum": 9.6767236948659,
+     "digest": "ce79f0c4e7348f4ad5091826787944b2931f23284cdaf484de5f5e087905e61a"
+    },
+    "cumulative_leaves": {
+     "finite": 15,
+     "fsum": 910.8,
+     "digest": "3546f7e4e34424420d90b4f7f9e9390d577902b231b9c0740b9857e88d31b4af"
+    },
+    "drain_ec": {
+     "finite": 105,
+     "fsum": 267.28053829199877,
+     "digest": "0d81c5b6bb4a9d0008bdef4dae7d3216251d5f4be1f25eff4b3b19e821dc1151"
+    },
+    "drain_ph": {
+     "finite": 104,
+     "fsum": 539.9549376278858,
+     "digest": "159b31f3bf985fe0870f29d9f68de755fb0c03fa318dbbe1a87516f86bbcc0f5"
+    },
+    "drain_water": {
+     "finite": 113,
+     "fsum": 117.5,
+     "digest": "7e2061aa3a901ca43b7c88ad714ed0057a252d05e0b03435386770c0af4decf9"
+    },
+    "electricity_use": {
+     "finite": 114,
+     "fsum": 116.80877083294375,
+     "digest": "ab0c68b244f2017e0536cc8190460279d12649a3272dbc559fd1912333f4a38d"
+    },
+    "fruit_development_time": {
+     "finite": 13,
+     "fsum": 280.3142857142857,
+     "digest": "240840dca19bff4721d49c58c19e34d092eb9444010683bd87eeeb0e06ecb730"
+    },
+    "heating_energy_use": {
+     "finite": 114,
+     "fsum": 115.68320587388338,
+     "digest": "9d4abb0ee5a176f0b6e4711fbbec25388f5da970c5f13cde50865913b364634d"
+    },
+    "heating_pipe_temperature": {
+     "finite": 2754,
+     "fsum": 28294.800119256328,
+     "digest": "cd720717d5eb0429c4065a99932618dab1868689c75ed63fed7ec10d2ca30a29"
+    },
+    "heating_setpoint": {
+     "finite": 2754,
+     "fsum": 57763.90108599523,
+     "digest": "658ac934360fd1e9d9b13bb9592317266387f47b9d79da6d63a022677dbc4382"
+    },
+    "humidity_deficit": {
+     "finite": 2754,
+     "fsum": 8936.642990268523,
+     "digest": "9dddfc6c8e7802b56cf8a1117ebc3cf96050517b12ca81a6bae057592e03f312"
+    },
+    "humidity_deficit_setpoint": {
+     "finite": 2754,
+     "fsum": 5780.025000011176,
+     "digest": "3dc630119224c7b1c12cdf354754ff96214b98218be731b2a0ce9f6db3cbd46c"
+    },
+    "irrigation_interval": {
+     "finite": 2718,
+     "fsum": 776137.6264781173,
+     "digest": "7284c4247b5066c6eb923762407191ead447d976a872425cb0c5c35c62df81a1"
+    },
+    "irrigation_water": {
+     "finite": 113,
+     "fsum": 396.88248146152984,
+     "digest": "08f545615c74c726be108aff35b6c73e053965331fc873faf25d9730c3019a73"
+    },
+    "labour_use": {
+     "finite": 114,
+     "fsum": 0.5539882330246914,
+     "digest": "4fddf29c48ebf728bb1b203a0ec91ae08bf5aa8c52bfd9c412c2563731f5da45"
+    },
+    "leaf_formation_rate": {
+     "finite": 15,
+     "fsum": 105.4,
+     "digest": "fd59e0f84565adb6a139f7231624b107b4bf3b438a7175e7096f973f43591073"
+    },
+    "marketable_yield": {
+     "finite": 114,
+     "fsum": 1315.681024590164,
+     "digest": "096dbbda3e971d018ff7f91efbbd777b744400d7724886bf3cedffb82b4c7a8b"
+    },
+    "outside_radiation": {
+     "finite": 2753,
+     "fsum": 265093.0772740266,
+     "digest": "60fedaeb638929498dc4784cd948b61866b83231921c89f23306e85e44480c02"
+    },
+    "outside_relative_humidity": {
+     "finite": 2753,
+     "fsum": 214725.0583181218,
+     "digest": "f908afcd2aa35affbc484b5e0b2cf3f650b9199f3b28be65c8aa0774ef785dc2"
+    },
+    "outside_temperature": {
+     "finite": 2753,
+     "fsum": 34637.519289394346,
+     "digest": "3b011cfd76c98d5d4d7e5bbdb03f10e0d31c5a482d3d1a8d808517e03396ee0e"
+    },
+    "outside_wind_speed": {
+     "finite": 2753,
+     "fsum": 9292.893477817786,
+     "digest": "3dec2f8cc44240da0fade600a4e66b50c22a56188dc2da021f1be5efb908e280"
+    },
+    "production_value": {
+     "finite": 114,
+     "fsum": 1601.2620133196722,
+     "digest": "c34d9153eccd230d5914f4492f83578bc56335865ba0c636d1da00bb135915ba"
+    },
+    "pruning_fraction": {
+     "finite": 15,
+     "fsum": 818.0,
+     "digest": "f1583ca35ecfc5a939b6276e24ac1d259afb7833ae6bec5d1de939c1c05ef5d5"
+    },
+    "relative_humidity": {
+     "finite": 2754,
+     "fsum": 229826.39745857776,
+     "digest": "7f131f0993cdb491fea0b966bb943ac09d54ead793294f6b1953160e74b8edc6"
+    },
+    "stem_elongation": {
+     "finite": 15,
+     "fsum": 8185.1,
+     "digest": "a3f34601ba3ebf56e6a883ff2f5dd960f3baf540e122eb9b79b927b3db00c696"
+    },
+    "supplemental_light": {
+     "finite": 2754,
+     "fsum": 99718.88888991335,
+     "digest": "62cbee25216b838734500f5d93072fa7e848574653b75295a3b1bb7ca31c3931"
+    },
+    "total_yield": {
+     "finite": 114,
+     "fsum": 1766.709713114754,
+     "digest": "8d5e3640236e0dc7466ec457984a7faa74da347942e27d3189531b2beacc665e"
+    },
+    "ventilation_leeward": {
+     "finite": 2754,
+     "fsum": 59332.51775879834,
+     "digest": "7b6c4aed1130d6d46a25d1dbf6fd7ac674773f4cd496e2af77e0c0bf6f8e980a"
+    },
+    "ventilation_setpoint": {
+     "finite": 2754,
+     "fsum": 65090.35708577283,
+     "digest": "cc79810aaf9d2375d2badfb70d09a31740c7240d61bbc53022f497609ddefa45"
+    },
+    "ventilation_windward": {
+     "finite": 2754,
+     "fsum": 19912.554772658423,
+     "digest": "61bb35cd1b2fa106271e35eb84d22faef3774761da5378de14cb8d717e2bd462"
+    },
+    "water_use": {
+     "finite": 113,
+     "fsum": 279.38248146152984,
+     "digest": "5001742dd80dcfe89d3e9b7bf53d080dbc0b8c2ef2bafbbd91dc1dd1ea688e2e"
+    }
+   }
+  }
+ },
+ "protocol": {
+  "stages": {
+   "calibration_fit": {
+    "row_start": 0,
+    "row_end": 576,
+    "rows": 576,
+    "time_start": 1039824,
+    "time_end": 1040404
+   },
+   "calibration_uq": {
+    "row_start": 599,
+    "row_end": 824,
+    "rows": 225,
+    "time_start": 1040427,
+    "time_end": 1040652
+   },
+   "model_selection": {
+    "row_start": 847,
+    "row_end": 1651,
+    "rows": 804,
+    "time_start": 1040675,
+    "time_end": 1041480
+   },
+   "validation": {
+    "row_start": 1675,
+    "row_end": 2202,
+    "rows": 527,
+    "time_start": 1041504,
+    "time_end": 1042032
+   },
+   "final_test": {
+    "row_start": 2226,
+    "row_end": 2754,
+    "rows": 528,
+    "time_start": 1042056,
+    "time_end": 1042585
+   }
+  }
+ },
+ "baselines": [
+  {
+   "cell": "air_temperature@1",
+   "kind": "persistence",
+   "comparison_n": 547,
+   "persistence_rmse": 0.9000447098012881,
+   "seasonal_rmse": 1.4690835185593183
+  },
+  {
+   "cell": "air_temperature@6",
+   "kind": "seasonal_24h",
+   "comparison_n": 544,
+   "persistence_rmse": 3.1252716873663187,
+   "seasonal_rmse": 1.4637965285290389
+  },
+  {
+   "cell": "air_temperature@24",
+   "kind": "persistence",
+   "comparison_n": 548,
+   "persistence_rmse": 1.467841133933923,
+   "seasonal_rmse": 1.467841133933923
+  },
+  {
+   "cell": "relative_humidity@1",
+   "kind": "persistence",
+   "comparison_n": 547,
+   "persistence_rmse": 4.137909645246995,
+   "seasonal_rmse": 6.5258670512127015
+  },
+  {
+   "cell": "relative_humidity@6",
+   "kind": "seasonal_24h",
+   "comparison_n": 544,
+   "persistence_rmse": 14.47146562868785,
+   "seasonal_rmse": 6.541866383580424
+  },
+  {
+   "cell": "relative_humidity@24",
+   "kind": "persistence",
+   "comparison_n": 548,
+   "persistence_rmse": 6.521273637971375,
+   "seasonal_rmse": 6.521273637971375
+  },
+  {
+   "cell": "co2_concentration@1",
+   "kind": "persistence",
+   "comparison_n": 547,
+   "persistence_rmse": 75.50369272381934,
+   "seasonal_rmse": 124.63182179847914
+  },
+  {
+   "cell": "co2_concentration@6",
+   "kind": "seasonal_24h",
+   "comparison_n": 544,
+   "persistence_rmse": 152.25113996576846,
+   "seasonal_rmse": 123.44791940798471
+  },
+  {
+   "cell": "co2_concentration@24",
+   "kind": "persistence",
+   "comparison_n": 548,
+   "persistence_rmse": 124.530112692709,
+   "seasonal_rmse": 124.530112692709
+  }
+ ],
+ "origins": {
+  "calibration_fit": {
+   "count": 449,
+   "digest": "d14a03d7b762f7fbbf519909ad8e3734a372c60ac5bb1bc33568fe593b9816c4",
+   "first": 1039871,
+   "last": 1040379
+  },
+  "calibration_uq": {
+   "count": 154,
+   "digest": "60964aac19d76a165c0d49dbb1cc3f49347dca5e74c4d4e77ca3313b56fc03e1",
+   "first": 1040474,
+   "last": 1040627
+  },
+  "model_selection": {
+   "count": 683,
+   "digest": "66fc715ebf2611f389365c24a139ec15482ae1f69ac935d4755a749312dda795",
+   "first": 1040722,
+   "last": 1041455
+  }
+ },
+ "recipe_seed": {
+  "schema_version": "ecologyrsi-dsh.feature-recipe/1",
+  "features": [
+   {
+    "op": "target_lag",
+    "k": 0
+   },
+   {
+    "op": "target_lag",
+    "k": 1
+   },
+   {
+    "op": "target_lag",
+    "k": 2
+   },
+   {
+    "op": "target_lag",
+    "k": 3
+   },
+   {
+    "op": "target_lag",
+    "k": 24
+   },
+   {
+    "op": "seasonal_reference",
+    "period": 24
+   },
+   {
+    "op": "seasonal_delta",
+    "period": 24
+   },
+   {
+    "op": "diurnal_sin_cos",
+    "period": 24
+   },
+   {
+    "op": "rolling_mean",
+    "w": 6
+   }
+  ],
+  "model": {
+   "kind": "ridge",
+   "alpha": 0.1,
+   "anchor": "fit_selected_baseline"
+  },
+  "per_horizon": {
+   "1": {
+    "residual_scale": 0.5
+   },
+   "6": {
+    "residual_scale": 0.5
+   },
+   "24": {
+    "residual_scale": 0.5
+   }
+  }
+ },
+ "results": {
+  "expert": {
+   "model_selection": {
+    "origins": 683,
+    "origins_digest": "66fc715ebf2611f389365c24a139ec15482ae1f69ac935d4755a749312dda795",
+    "overall_skill": 0.12923942190908275,
+    "cells": {
+     "air_temperature@1": {
+      "n": 683,
+      "baseline_rmse": 1.1126110717910032,
+      "model_rmse": 0.6747605610717722,
+      "skill": 0.3935342024004938,
+      "sum_predicted": 14770.867199626548,
+      "sum_baseline": 14758.154166645712,
+      "sum_observed": 14752.979166638726,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 26.51666665996115,
+        "baseline": 25.700000000838184,
+        "predicted": 26.429053240161334
+       },
+       {
+        "origin": 1040779,
+        "observed": 18.18333333612731,
+        "baseline": 19.558333334730317,
+        "predicted": 19.011833915720022
+       },
+       {
+        "origin": 1040836,
+        "observed": 18.875000000279393,
+        "baseline": 18.849999998044215,
+        "predicted": 19.11626310494368
+       },
+       {
+        "origin": 1040893,
+        "observed": 27.69166666387269,
+        "baseline": 27.5166666627551,
+        "predicted": 27.238017807634613
+       },
+       {
+        "origin": 1040950,
+        "observed": 17.908333332215744,
+        "baseline": 17.983333333892123,
+        "predicted": 18.138467327533885
+       },
+       {
+        "origin": 1041007,
+        "observed": 20.65833333249515,
+        "baseline": 21.26666666694607,
+        "predicted": 21.266210091625954
+       },
+       {
+        "origin": 1041064,
+        "observed": 26.22499999608843,
+        "baseline": 26.30833333137755,
+        "predicted": 26.122704325286705
+       },
+       {
+        "origin": 1041121,
+        "observed": 18.133333333053933,
+        "baseline": 17.950000000279392,
+        "predicted": 18.017329474783622
+       },
+       {
+        "origin": 1041178,
+        "observed": 26.07499999385328,
+        "baseline": 23.108333327745385,
+        "predicted": 24.285696328905324
+       },
+       {
+        "origin": 1041235,
+        "observed": 20.17500000251457,
+        "baseline": 21.433333336406708,
+        "predicted": 20.16448441840105
+       },
+       {
+        "origin": 1041292,
+        "observed": 20.26666666387269,
+        "baseline": 18.133333333333344,
+        "predicted": 18.84858022113129
+       },
+       {
+        "origin": 1041349,
+        "observed": 25.083333332215748,
+        "baseline": 24.96666667476917,
+        "predicted": 24.9194663644244
+       }
+      ]
+     },
+     "air_temperature@6": {
+      "n": 683,
+      "baseline_rmse": 1.0240881591919728,
+      "model_rmse": 0.9937509171040682,
+      "skill": 0.029623662587644206,
+      "sum_predicted": 14783.743686227286,
+      "sum_baseline": 14751.104166652696,
+      "sum_observed": 14711.679166652126,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 26.22499999944121,
+        "baseline": 27.35000000977888,
+        "predicted": 26.778709856213077
+       },
+       {
+        "origin": 1040779,
+        "observed": 18.816666665269683,
+        "baseline": 18.38333333165696,
+        "predicted": 19.074619794145157
+       },
+       {
+        "origin": 1040836,
+        "observed": 26.291666661078725,
+        "baseline": 22.01666665828476,
+        "predicted": 21.853354264168125
+       },
+       {
+        "origin": 1040893,
+        "observed": 21.27500000558794,
+        "baseline": 21.208333333612725,
+        "predicted": 21.338110445467127
+       },
+       {
+        "origin": 1040950,
+        "observed": 17.808333333333334,
+        "baseline": 17.808333333053934,
+        "predicted": 18.868672458034364
+       },
+       {
+        "origin": 1041007,
+        "observed": 26.24166666750484,
+        "baseline": 25.700000003352752,
+        "predicted": 25.711930649084916
+       },
+       {
+        "origin": 1041064,
+        "observed": 18.349999997206034,
+        "baseline": 18.941666666666666,
+        "predicted": 18.95602185463174
+       },
+       {
+        "origin": 1041121,
+        "observed": 20.8,
+        "baseline": 20.758333332495152,
+        "predicted": 21.21755232607163
+       },
+       {
+        "origin": 1041178,
+        "observed": 26.191666672813383,
+        "baseline": 26.23333332998058,
+        "predicted": 25.930506750186474
+       },
+       {
+        "origin": 1041235,
+        "observed": 18.958333332774533,
+        "baseline": 18.175,
+        "predicted": 18.326142265384
+       },
+       {
+        "origin": 1041292,
+        "observed": 23.66666666331392,
+        "baseline": 23.591666662475728,
+        "predicted": 23.19653763465207
+       },
+       {
+        "origin": 1041349,
+        "observed": 20.96666666974004,
+        "baseline": 21.225000002793973,
+        "predicted": 21.01085465145632
+       }
+      ]
+     },
+     "air_temperature@24": {
+      "n": 683,
+      "baseline_rmse": 1.0140139476008514,
+      "model_rmse": 0.9914887564343322,
+      "skill": 0.02221388691922197,
+      "sum_predicted": 14795.188118607022,
+      "sum_baseline": 14758.154166645712,
+      "sum_observed": 14714.654166621673,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 23.49999999748543,
+        "baseline": 25.700000000838184,
+        "predicted": 25.291767643934087
+       },
+       {
+        "origin": 1040779,
+        "observed": 20.333333338362475,
+        "baseline": 19.558333334730317,
+        "predicted": 19.990321096335375
+       },
+       {
+        "origin": 1040836,
+        "observed": 18.87500000027941,
+        "baseline": 18.849999998044215,
+        "predicted": 18.99334587711374
+       },
+       {
+        "origin": 1040893,
+        "observed": 26.174999994691465,
+        "baseline": 27.5166666627551,
+        "predicted": 26.758696082965198
+       },
+       {
+        "origin": 1040950,
+        "observed": 18.66666666610787,
+        "baseline": 17.983333333892123,
+        "predicted": 18.323677649510905
+       },
+       {
+        "origin": 1041007,
+        "observed": 21.224999998603018,
+        "baseline": 21.26666666694607,
+        "predicted": 21.313420598804566
+       },
+       {
+        "origin": 1041064,
+        "observed": 26.183333329701185,
+        "baseline": 26.30833333137755,
+        "predicted": 25.939593987121057
+       },
+       {
+        "origin": 1041121,
+        "observed": 17.816666664710883,
+        "baseline": 17.950000000279392,
+        "predicted": 18.28109342516502
+       },
+       {
+        "origin": 1041178,
+        "observed": 22.633333329142392,
+        "baseline": 23.108333327745385,
+        "predicted": 22.894853325120142
+       },
+       {
+        "origin": 1041235,
+        "observed": 21.208333338083076,
+        "baseline": 21.433333336406708,
+        "predicted": 21.39117427671015
+       },
+       {
+        "origin": 1041292,
+        "observed": 17.97500000083819,
+        "baseline": 18.133333333333344,
+        "predicted": 18.583849108040784
+       },
+       {
+        "origin": 1041349,
+        "observed": 24.891666665269693,
+        "baseline": 24.96666667476917,
+        "predicted": 25.051204792848814
+       }
+      ]
+     },
+     "relative_humidity@1": {
+      "n": 683,
+      "baseline_rmse": 3.709181103297399,
+      "model_rmse": 3.2228403282426403,
+      "skill": 0.13111809898481638,
+      "sum_predicted": 57839.612892368714,
+      "sum_baseline": 57923.02916554405,
+      "sum_observed": 57922.56527662787,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 83.03333322855956,
+        "baseline": 87.24166672673697,
+        "predicted": 82.22812281832937
+       },
+       {
+        "origin": 1040779,
+        "observed": 87.00833333361273,
+        "baseline": 85.01666666554908,
+        "predicted": 83.70985921245428
+       },
+       {
+        "origin": 1040836,
+        "observed": 87.39999999525025,
+        "baseline": 86.99166666778426,
+        "predicted": 86.79539332634508
+       },
+       {
+        "origin": 1040893,
+        "observed": 59.81666668538626,
+        "baseline": 63.97499998407438,
+        "predicted": 62.972057029782135
+       },
+       {
+        "origin": 1040950,
+        "observed": 87.75833333975947,
+        "baseline": 87.97499999608844,
+        "predicted": 88.91184683412325
+       },
+       {
+        "origin": 1041007,
+        "observed": 87.14999999050052,
+        "baseline": 83.89166665074106,
+        "predicted": 85.35833501057668
+       },
+       {
+        "origin": 1041064,
+        "observed": 85.63333331321678,
+        "baseline": 85.98333335428809,
+        "predicted": 84.96353143637332
+       },
+       {
+        "origin": 1041121,
+        "observed": 90.40833333724488,
+        "baseline": 91.66666667029882,
+        "predicted": 91.56966431591587
+       },
+       {
+        "origin": 1041178,
+        "observed": 88.60833333724487,
+        "baseline": 89.9166666621963,
+        "predicted": 90.21722978922709
+       },
+       {
+        "origin": 1041235,
+        "observed": 87.69166664710889,
+        "baseline": 85.5916666540938,
+        "predicted": 87.94407919383086
+       },
+       {
+        "origin": 1041292,
+        "observed": 86.10000000474975,
+        "baseline": 91.3750000011176,
+        "predicted": 89.29209074384795
+       },
+       {
+        "origin": 1041349,
+        "observed": 71.50833340010915,
+        "baseline": 70.64166672645757,
+        "predicted": 66.43205172275778
+       }
+      ]
+     },
+     "relative_humidity@6": {
+      "n": 683,
+      "baseline_rmse": 6.228862378080247,
+      "model_rmse": 5.711714945188912,
+      "skill": 0.08302437933308797,
+      "sum_predicted": 57729.44298357959,
+      "sum_baseline": 57857.3541654443,
+      "sum_observed": 57980.69861007513,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 63.84166663956518,
+        "baseline": 76.6916665579813,
+        "predicted": 73.89689223841621
+       },
+       {
+        "origin": 1040779,
+        "observed": 90.88333333500974,
+        "baseline": 92.92500000502913,
+        "predicted": 82.10133039999252
+       },
+       {
+        "origin": 1040836,
+        "observed": 89.47499994412067,
+        "baseline": 88.55000000055878,
+        "predicted": 88.25512857747162
+       },
+       {
+        "origin": 1040893,
+        "observed": 90.11666667085761,
+        "baseline": 81.48333329421779,
+        "predicted": 75.83368628797406
+       },
+       {
+        "origin": 1040950,
+        "observed": 87.07500000111759,
+        "baseline": 86.98333333920066,
+        "predicted": 88.95864876314484
+       },
+       {
+        "origin": 1041007,
+        "observed": 85.30833336769915,
+        "baseline": 79.30833335680263,
+        "predicted": 78.76341083583092
+       },
+       {
+        "origin": 1041064,
+        "observed": 94.00833333053937,
+        "baseline": 91.23333332634843,
+        "predicted": 90.24271470403104
+       },
+       {
+        "origin": 1041121,
+        "observed": 86.13333333500971,
+        "baseline": 87.75833333165696,
+        "predicted": 87.34219032936421
+       },
+       {
+        "origin": 1041178,
+        "observed": 81.31666661497827,
+        "baseline": 90.05833331433435,
+        "predicted": 88.01230432946895
+       },
+       {
+        "origin": 1041235,
+        "observed": 90.70000000279397,
+        "baseline": 94.33333333361274,
+        "predicted": 92.09764464624837
+       },
+       {
+        "origin": 1041292,
+        "observed": 80.89166660380239,
+        "baseline": 75.41666669432693,
+        "predicted": 80.71368255364354
+       },
+       {
+        "origin": 1041349,
+        "observed": 89.0416666630345,
+        "baseline": 90.2583333266278,
+        "predicted": 83.0540865292929
+       }
+      ]
+     },
+     "relative_humidity@24": {
+      "n": 683,
+      "baseline_rmse": 5.964526197172408,
+      "model_rmse": 5.545347447620285,
+      "skill": 0.07027863332226496,
+      "sum_predicted": 57865.333853245,
+      "sum_baseline": 57923.02916554405,
+      "sum_observed": 58135.056943464624,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 88.67499999133871,
+        "baseline": 87.24166672673697,
+        "predicted": 87.79880544241087
+       },
+       {
+        "origin": 1040779,
+        "observed": 80.99166666107872,
+        "baseline": 85.01666666554908,
+        "predicted": 86.19690257314718
+       },
+       {
+        "origin": 1040836,
+        "observed": 87.75833333836248,
+        "baseline": 86.99166666778426,
+        "predicted": 87.33779413725891
+       },
+       {
+        "origin": 1040893,
+        "observed": 68.92500009667127,
+        "baseline": 63.97499998407438,
+        "predicted": 68.01044785754439
+       },
+       {
+        "origin": 1040950,
+        "observed": 89.40000000223517,
+        "baseline": 87.97499999608844,
+        "predicted": 87.67525400714457
+       },
+       {
+        "origin": 1041007,
+        "observed": 87.35833331629011,
+        "baseline": 83.89166665074106,
+        "predicted": 83.70327032128603
+       },
+       {
+        "origin": 1041064,
+        "observed": 69.00000012656672,
+        "baseline": 85.98333335428809,
+        "predicted": 85.89249831754775
+       },
+       {
+        "origin": 1041121,
+        "observed": 88.44166666610788,
+        "baseline": 91.66666667029882,
+        "predicted": 91.63687390645522
+       },
+       {
+        "origin": 1041178,
+        "observed": 90.36666666191694,
+        "baseline": 89.9166666621963,
+        "predicted": 89.97469519014787
+       },
+       {
+        "origin": 1041235,
+        "observed": 82.76666667421038,
+        "baseline": 85.5916666540938,
+        "predicted": 85.58409498508647
+       },
+       {
+        "origin": 1041292,
+        "observed": 88.53333333473033,
+        "baseline": 91.3750000011176,
+        "predicted": 90.30829759033026
+       },
+       {
+        "origin": 1041349,
+        "observed": 80.47499992484228,
+        "baseline": 70.64166672645757,
+        "predicted": 71.37923425632762
+       }
+      ]
+     },
+     "co2_concentration@1": {
+      "n": 683,
+      "baseline_rmse": 133.8536913677372,
+      "model_rmse": 110.54431646155142,
+      "skill": 0.17414069547135447,
+      "sum_predicted": 432723.0667811828,
+      "sum_baseline": 436739.7916637917,
+      "sum_observed": 436895.833328571,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 549.6666662755113,
+        "baseline": 680.6666695193074,
+        "predicted": 669.7587344125882
+       },
+       {
+        "origin": 1040779,
+        "observed": 688.7500000810251,
+        "baseline": 740.9166667951891,
+        "predicted": 647.7480087559863
+       },
+       {
+        "origin": 1040836,
+        "observed": 615.0833334339162,
+        "baseline": 609.0833333025997,
+        "predicted": 598.4405622210019
+       },
+       {
+        "origin": 1040893,
+        "observed": 536.9166663397725,
+        "baseline": 568.166666803571,
+        "predicted": 569.0889376099421
+       },
+       {
+        "origin": 1040950,
+        "observed": 620.6666667504857,
+        "baseline": 622.833333193635,
+        "predicted": 598.7095981182341
+       },
+       {
+        "origin": 1041007,
+        "observed": 639.8333338194835,
+        "baseline": 644.4166665129985,
+        "predicted": 654.9657608830317
+       },
+       {
+        "origin": 1041064,
+        "observed": 1198.7499976111567,
+        "baseline": 673.3333328890924,
+        "predicted": 548.9826914627525
+       },
+       {
+        "origin": 1041121,
+        "observed": 472.9999999636785,
+        "baseline": 479.0833333361272,
+        "predicted": 502.19137308278437
+       },
+       {
+        "origin": 1041178,
+        "observed": 743.9166670689979,
+        "baseline": 658.4166658200945,
+        "predicted": 826.6640143723203
+       },
+       {
+        "origin": 1041235,
+        "observed": 483.4999998407438,
+        "baseline": 470.41666669181245,
+        "predicted": 491.3614558876009
+       },
+       {
+        "origin": 1041292,
+        "observed": 608.4166660966972,
+        "baseline": 517.9166665074105,
+        "predicted": 550.0109303415583
+       },
+       {
+        "origin": 1041349,
+        "observed": 578.499999731779,
+        "baseline": 591.3333332886298,
+        "predicted": 558.0182324708645
+       }
+      ]
+     },
+     "co2_concentration@6": {
+      "n": 683,
+      "baseline_rmse": 133.51061595179118,
+      "model_rmse": 115.16726070022978,
+      "skill": 0.1373924846409587,
+      "sum_predicted": 425462.1830531206,
+      "sum_baseline": 433946.62499766424,
+      "sum_observed": 437153.49999742256,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 442.9999998630955,
+        "baseline": 555.1666659569987,
+        "predicted": 569.8870938631464
+       },
+       {
+        "origin": 1040779,
+        "observed": 504.33333327466,
+        "baseline": 499.25000008381903,
+        "predicted": 528.2193520533638
+       },
+       {
+        "origin": 1040836,
+        "observed": 1073.499997309409,
+        "baseline": 841.9166677982234,
+        "predicted": 774.437550906728
+       },
+       {
+        "origin": 1040893,
+        "observed": 905.0000003129245,
+        "baseline": 606.7500000083818,
+        "predicted": 574.7213306284038
+       },
+       {
+        "origin": 1040950,
+        "observed": 652.249999924563,
+        "baseline": 588.7500000251458,
+        "predicted": 578.9853717834021
+       },
+       {
+        "origin": 1041007,
+        "observed": 738.7500011846423,
+        "baseline": 833.4166667337219,
+        "predicted": 712.1613543457961
+       },
+       {
+        "origin": 1041064,
+        "observed": 546.0416665604961,
+        "baseline": 555.2499999525024,
+        "predicted": 480.6580415953942
+       },
+       {
+        "origin": 1041121,
+        "observed": 653.666666462707,
+        "baseline": 684.5000007823111,
+        "predicted": 612.176204989797
+       },
+       {
+        "origin": 1041178,
+        "observed": 785.833332668369,
+        "baseline": 982.083331341234,
+        "predicted": 789.8972195945915
+       },
+       {
+        "origin": 1041235,
+        "observed": 474.24999994412065,
+        "baseline": 560.3333332914239,
+        "predicted": 573.444243472742
+       },
+       {
+        "origin": 1041292,
+        "observed": 550.749999927357,
+        "baseline": 529.0833333584791,
+        "predicted": 580.4903956995478
+       },
+       {
+        "origin": 1041349,
+        "observed": 560.5000000167638,
+        "baseline": 508.66666661358107,
+        "predicted": 518.456313314149
+       }
+      ]
+     },
+     "co2_concentration@24": {
+      "n": 683,
+      "baseline_rmse": 133.50220473432907,
+      "model_rmse": 117.23779753911998,
+      "skill": 0.1218287535219021,
+      "sum_predicted": 425187.43675371073,
+      "sum_baseline": 436739.7916637917,
+      "sum_observed": 440642.625003533,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 928.4166666219627,
+        "baseline": 680.6666695193074,
+        "predicted": 666.295588931116
+       },
+       {
+        "origin": 1040779,
+        "observed": 524.8333335261171,
+        "baseline": 740.9166667951891,
+        "predicted": 667.5149953130483
+       },
+       {
+        "origin": 1040836,
+        "observed": 604.083333355685,
+        "baseline": 609.0833333025997,
+        "predicted": 554.177914819258
+       },
+       {
+        "origin": 1040893,
+        "observed": 665.4999998547136,
+        "baseline": 568.166666803571,
+        "predicted": 598.1049141728558
+       },
+       {
+        "origin": 1040950,
+        "observed": 528.7916667644557,
+        "baseline": 622.833333193635,
+        "predicted": 575.3735739788307
+       },
+       {
+        "origin": 1041007,
+        "observed": 650.9999994467943,
+        "baseline": 644.4166665129985,
+        "predicted": 638.4410462742497
+       },
+       {
+        "origin": 1041064,
+        "observed": 661.0000011958178,
+        "baseline": 673.3333328890924,
+        "predicted": 986.8592243043452
+       },
+       {
+        "origin": 1041121,
+        "observed": 619.1666667113701,
+        "baseline": 479.0833333361272,
+        "predicted": 579.2215033503848
+       },
+       {
+        "origin": 1041178,
+        "observed": 726.666667574706,
+        "baseline": 658.4166658200945,
+        "predicted": 725.7033556368756
+       },
+       {
+        "origin": 1041235,
+        "observed": 473.91666661916923,
+        "baseline": 470.41666669181245,
+        "predicted": 499.71968202398824
+       },
+       {
+        "origin": 1041292,
+        "observed": 553.0833334031826,
+        "baseline": 517.9166665074105,
+        "predicted": 509.77808533217166
+       },
+       {
+        "origin": 1041349,
+        "observed": 701.5833326963087,
+        "baseline": 591.3333332886298,
+        "predicted": 557.4789514867606
+       }
+      ]
+     }
+    },
+    "models": [
+     {
+      "cell": "air_temperature@1",
+      "status": "fitted",
+      "training_rows": 517,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_48h_reference",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_1h",
+       "exogenous:ventilation_setpoint:schedule_step_1h"
+      ],
+      "intercept": 0.0009405748619715003,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.021784236085732683,
+       "target:air_temperature:lag_24h": -0.4843296886559783,
+       "target:air_temperature:seasonal_24h_reference": 0.5373214272756691,
+       "target:air_temperature:seasonal_48h_reference": 0.2895820606641384,
+       "target:air_temperature:lag_1h": -0.39016523751139776,
+       "exogenous:heating_setpoint:schedule_step_1h": -0.007438917410108253,
+       "exogenous:ventilation_setpoint:schedule_step_1h": 0.06066592151572108
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.3947724595368664,
+       "previous_day_weight": -0.24469911466527783
+      },
+      "anchor_feature": "target:air_temperature:lag_0h"
+     },
+     {
+      "cell": "air_temperature@6",
+      "status": "fitted",
+      "training_rows": 511,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_48h_reference",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_6h",
+       "exogenous:ventilation_setpoint:schedule_step_6h"
+      ],
+      "intercept": -0.019223578510663912,
+      "coefficients": {
+       "target:air_temperature:lag_0h": 0.8148665259854149,
+       "target:air_temperature:lag_24h": -0.44807645642266875,
+       "target:air_temperature:seasonal_24h_reference": -1.081858281232845,
+       "target:air_temperature:seasonal_48h_reference": 0.7075116915585823,
+       "target:air_temperature:lag_1h": -0.24907937947646172,
+       "exogenous:heating_setpoint:schedule_step_6h": -0.13504833171377015,
+       "exogenous:ventilation_setpoint:schedule_step_6h": 0.2760218337500155
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.9391291132951595,
+       "previous_day_weight": -0.22739345469492697
+      },
+      "anchor_feature": "target:air_temperature:seasonal_24h_reference"
+     },
+     {
+      "cell": "air_temperature@24",
+      "status": "fitted",
+      "training_rows": 519,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_24h",
+       "exogenous:ventilation_setpoint:schedule_step_24h"
+      ],
+      "intercept": -0.019501658160290238,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.8675829334523347,
+       "target:air_temperature:lag_24h": 0.5347486410529991,
+       "target:air_temperature:lag_1h": 0.15094278597883506,
+       "exogenous:heating_setpoint:schedule_step_24h": -0.12567777173804828,
+       "exogenous:ventilation_setpoint:schedule_step_24h": 0.09405720638075252
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.2827763653558437
+      },
+      "anchor_feature": "target:air_temperature:lag_0h"
+     },
+     {
+      "cell": "relative_humidity@1",
+      "status": "fitted",
+      "training_rows": 517,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_48h_reference",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": -0.14182588977555916,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -0.47659598298555605,
+       "target:relative_humidity:lag_24h": -2.81208620333727,
+       "target:relative_humidity:seasonal_24h_reference": 2.9953681502894836,
+       "target:relative_humidity:seasonal_48h_reference": 1.8644947528440818,
+       "target:relative_humidity:lag_1h": -1.8362916197173935
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.48169883266117725,
+       "previous_day_weight": -0.27601956223294566
+      },
+      "anchor_feature": "target:relative_humidity:lag_0h"
+     },
+     {
+      "cell": "relative_humidity@6",
+      "status": "fitted",
+      "training_rows": 511,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_48h_reference",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": 0.22763007970885168,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": 2.5104919023242878,
+       "target:relative_humidity:lag_24h": -1.1939006292801655,
+       "target:relative_humidity:seasonal_24h_reference": -5.4388800911002715,
+       "target:relative_humidity:seasonal_48h_reference": 4.211459144269637,
+       "target:relative_humidity:lag_1h": -0.9334526703521399
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.9243489542471096,
+       "previous_day_weight": -0.1100898519960976
+      },
+      "anchor_feature": "target:relative_humidity:seasonal_24h_reference"
+     },
+     {
+      "cell": "relative_humidity@24",
+      "status": "fitted",
+      "training_rows": 519,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": 0.19419152866678874,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -4.92957053311809,
+       "target:relative_humidity:lag_24h": 3.938879450639236,
+       "target:relative_humidity:lag_1h": 0.40217647705429316
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.3978329879266656
+      },
+      "anchor_feature": "target:relative_humidity:lag_0h"
+     },
+     {
+      "cell": "co2_concentration@1",
+      "status": "fitted",
+      "training_rows": 518,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_48h_reference",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_1h"
+      ],
+      "intercept": -0.4144494132777406,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -22.302937113412618,
+       "target:co2_concentration:lag_24h": -28.44847965955604,
+       "target:co2_concentration:seasonal_24h_reference": 30.684889698851414,
+       "target:co2_concentration:seasonal_48h_reference": 16.123604760248337,
+       "exogenous:ventilation_leeward:co2_exchange": -1.4153171271839482,
+       "exogenous:ventilation_windward:co2_exchange": -3.1623528368331524,
+       "exogenous:outside_radiation:lag_0h": -6.761362774578716,
+       "exogenous:supplemental_light:lag_0h": -0.17759070072515679,
+       "exogenous:co2_setpoint:dosing_gap": 9.94109719941323,
+       "exogenous:co2_setpoint:schedule_step_1h": 1.2499891675739276
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.44752210171028806,
+       "previous_day_weight": -0.21162966952208978
+      },
+      "anchor_feature": "target:co2_concentration:lag_0h"
+     },
+     {
+      "cell": "co2_concentration@6",
+      "status": "fitted",
+      "training_rows": 512,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_48h_reference",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_6h"
+      ],
+      "intercept": 1.6539662274891223,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": 26.81846292967157,
+       "target:co2_concentration:lag_24h": -9.188113124963547,
+       "target:co2_concentration:seasonal_24h_reference": -73.49849120681299,
+       "target:co2_concentration:seasonal_48h_reference": 29.635330689999563,
+       "exogenous:ventilation_leeward:co2_exchange": -3.4843903251931967,
+       "exogenous:ventilation_windward:co2_exchange": 1.5840884535621231,
+       "exogenous:outside_radiation:lag_0h": 6.035728792847073,
+       "exogenous:supplemental_light:lag_0h": 2.746757153159281,
+       "exogenous:co2_setpoint:dosing_gap": 1.1032600384852151,
+       "exogenous:co2_setpoint:schedule_step_6h": 10.046332973363066
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.7567266610805929,
+       "previous_day_weight": -0.028437018053762142
+      },
+      "anchor_feature": "target:co2_concentration:seasonal_24h_reference"
+     },
+     {
+      "cell": "co2_concentration@24",
+      "status": "fitted",
+      "training_rows": 520,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_24h"
+      ],
+      "intercept": 0.8381233136295776,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -62.36262724002022,
+       "target:co2_concentration:lag_24h": 37.58906598551354,
+       "exogenous:ventilation_leeward:co2_exchange": -0.6265005320232776,
+       "exogenous:ventilation_windward:co2_exchange": -3.957918811183416,
+       "exogenous:outside_radiation:lag_0h": 0.6685017031417141,
+       "exogenous:supplemental_light:lag_0h": 2.596982856593393,
+       "exogenous:co2_setpoint:dosing_gap": 9.044405893305132,
+       "exogenous:co2_setpoint:schedule_step_24h": -2.7909013799811007
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.5186439694479659
+      },
+      "anchor_feature": "target:co2_concentration:lag_0h"
+     }
+    ],
+    "normalization_scales": {
+     "air_temperature": 2.3513722478915198,
+     "relative_humidity": 10.559937068379936,
+     "co2_concentration": 108.81169559667859
+    }
+   },
+   "calibration_uq": {
+    "origins": 154,
+    "origins_digest": "60964aac19d76a165c0d49dbb1cc3f49347dca5e74c4d4e77ca3313b56fc03e1",
+    "overall_skill": 0.17689102717163024,
+    "cells": {
+     "air_temperature@1": {
+      "n": 154,
+      "baseline_rmse": 1.0038322806369055,
+      "model_rmse": 0.62921223511064,
+      "skill": 0.3731898771860364,
+      "sum_predicted": 3409.877646679546,
+      "sum_baseline": 3403.4541667010326,
+      "sum_observed": 3409.979166700753,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 20.99999999357386,
+        "baseline": 19.64999999916181,
+        "predicted": 20.322636482866933
+       },
+       {
+        "origin": 1040531,
+        "observed": 25.19166666722546,
+        "baseline": 25.183333333612733,
+        "predicted": 25.629300157441243
+       },
+       {
+        "origin": 1040588,
+        "observed": 19.2000000002794,
+        "baseline": 19.25000000363214,
+        "predicted": 18.548811750918556
+       }
+      ]
+     },
+     "air_temperature@6": {
+      "n": 154,
+      "baseline_rmse": 1.0232406016064854,
+      "model_rmse": 0.8746234373613951,
+      "skill": 0.14524166067273103,
+      "sum_predicted": 3440.1785909814803,
+      "sum_baseline": 3444.620833378037,
+      "sum_observed": 3432.0291667172373,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 22.241666666666674,
+        "baseline": 21.983333331377562,
+        "predicted": 22.278516509355
+       },
+       {
+        "origin": 1040531,
+        "observed": 24.450000002514575,
+        "baseline": 25.26666666499027,
+        "predicted": 24.971364202505708
+       },
+       {
+        "origin": 1040588,
+        "observed": 18.64166666694607,
+        "baseline": 17.95,
+        "predicted": 18.450271607551453
+       }
+      ]
+     },
+     "air_temperature@24": {
+      "n": 154,
+      "baseline_rmse": 1.0272497459026801,
+      "model_rmse": 0.9493043850045498,
+      "skill": 0.07587771251248838,
+      "sum_predicted": 3406.6166757274345,
+      "sum_baseline": 3403.4541667010326,
+      "sum_observed": 3403.3833333675593,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 19.14166666806365,
+        "baseline": 19.64999999916181,
+        "predicted": 19.69989961630824
+       },
+       {
+        "origin": 1040531,
+        "observed": 26.133333332215752,
+        "baseline": 25.183333333612733,
+        "predicted": 25.008779017647335
+       },
+       {
+        "origin": 1040588,
+        "observed": 19.3833333350097,
+        "baseline": 19.25000000363214,
+        "predicted": 19.514477882843828
+       }
+      ]
+     },
+     "relative_humidity@1": {
+      "n": 154,
+      "baseline_rmse": 4.537966314727165,
+      "model_rmse": 4.050483143180502,
+      "skill": 0.10742326798782595,
+      "sum_predicted": 12672.227654828506,
+      "sum_baseline": 12724.145833303717,
+      "sum_observed": 12714.570833334172,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 87.88333336462576,
+        "baseline": 94.28333333277453,
+        "predicted": 89.39783773895496
+       },
+       {
+        "origin": 1040531,
+        "observed": 85.92500001229347,
+        "baseline": 87.25000001899899,
+        "predicted": 83.3211995805432
+       },
+       {
+        "origin": 1040588,
+        "observed": 89.63333333500971,
+        "baseline": 84.90000000530854,
+        "predicted": 86.67437470539542
+       }
+      ]
+     },
+     "relative_humidity@6": {
+      "n": 154,
+      "baseline_rmse": 9.464471484756787,
+      "model_rmse": 7.732917094511474,
+      "skill": 0.1829530991808794,
+      "sum_predicted": 12497.926176874713,
+      "sum_baseline": 12454.17083341324,
+      "sum_observed": 12650.95416667924,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 84.84166667001944,
+        "baseline": 84.88333333137756,
+        "predicted": 86.15611148711119
+       },
+       {
+        "origin": 1040531,
+        "observed": 85.96666665185863,
+        "baseline": 80.04166663984456,
+        "predicted": 81.59133799681824
+       },
+       {
+        "origin": 1040588,
+        "observed": 95.25833333305394,
+        "baseline": 89.9333333352891,
+        "predicted": 90.10749211035603
+       }
+      ]
+     },
+     "relative_humidity@24": {
+      "n": 154,
+      "baseline_rmse": 8.701409423250814,
+      "model_rmse": 7.757805958966794,
+      "skill": 0.10844260031744293,
+      "sum_predicted": 12693.2767891816,
+      "sum_baseline": 12724.145833303717,
+      "sum_observed": 12720.949999850662,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 94.8916666655491,
+        "baseline": 94.28333333277453,
+        "predicted": 93.7769276164666
+       },
+       {
+        "origin": 1040531,
+        "observed": 77.69166667923953,
+        "baseline": 87.25000001899899,
+        "predicted": 82.10998631396234
+       },
+       {
+        "origin": 1040588,
+        "observed": 84.97499998603017,
+        "baseline": 84.90000000530854,
+        "predicted": 84.32031418453101
+       }
+      ]
+     },
+     "co2_concentration@1": {
+      "n": 154,
+      "baseline_rmse": 107.74723066836509,
+      "model_rmse": 94.21134658146617,
+      "skill": 0.12562628294884887,
+      "sum_predicted": 95664.85060528846,
+      "sum_baseline": 96400.58332421661,
+      "sum_observed": 96674.9166577623,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 597.5833334786197,
+        "baseline": 547.6666665744657,
+        "predicted": 561.1427461700565
+       },
+       {
+        "origin": 1040531,
+        "observed": 1332.8333339340372,
+        "baseline": 749.0833350460357,
+        "predicted": 712.4647454898086
+       },
+       {
+        "origin": 1040588,
+        "observed": 509.91666661358136,
+        "baseline": 511.1666667644556,
+        "predicted": 518.8689557691727
+       }
+      ]
+     },
+     "co2_concentration@6": {
+      "n": 154,
+      "baseline_rmse": 195.5052327516357,
+      "model_rmse": 145.30007649889893,
+      "skill": 0.2567969948738711,
+      "sum_predicted": 93749.86249109231,
+      "sum_baseline": 93824.58332765599,
+      "sum_observed": 96595.16665894694,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 749.8333311763909,
+        "baseline": 694.666666892978,
+        "predicted": 666.1173494717127
+       },
+       {
+        "origin": 1040531,
+        "observed": 891.916664397966,
+        "baseline": 795.9166660408179,
+        "predicted": 773.4124387744672
+       },
+       {
+        "origin": 1040588,
+        "observed": 556.1666667532796,
+        "baseline": 683.583333285836,
+        "predicted": 590.3647681732291
+       }
+      ]
+     },
+     "co2_concentration@24": {
+      "n": 154,
+      "baseline_rmse": 193.64358483744343,
+      "model_rmse": 151.72599394562093,
+      "skill": 0.216467748864548,
+      "sum_predicted": 94312.59795599361,
+      "sum_baseline": 96400.58332421661,
+      "sum_observed": 97005.12498282827,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 542.5833333389213,
+        "baseline": 547.6666665744657,
+        "predicted": 545.6709667942054
+       },
+       {
+        "origin": 1040531,
+        "observed": 577.0833336099361,
+        "baseline": 749.0833350460357,
+        "predicted": 607.2116700457498
+       },
+       {
+        "origin": 1040588,
+        "observed": 501.41666672254604,
+        "baseline": 511.1666667644556,
+        "predicted": 504.4291748743496
+       }
+      ]
+     }
+    },
+    "models": [
+     {
+      "cell": "air_temperature@1",
+      "status": "fitted",
+      "training_rows": 517,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_48h_reference",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_1h",
+       "exogenous:ventilation_setpoint:schedule_step_1h"
+      ],
+      "intercept": 0.0009405748619715003,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.021784236085732683,
+       "target:air_temperature:lag_24h": -0.4843296886559783,
+       "target:air_temperature:seasonal_24h_reference": 0.5373214272756691,
+       "target:air_temperature:seasonal_48h_reference": 0.2895820606641384,
+       "target:air_temperature:lag_1h": -0.39016523751139776,
+       "exogenous:heating_setpoint:schedule_step_1h": -0.007438917410108253,
+       "exogenous:ventilation_setpoint:schedule_step_1h": 0.06066592151572108
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.3947724595368664,
+       "previous_day_weight": -0.24469911466527783
+      },
+      "anchor_feature": "target:air_temperature:lag_0h"
+     },
+     {
+      "cell": "air_temperature@6",
+      "status": "fitted",
+      "training_rows": 511,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_48h_reference",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_6h",
+       "exogenous:ventilation_setpoint:schedule_step_6h"
+      ],
+      "intercept": -0.019223578510663912,
+      "coefficients": {
+       "target:air_temperature:lag_0h": 0.8148665259854149,
+       "target:air_temperature:lag_24h": -0.44807645642266875,
+       "target:air_temperature:seasonal_24h_reference": -1.081858281232845,
+       "target:air_temperature:seasonal_48h_reference": 0.7075116915585823,
+       "target:air_temperature:lag_1h": -0.24907937947646172,
+       "exogenous:heating_setpoint:schedule_step_6h": -0.13504833171377015,
+       "exogenous:ventilation_setpoint:schedule_step_6h": 0.2760218337500155
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.9391291132951595,
+       "previous_day_weight": -0.22739345469492697
+      },
+      "anchor_feature": "target:air_temperature:seasonal_24h_reference"
+     },
+     {
+      "cell": "air_temperature@24",
+      "status": "fitted",
+      "training_rows": 519,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:lag_1h",
+       "exogenous:heating_setpoint:schedule_step_24h",
+       "exogenous:ventilation_setpoint:schedule_step_24h"
+      ],
+      "intercept": -0.019501658160290238,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.8675829334523347,
+       "target:air_temperature:lag_24h": 0.5347486410529991,
+       "target:air_temperature:lag_1h": 0.15094278597883506,
+       "exogenous:heating_setpoint:schedule_step_24h": -0.12567777173804828,
+       "exogenous:ventilation_setpoint:schedule_step_24h": 0.09405720638075252
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.2827763653558437
+      },
+      "anchor_feature": "target:air_temperature:lag_0h"
+     },
+     {
+      "cell": "relative_humidity@1",
+      "status": "fitted",
+      "training_rows": 517,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_48h_reference",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": -0.14182588977555916,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -0.47659598298555605,
+       "target:relative_humidity:lag_24h": -2.81208620333727,
+       "target:relative_humidity:seasonal_24h_reference": 2.9953681502894836,
+       "target:relative_humidity:seasonal_48h_reference": 1.8644947528440818,
+       "target:relative_humidity:lag_1h": -1.8362916197173935
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.48169883266117725,
+       "previous_day_weight": -0.27601956223294566
+      },
+      "anchor_feature": "target:relative_humidity:lag_0h"
+     },
+     {
+      "cell": "relative_humidity@6",
+      "status": "fitted",
+      "training_rows": 511,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_48h_reference",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": 0.22763007970885168,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": 2.5104919023242878,
+       "target:relative_humidity:lag_24h": -1.1939006292801655,
+       "target:relative_humidity:seasonal_24h_reference": -5.4388800911002715,
+       "target:relative_humidity:seasonal_48h_reference": 4.211459144269637,
+       "target:relative_humidity:lag_1h": -0.9334526703521399
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.9243489542471096,
+       "previous_day_weight": -0.1100898519960976
+      },
+      "anchor_feature": "target:relative_humidity:seasonal_24h_reference"
+     },
+     {
+      "cell": "relative_humidity@24",
+      "status": "fitted",
+      "training_rows": 519,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:lag_1h"
+      ],
+      "intercept": 0.19419152866678874,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -4.92957053311809,
+       "target:relative_humidity:lag_24h": 3.938879450639236,
+       "target:relative_humidity:lag_1h": 0.40217647705429316
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.3978329879266656
+      },
+      "anchor_feature": "target:relative_humidity:lag_0h"
+     },
+     {
+      "cell": "co2_concentration@1",
+      "status": "fitted",
+      "training_rows": 518,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_48h_reference",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_1h"
+      ],
+      "intercept": -0.4144494132777406,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -22.302937113412618,
+       "target:co2_concentration:lag_24h": -28.44847965955604,
+       "target:co2_concentration:seasonal_24h_reference": 30.684889698851414,
+       "target:co2_concentration:seasonal_48h_reference": 16.123604760248337,
+       "exogenous:ventilation_leeward:co2_exchange": -1.4153171271839482,
+       "exogenous:ventilation_windward:co2_exchange": -3.1623528368331524,
+       "exogenous:outside_radiation:lag_0h": -6.761362774578716,
+       "exogenous:supplemental_light:lag_0h": -0.17759070072515679,
+       "exogenous:co2_setpoint:dosing_gap": 9.94109719941323,
+       "exogenous:co2_setpoint:schedule_step_1h": 1.2499891675739276
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.44752210171028806,
+       "previous_day_weight": -0.21162966952208978
+      },
+      "anchor_feature": "target:co2_concentration:lag_0h"
+     },
+     {
+      "cell": "co2_concentration@6",
+      "status": "fitted",
+      "training_rows": 512,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_48h_reference",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_6h"
+      ],
+      "intercept": 1.6539662274891223,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": 26.81846292967157,
+       "target:co2_concentration:lag_24h": -9.188113124963547,
+       "target:co2_concentration:seasonal_24h_reference": -73.49849120681299,
+       "target:co2_concentration:seasonal_48h_reference": 29.635330689999563,
+       "exogenous:ventilation_leeward:co2_exchange": -3.4843903251931967,
+       "exogenous:ventilation_windward:co2_exchange": 1.5840884535621231,
+       "exogenous:outside_radiation:lag_0h": 6.035728792847073,
+       "exogenous:supplemental_light:lag_0h": 2.746757153159281,
+       "exogenous:co2_setpoint:dosing_gap": 1.1032600384852151,
+       "exogenous:co2_setpoint:schedule_step_6h": 10.046332973363066
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.7567266610805929,
+       "previous_day_weight": -0.028437018053762142
+      },
+      "anchor_feature": "target:co2_concentration:seasonal_24h_reference"
+     },
+     {
+      "cell": "co2_concentration@24",
+      "status": "fitted",
+      "training_rows": 520,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_24h",
+       "exogenous:ventilation_leeward:co2_exchange",
+       "exogenous:ventilation_windward:co2_exchange",
+       "exogenous:outside_radiation:lag_0h",
+       "exogenous:supplemental_light:lag_0h",
+       "exogenous:co2_setpoint:dosing_gap",
+       "exogenous:co2_setpoint:schedule_step_24h"
+      ],
+      "intercept": 0.8381233136295776,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -62.36262724002022,
+       "target:co2_concentration:lag_24h": 37.58906598551354,
+       "exogenous:ventilation_leeward:co2_exchange": -0.6265005320232776,
+       "exogenous:ventilation_windward:co2_exchange": -3.957918811183416,
+       "exogenous:outside_radiation:lag_0h": 0.6685017031417141,
+       "exogenous:supplemental_light:lag_0h": 2.596982856593393,
+       "exogenous:co2_setpoint:dosing_gap": 9.044405893305132,
+       "exogenous:co2_setpoint:schedule_step_24h": -2.7909013799811007
+      },
+      "constrained_member": {
+       "profile_anomaly_weight": 0.0,
+       "previous_day_weight": 0.5186439694479659
+      },
+      "anchor_feature": "target:co2_concentration:lag_0h"
+     }
+    ],
+    "normalization_scales": {
+     "air_temperature": 2.3513722478915198,
+     "relative_humidity": 10.559937068379936,
+     "co2_concentration": 108.81169559667859
+    }
+   }
+  },
+  "recipe_seed": {
+   "model_selection": {
+    "origins": 683,
+    "origins_digest": "66fc715ebf2611f389365c24a139ec15482ae1f69ac935d4755a749312dda795",
+    "overall_skill": 0.08777049929178987,
+    "cells": {
+     "air_temperature@1": {
+      "n": 683,
+      "baseline_rmse": 1.1126110717910032,
+      "model_rmse": 0.879668703849004,
+      "skill": 0.2093654951384089,
+      "sum_predicted": 14772.270862572524,
+      "sum_baseline": 14758.154166645712,
+      "sum_observed": 14752.979166638726,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 26.51666665996115,
+        "baseline": 25.700000000838184,
+        "predicted": 26.07322809724209
+       },
+       {
+        "origin": 1040779,
+        "observed": 18.18333333612731,
+        "baseline": 19.558333334730317,
+        "predicted": 19.29342444050787
+       },
+       {
+        "origin": 1040836,
+        "observed": 18.875000000279393,
+        "baseline": 18.849999998044215,
+        "predicted": 19.0063512743891
+       },
+       {
+        "origin": 1040893,
+        "observed": 27.69166666387269,
+        "baseline": 27.5166666627551,
+        "predicted": 27.283342457546432
+       },
+       {
+        "origin": 1040950,
+        "observed": 17.908333332215744,
+        "baseline": 17.983333333892123,
+        "predicted": 17.987543348416807
+       },
+       {
+        "origin": 1041007,
+        "observed": 20.65833333249515,
+        "baseline": 21.26666666694607,
+        "predicted": 21.508086026541434
+       },
+       {
+        "origin": 1041064,
+        "observed": 26.22499999608843,
+        "baseline": 26.30833333137755,
+        "predicted": 26.06830786212728
+       },
+       {
+        "origin": 1041121,
+        "observed": 18.133333333053933,
+        "baseline": 17.950000000279392,
+        "predicted": 17.927523966574853
+       },
+       {
+        "origin": 1041178,
+        "observed": 26.07499999385328,
+        "baseline": 23.108333327745385,
+        "predicted": 23.745048985911293
+       },
+       {
+        "origin": 1041235,
+        "observed": 20.17500000251457,
+        "baseline": 21.433333336406708,
+        "predicted": 20.97447681261152
+       },
+       {
+        "origin": 1041292,
+        "observed": 20.26666666387269,
+        "baseline": 18.133333333333344,
+        "predicted": 18.4658158893521
+       },
+       {
+        "origin": 1041349,
+        "observed": 25.083333332215748,
+        "baseline": 24.96666667476917,
+        "predicted": 24.90503174820123
+       }
+      ]
+     },
+     "air_temperature@6": {
+      "n": 683,
+      "baseline_rmse": 1.0240881591919728,
+      "model_rmse": 1.0249723999956029,
+      "skill": -0.000862697184464504,
+      "sum_predicted": 14794.31581285671,
+      "sum_baseline": 14751.104166652696,
+      "sum_observed": 14711.679166652126,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 26.22499999944121,
+        "baseline": 27.35000000977888,
+        "predicted": 26.627833957292605
+       },
+       {
+        "origin": 1040779,
+        "observed": 18.816666665269683,
+        "baseline": 18.38333333165696,
+        "predicted": 18.252646194233904
+       },
+       {
+        "origin": 1040836,
+        "observed": 26.291666661078725,
+        "baseline": 22.01666665828476,
+        "predicted": 22.179010233406405
+       },
+       {
+        "origin": 1040893,
+        "observed": 21.27500000558794,
+        "baseline": 21.208333333612725,
+        "predicted": 21.811774809375567
+       },
+       {
+        "origin": 1040950,
+        "observed": 17.808333333333334,
+        "baseline": 17.808333333053934,
+        "predicted": 18.298504504968083
+       },
+       {
+        "origin": 1041007,
+        "observed": 26.24166666750484,
+        "baseline": 25.700000003352752,
+        "predicted": 25.299795164986012
+       },
+       {
+        "origin": 1041064,
+        "observed": 18.349999997206034,
+        "baseline": 18.941666666666666,
+        "predicted": 19.63266584725526
+       },
+       {
+        "origin": 1041121,
+        "observed": 20.8,
+        "baseline": 20.758333332495152,
+        "predicted": 20.622070280083527
+       },
+       {
+        "origin": 1041178,
+        "observed": 26.191666672813383,
+        "baseline": 26.23333332998058,
+        "predicted": 25.642765095793653
+       },
+       {
+        "origin": 1041235,
+        "observed": 18.958333332774533,
+        "baseline": 18.175,
+        "predicted": 18.606249476722475
+       },
+       {
+        "origin": 1041292,
+        "observed": 23.66666666331392,
+        "baseline": 23.591666662475728,
+        "predicted": 23.255185410132967
+       },
+       {
+        "origin": 1041349,
+        "observed": 20.96666666974004,
+        "baseline": 21.225000002793973,
+        "predicted": 21.495851768323373
+       }
+      ]
+     },
+     "air_temperature@24": {
+      "n": 683,
+      "baseline_rmse": 1.0140139476008514,
+      "model_rmse": 0.9932524676483846,
+      "skill": 0.020474550672195672,
+      "sum_predicted": 14838.85481434495,
+      "sum_baseline": 14758.154166645712,
+      "sum_observed": 14714.654166621673,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 23.49999999748543,
+        "baseline": 25.700000000838184,
+        "predicted": 25.016846495595285
+       },
+       {
+        "origin": 1040779,
+        "observed": 20.333333338362475,
+        "baseline": 19.558333334730317,
+        "predicted": 20.37562212317707
+       },
+       {
+        "origin": 1040836,
+        "observed": 18.87500000027941,
+        "baseline": 18.849999998044215,
+        "predicted": 19.082932678383976
+       },
+       {
+        "origin": 1040893,
+        "observed": 26.174999994691465,
+        "baseline": 27.5166666627551,
+        "predicted": 26.969487869590647
+       },
+       {
+        "origin": 1040950,
+        "observed": 18.66666666610787,
+        "baseline": 17.983333333892123,
+        "predicted": 18.575512499443644
+       },
+       {
+        "origin": 1041007,
+        "observed": 21.224999998603018,
+        "baseline": 21.26666666694607,
+        "predicted": 21.163238603485528
+       },
+       {
+        "origin": 1041064,
+        "observed": 26.183333329701185,
+        "baseline": 26.30833333137755,
+        "predicted": 25.84573252095199
+       },
+       {
+        "origin": 1041121,
+        "observed": 17.816666664710883,
+        "baseline": 17.950000000279392,
+        "predicted": 18.355250313819226
+       },
+       {
+        "origin": 1041178,
+        "observed": 22.633333329142392,
+        "baseline": 23.108333327745385,
+        "predicted": 23.04726125394259
+       },
+       {
+        "origin": 1041235,
+        "observed": 21.208333338083076,
+        "baseline": 21.433333336406708,
+        "predicted": 21.96620442355268
+       },
+       {
+        "origin": 1041292,
+        "observed": 17.97500000083819,
+        "baseline": 18.133333333333344,
+        "predicted": 18.56357753430317
+       },
+       {
+        "origin": 1041349,
+        "observed": 24.891666665269693,
+        "baseline": 24.96666667476917,
+        "predicted": 24.987369439836545
+       }
+      ]
+     },
+     "relative_humidity@1": {
+      "n": 683,
+      "baseline_rmse": 3.709181103297399,
+      "model_rmse": 3.287702877125115,
+      "skill": 0.11363107231340012,
+      "sum_predicted": 57693.55487438011,
+      "sum_baseline": 57923.02916554405,
+      "sum_observed": 57922.56527662787,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 83.03333322855956,
+        "baseline": 87.24166672673697,
+        "predicted": 84.8601337931519
+       },
+       {
+        "origin": 1040779,
+        "observed": 87.00833333361273,
+        "baseline": 85.01666666554908,
+        "predicted": 85.85985711629446
+       },
+       {
+        "origin": 1040836,
+        "observed": 87.39999999525025,
+        "baseline": 86.99166666778426,
+        "predicted": 86.9307390990781
+       },
+       {
+        "origin": 1040893,
+        "observed": 59.81666668538626,
+        "baseline": 63.97499998407438,
+        "predicted": 62.94592944018441
+       },
+       {
+        "origin": 1040950,
+        "observed": 87.75833333975947,
+        "baseline": 87.97499999608844,
+        "predicted": 88.59195146416275
+       },
+       {
+        "origin": 1041007,
+        "observed": 87.14999999050052,
+        "baseline": 83.89166665074106,
+        "predicted": 83.89836177702917
+       },
+       {
+        "origin": 1041064,
+        "observed": 85.63333331321678,
+        "baseline": 85.98333335428809,
+        "predicted": 85.52892577384378
+       },
+       {
+        "origin": 1041121,
+        "observed": 90.40833333724488,
+        "baseline": 91.66666667029882,
+        "predicted": 91.71023235823577
+       },
+       {
+        "origin": 1041178,
+        "observed": 88.60833333724487,
+        "baseline": 89.9166666621963,
+        "predicted": 88.92888135398454
+       },
+       {
+        "origin": 1041235,
+        "observed": 87.69166664710889,
+        "baseline": 85.5916666540938,
+        "predicted": 86.70655500435264
+       },
+       {
+        "origin": 1041292,
+        "observed": 86.10000000474975,
+        "baseline": 91.3750000011176,
+        "predicted": 90.37007174786712
+       },
+       {
+        "origin": 1041349,
+        "observed": 71.50833340010915,
+        "baseline": 70.64166672645757,
+        "predicted": 69.10233278055544
+       }
+      ]
+     },
+     "relative_humidity@6": {
+      "n": 683,
+      "baseline_rmse": 6.228862378080247,
+      "model_rmse": 5.7206161228488694,
+      "skill": 0.08159535792923074,
+      "sum_predicted": 57272.45023925545,
+      "sum_baseline": 57857.3541654443,
+      "sum_observed": 57980.69861007513,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 63.84166663956518,
+        "baseline": 76.6916665579813,
+        "predicted": 74.68774005808177
+       },
+       {
+        "origin": 1040779,
+        "observed": 90.88333333500974,
+        "baseline": 92.92500000502913,
+        "predicted": 93.40134555567977
+       },
+       {
+        "origin": 1040836,
+        "observed": 89.47499994412067,
+        "baseline": 88.55000000055878,
+        "predicted": 85.72959045269054
+       },
+       {
+        "origin": 1040893,
+        "observed": 90.11666667085761,
+        "baseline": 81.48333329421779,
+        "predicted": 79.30016881142544
+       },
+       {
+        "origin": 1040950,
+        "observed": 87.07500000111759,
+        "baseline": 86.98333333920066,
+        "predicted": 89.09154023239104
+       },
+       {
+        "origin": 1041007,
+        "observed": 85.30833336769915,
+        "baseline": 79.30833335680263,
+        "predicted": 76.85025700096094
+       },
+       {
+        "origin": 1041064,
+        "observed": 94.00833333053937,
+        "baseline": 91.23333332634843,
+        "predicted": 90.61507048447636
+       },
+       {
+        "origin": 1041121,
+        "observed": 86.13333333500971,
+        "baseline": 87.75833333165696,
+        "predicted": 87.97236977074819
+       },
+       {
+        "origin": 1041178,
+        "observed": 81.31666661497827,
+        "baseline": 90.05833331433435,
+        "predicted": 85.00826836570079
+       },
+       {
+        "origin": 1041235,
+        "observed": 90.70000000279397,
+        "baseline": 94.33333333361274,
+        "predicted": 94.0732032035032
+       },
+       {
+        "origin": 1041292,
+        "observed": 80.89166660380239,
+        "baseline": 75.41666669432693,
+        "predicted": 76.30010251320506
+       },
+       {
+        "origin": 1041349,
+        "observed": 89.0416666630345,
+        "baseline": 90.2583333266278,
+        "predicted": 86.02674452123236
+       }
+      ]
+     },
+     "relative_humidity@24": {
+      "n": 683,
+      "baseline_rmse": 5.964526197172408,
+      "model_rmse": 5.4521628617748705,
+      "skill": 0.08590176628621951,
+      "sum_predicted": 57340.13639368725,
+      "sum_baseline": 57923.02916554405,
+      "sum_observed": 58135.056943464624,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 88.67499999133871,
+        "baseline": 87.24166672673697,
+        "predicted": 85.65428308732724
+       },
+       {
+        "origin": 1040779,
+        "observed": 80.99166666107872,
+        "baseline": 85.01666666554908,
+        "predicted": 83.60461694444908
+       },
+       {
+        "origin": 1040836,
+        "observed": 87.75833333836248,
+        "baseline": 86.99166666778426,
+        "predicted": 87.7171233711838
+       },
+       {
+        "origin": 1040893,
+        "observed": 68.92500009667127,
+        "baseline": 63.97499998407438,
+        "predicted": 66.03092317834817
+       },
+       {
+        "origin": 1040950,
+        "observed": 89.40000000223517,
+        "baseline": 87.97499999608844,
+        "predicted": 87.0950616294134
+       },
+       {
+        "origin": 1041007,
+        "observed": 87.35833331629011,
+        "baseline": 83.89166665074106,
+        "predicted": 84.05989396124734
+       },
+       {
+        "origin": 1041064,
+        "observed": 69.00000012656672,
+        "baseline": 85.98333335428809,
+        "predicted": 83.15508676918223
+       },
+       {
+        "origin": 1041121,
+        "observed": 88.44166666610788,
+        "baseline": 91.66666667029882,
+        "predicted": 91.45464202899345
+       },
+       {
+        "origin": 1041178,
+        "observed": 90.36666666191694,
+        "baseline": 89.9166666621963,
+        "predicted": 87.72774322090845
+       },
+       {
+        "origin": 1041235,
+        "observed": 82.76666667421038,
+        "baseline": 85.5916666540938,
+        "predicted": 83.67093450413665
+       },
+       {
+        "origin": 1041292,
+        "observed": 88.53333333473033,
+        "baseline": 91.3750000011176,
+        "predicted": 91.00203219716701
+       },
+       {
+        "origin": 1041349,
+        "observed": 80.47499992484228,
+        "baseline": 70.64166672645757,
+        "predicted": 70.72614125725758
+       }
+      ]
+     },
+     "co2_concentration@1": {
+      "n": 683,
+      "baseline_rmse": 133.8536913677372,
+      "model_rmse": 124.16736979074746,
+      "skill": 0.07236499403201704,
+      "sum_predicted": 432109.5765295768,
+      "sum_baseline": 436739.7916637917,
+      "sum_observed": 436895.833328571,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 549.6666662755113,
+        "baseline": 680.6666695193074,
+        "predicted": 672.3123687727808
+       },
+       {
+        "origin": 1040779,
+        "observed": 688.7500000810251,
+        "baseline": 740.9166667951891,
+        "predicted": 694.4019057729178
+       },
+       {
+        "origin": 1040836,
+        "observed": 615.0833334339162,
+        "baseline": 609.0833333025997,
+        "predicted": 603.8483669420835
+       },
+       {
+        "origin": 1040893,
+        "observed": 536.9166663397725,
+        "baseline": 568.166666803571,
+        "predicted": 541.8533688256433
+       },
+       {
+        "origin": 1040950,
+        "observed": 620.6666667504857,
+        "baseline": 622.833333193635,
+        "predicted": 609.9266321869188
+       },
+       {
+        "origin": 1041007,
+        "observed": 639.8333338194835,
+        "baseline": 644.4166665129985,
+        "predicted": 645.8182034550533
+       },
+       {
+        "origin": 1041064,
+        "observed": 1198.7499976111567,
+        "baseline": 673.3333328890924,
+        "predicted": 546.1795092312337
+       },
+       {
+        "origin": 1041121,
+        "observed": 472.9999999636785,
+        "baseline": 479.0833333361272,
+        "predicted": 494.9158767926572
+       },
+       {
+        "origin": 1041178,
+        "observed": 743.9166670689979,
+        "baseline": 658.4166658200945,
+        "predicted": 724.6875124549608
+       },
+       {
+        "origin": 1041235,
+        "observed": 483.4999998407438,
+        "baseline": 470.41666669181245,
+        "predicted": 483.8348349387674
+       },
+       {
+        "origin": 1041292,
+        "observed": 608.4166660966972,
+        "baseline": 517.9166665074105,
+        "predicted": 537.2625403466177
+       },
+       {
+        "origin": 1041349,
+        "observed": 578.499999731779,
+        "baseline": 591.3333332886298,
+        "predicted": 583.4879205797033
+       }
+      ]
+     },
+     "co2_concentration@6": {
+      "n": 683,
+      "baseline_rmse": 133.51061595179118,
+      "model_rmse": 119.60525379429306,
+      "skill": 0.10415173399034539,
+      "sum_predicted": 423516.12243909435,
+      "sum_baseline": 433946.62499766424,
+      "sum_observed": 437153.49999742256,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 442.9999998630955,
+        "baseline": 555.1666659569987,
+        "predicted": 565.7065738029446
+       },
+       {
+        "origin": 1040779,
+        "observed": 504.33333327466,
+        "baseline": 499.25000008381903,
+        "predicted": 531.5958830486643
+       },
+       {
+        "origin": 1040836,
+        "observed": 1073.499997309409,
+        "baseline": 841.9166677982234,
+        "predicted": 772.0638582928373
+       },
+       {
+        "origin": 1040893,
+        "observed": 905.0000003129245,
+        "baseline": 606.7500000083818,
+        "predicted": 603.4167256646281
+       },
+       {
+        "origin": 1040950,
+        "observed": 652.249999924563,
+        "baseline": 588.7500000251458,
+        "predicted": 606.5246257582407
+       },
+       {
+        "origin": 1041007,
+        "observed": 738.7500011846423,
+        "baseline": 833.4166667337219,
+        "predicted": 757.2995187674733
+       },
+       {
+        "origin": 1041064,
+        "observed": 546.0416665604961,
+        "baseline": 555.2499999525024,
+        "predicted": 523.9290178285898
+       },
+       {
+        "origin": 1041121,
+        "observed": 653.666666462707,
+        "baseline": 684.5000007823111,
+        "predicted": 632.1463048744354
+       },
+       {
+        "origin": 1041178,
+        "observed": 785.833332668369,
+        "baseline": 982.083331341234,
+        "predicted": 841.9361167573068
+       },
+       {
+        "origin": 1041235,
+        "observed": 474.24999994412065,
+        "baseline": 560.3333332914239,
+        "predicted": 552.5587449132594
+       },
+       {
+        "origin": 1041292,
+        "observed": 550.749999927357,
+        "baseline": 529.0833333584791,
+        "predicted": 555.5176937451661
+       },
+       {
+        "origin": 1041349,
+        "observed": 560.5000000167638,
+        "baseline": 508.66666661358107,
+        "predicted": 547.8123602018602
+       }
+      ]
+     },
+     "co2_concentration@24": {
+      "n": 683,
+      "baseline_rmse": 133.50220473432907,
+      "model_rmse": 119.70979552842111,
+      "skill": 0.10331222044875597,
+      "sum_predicted": 419534.84679217037,
+      "sum_baseline": 436739.7916637917,
+      "sum_observed": 440642.625003533,
+      "samples": [
+       {
+        "origin": 1040722,
+        "observed": 928.4166666219627,
+        "baseline": 680.6666695193074,
+        "predicted": 659.8962732974932
+       },
+       {
+        "origin": 1040779,
+        "observed": 524.8333335261171,
+        "baseline": 740.9166667951891,
+        "predicted": 665.9098806727932
+       },
+       {
+        "origin": 1040836,
+        "observed": 604.083333355685,
+        "baseline": 609.0833333025997,
+        "predicted": 579.1728686644794
+       },
+       {
+        "origin": 1040893,
+        "observed": 665.4999998547136,
+        "baseline": 568.166666803571,
+        "predicted": 576.249784696439
+       },
+       {
+        "origin": 1040950,
+        "observed": 528.7916667644557,
+        "baseline": 622.833333193635,
+        "predicted": 570.0891923914194
+       },
+       {
+        "origin": 1041007,
+        "observed": 650.9999994467943,
+        "baseline": 644.4166665129985,
+        "predicted": 627.2353077108764
+       },
+       {
+        "origin": 1041064,
+        "observed": 661.0000011958178,
+        "baseline": 673.3333328890924,
+        "predicted": 707.0062682303706
+       },
+       {
+        "origin": 1041121,
+        "observed": 619.1666667113701,
+        "baseline": 479.0833333361272,
+        "predicted": 518.8379319921745
+       },
+       {
+        "origin": 1041178,
+        "observed": 726.666667574706,
+        "baseline": 658.4166658200945,
+        "predicted": 657.288464619742
+       },
+       {
+        "origin": 1041235,
+        "observed": 473.91666661916923,
+        "baseline": 470.41666669181245,
+        "predicted": 501.39590659605295
+       },
+       {
+        "origin": 1041292,
+        "observed": 553.0833334031826,
+        "baseline": 517.9166665074105,
+        "predicted": 525.1106498769186
+       },
+       {
+        "origin": 1041349,
+        "observed": 701.5833326963087,
+        "baseline": 591.3333332886298,
+        "predicted": 580.5627157185163
+       }
+      ]
+     }
+    },
+    "models": [
+     {
+      "cell": "air_temperature@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": 0.004320987670619384,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.09376606364805742,
+       "target:air_temperature:lag_1h": -0.6954195980363169,
+       "target:air_temperature:lag_2h": 0.01656809682217498,
+       "target:air_temperature:lag_3h": -0.206718317039889,
+       "target:air_temperature:lag_24h": -0.1380940463874587,
+       "target:air_temperature:seasonal_24h_reference": 0.4332703273591381,
+       "target:air_temperature:seasonal_24h_delta": 0.0700185980070436,
+       "time:sin_24h": 0.1805032280637418,
+       "time:cos_24h": -0.33186816429287386,
+       "target:air_temperature:rolling_mean_6h": 0.39822279202426314
+      }
+     },
+     {
+      "cell": "air_temperature@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": -0.02649653428659672,
+      "coefficients": {
+       "target:air_temperature:lag_0h": 0.113467021648528,
+       "target:air_temperature:lag_1h": -0.344503387042895,
+       "target:air_temperature:lag_2h": -0.238795271227903,
+       "target:air_temperature:lag_3h": -0.3978160538694323,
+       "target:air_temperature:lag_24h": -0.0038802527799641235,
+       "target:air_temperature:seasonal_24h_reference": -1.3062933896450208,
+       "target:air_temperature:seasonal_24h_delta": 0.1952240328327588,
+       "time:sin_24h": 1.164696845909215,
+       "time:cos_24h": -0.5138412674075271,
+       "target:air_temperature:rolling_mean_6h": 1.237523307092087
+      }
+     },
+     {
+      "cell": "air_temperature@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": -0.003944983800276673,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.5057665922275721,
+       "target:air_temperature:lag_1h": 0.2772333369161604,
+       "target:air_temperature:lag_2h": 0.21083855751820413,
+       "target:air_temperature:lag_3h": 0.19068015916067438,
+       "target:air_temperature:lag_24h": -0.4021683997559805,
+       "target:air_temperature:seasonal_24h_reference": -0.5057665922276543,
+       "target:air_temperature:seasonal_24h_delta": -0.1981266238729664,
+       "time:sin_24h": -0.3915580783283872,
+       "time:cos_24h": -0.7757880021033415,
+       "target:air_temperature:rolling_mean_6h": -0.3127324507994213
+      }
+     },
+     {
+      "cell": "relative_humidity@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": -0.01143077593834893,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -0.17785664461358888,
+       "target:relative_humidity:lag_1h": -4.607028627828465,
+       "target:relative_humidity:lag_2h": 1.6533196830920192,
+       "target:relative_humidity:lag_3h": -0.7614088367585414,
+       "target:relative_humidity:lag_24h": -0.7000027572254073,
+       "target:relative_humidity:seasonal_24h_reference": 2.990913193262652,
+       "target:relative_humidity:seasonal_24h_delta": 0.8503966373588268,
+       "time:sin_24h": -0.2046211244942326,
+       "time:cos_24h": 1.1825816394911384,
+       "target:relative_humidity:rolling_mean_6h": 0.35518947961648506
+      }
+     },
+     {
+      "cell": "relative_humidity@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": 0.7307025831454449,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": 0.34231857538261773,
+       "target:relative_humidity:lag_1h": -2.3105246103619117,
+       "target:relative_humidity:lag_2h": -0.7128830662311115,
+       "target:relative_humidity:lag_3h": -2.0780017747547332,
+       "target:relative_humidity:lag_24h": -0.030215517860822744,
+       "target:relative_humidity:seasonal_24h_reference": -5.474380300214088,
+       "target:relative_humidity:seasonal_24h_delta": 0.6013866082634216,
+       "time:sin_24h": -3.8305360731008213,
+       "time:cos_24h": 3.3144247205558104,
+       "target:relative_humidity:rolling_mean_6h": 5.688614296615711
+      }
+     },
+     {
+      "cell": "relative_humidity@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": 0.5739902912403118,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -1.7905457330171786,
+       "target:relative_humidity:lag_1h": 0.7251920274559713,
+       "target:relative_humidity:lag_2h": 0.10384576657289822,
+       "target:relative_humidity:lag_3h": 0.21183630165745887,
+       "target:relative_humidity:lag_24h": -0.669154992681208,
+       "target:relative_humidity:seasonal_24h_reference": -1.7905457330163659,
+       "target:relative_humidity:seasonal_24h_delta": -1.8239458685314478,
+       "time:sin_24h": 1.7850431960748907,
+       "time:cos_24h": 1.9294638927237917,
+       "target:relative_humidity:rolling_mean_6h": -0.4036745193813128
+      }
+     },
+     {
+      "cell": "co2_concentration@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 0.7864711960526701,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -17.115276364347697,
+       "target:co2_concentration:lag_1h": -23.30539662717141,
+       "target:co2_concentration:lag_2h": 2.8509998593662087,
+       "target:co2_concentration:lag_3h": 0.9419449194357239,
+       "target:co2_concentration:lag_24h": -27.353403633735656,
+       "target:co2_concentration:seasonal_24h_reference": 41.09438010935061,
+       "target:co2_concentration:seasonal_24h_delta": 8.567425511464107,
+       "time:sin_24h": 1.7089634747778961,
+       "time:cos_24h": -5.358059659032434,
+       "target:co2_concentration:rolling_mean_6h": -0.32489247455936626
+      }
+     },
+     {
+      "cell": "co2_concentration@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 8.156978570209517,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -3.134920640703089,
+       "target:co2_concentration:lag_1h": -9.163510599549532,
+       "target:co2_concentration:lag_2h": 0.4768666312282962,
+       "target:co2_concentration:lag_3h": -11.290251169130483,
+       "target:co2_concentration:lag_24h": -9.99865783174026,
+       "target:co2_concentration:seasonal_24h_reference": -69.97992673453594,
+       "target:co2_concentration:seasonal_24h_delta": 5.87672419518622,
+       "time:sin_24h": 21.320491004765014,
+       "time:cos_24h": -2.457528350891759,
+       "target:co2_concentration:rolling_mean_6h": 32.56540395105857
+      }
+     },
+     {
+      "cell": "co2_concentration@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 2.0794821972340674,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -26.365596252059348,
+       "target:co2_concentration:lag_1h": 10.155777914106228,
+       "target:co2_concentration:lag_2h": 2.4096063543710535,
+       "target:co2_concentration:lag_3h": -0.5067532284065527,
+       "target:co2_concentration:lag_24h": -0.9918196187366061,
+       "target:co2_concentration:seasonal_24h_reference": -26.36559625207561,
+       "target:co2_concentration:seasonal_24h_delta": -22.678954316752453,
+       "time:sin_24h": -9.223282939898954,
+       "time:cos_24h": -17.409448476053836,
+       "target:co2_concentration:rolling_mean_6h": -27.200168239451585
+      }
+     }
+    ],
+    "normalization_scales": {
+     "air_temperature": 2.3513722478915198,
+     "relative_humidity": 10.559937068379936,
+     "co2_concentration": 108.81169559667859
+    }
+   },
+   "calibration_uq": {
+    "origins": 154,
+    "origins_digest": "60964aac19d76a165c0d49dbb1cc3f49347dca5e74c4d4e77ca3313b56fc03e1",
+    "overall_skill": 0.11791187521919581,
+    "cells": {
+     "air_temperature@1": {
+      "n": 154,
+      "baseline_rmse": 1.0038322806369055,
+      "model_rmse": 0.8021735413337622,
+      "skill": 0.20088887675060232,
+      "sum_predicted": 3405.571760114132,
+      "sum_baseline": 3403.4541667010326,
+      "sum_observed": 3409.979166700753,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 20.99999999357386,
+        "baseline": 19.64999999916181,
+        "predicted": 19.76814625517567
+       },
+       {
+        "origin": 1040531,
+        "observed": 25.19166666722546,
+        "baseline": 25.183333333612733,
+        "predicted": 25.563419050658318
+       },
+       {
+        "origin": 1040588,
+        "observed": 19.2000000002794,
+        "baseline": 19.25000000363214,
+        "predicted": 18.8914392507386
+       }
+      ]
+     },
+     "air_temperature@6": {
+      "n": 154,
+      "baseline_rmse": 1.0232406016064854,
+      "model_rmse": 0.9931705008824162,
+      "skill": 0.029387126230975634,
+      "sum_predicted": 3435.3519367504114,
+      "sum_baseline": 3444.620833378037,
+      "sum_observed": 3432.0291667172373,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 22.241666666666674,
+        "baseline": 21.983333331377562,
+        "predicted": 21.88074410988636
+       },
+       {
+        "origin": 1040531,
+        "observed": 24.450000002514575,
+        "baseline": 25.26666666499027,
+        "predicted": 25.082717485185132
+       },
+       {
+        "origin": 1040588,
+        "observed": 18.64166666694607,
+        "baseline": 17.95,
+        "predicted": 18.23354444176237
+       }
+      ]
+     },
+     "air_temperature@24": {
+      "n": 154,
+      "baseline_rmse": 1.0272497459026801,
+      "model_rmse": 0.9653986514533699,
+      "skill": 0.06021037697600941,
+      "sum_predicted": 3400.8843875853468,
+      "sum_baseline": 3403.4541667010326,
+      "sum_observed": 3403.3833333675593,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 19.14166666806365,
+        "baseline": 19.64999999916181,
+        "predicted": 19.61587285264492
+       },
+       {
+        "origin": 1040531,
+        "observed": 26.133333332215752,
+        "baseline": 25.183333333612733,
+        "predicted": 24.73024176653728
+       },
+       {
+        "origin": 1040588,
+        "observed": 19.3833333350097,
+        "baseline": 19.25000000363214,
+        "predicted": 20.099113838659548
+       }
+      ]
+     },
+     "relative_humidity@1": {
+      "n": 154,
+      "baseline_rmse": 4.537966314727165,
+      "model_rmse": 3.9443323807344783,
+      "skill": 0.1308149714699629,
+      "sum_predicted": 12681.288769812389,
+      "sum_baseline": 12724.145833303717,
+      "sum_observed": 12714.570833334172,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 87.88333336462576,
+        "baseline": 94.28333333277453,
+        "predicted": 92.81173812368286
+       },
+       {
+        "origin": 1040531,
+        "observed": 85.92500001229347,
+        "baseline": 87.25000001899899,
+        "predicted": 84.74937407034699
+       },
+       {
+        "origin": 1040588,
+        "observed": 89.63333333500971,
+        "baseline": 84.90000000530854,
+        "predicted": 85.55125406217643
+       }
+      ]
+     },
+     "relative_humidity@6": {
+      "n": 154,
+      "baseline_rmse": 9.464471484756787,
+      "model_rmse": 8.236252533281856,
+      "skill": 0.12977153066106922,
+      "sum_predicted": 12426.749483547961,
+      "sum_baseline": 12454.17083341324,
+      "sum_observed": 12650.95416667924,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 84.84166667001944,
+        "baseline": 84.88333333137756,
+        "predicted": 83.9209648180569
+       },
+       {
+        "origin": 1040531,
+        "observed": 85.96666665185863,
+        "baseline": 80.04166663984456,
+        "predicted": 77.96696911033199
+       },
+       {
+        "origin": 1040588,
+        "observed": 95.25833333305394,
+        "baseline": 89.9333333352891,
+        "predicted": 90.61018918638534
+       }
+      ]
+     },
+     "relative_humidity@24": {
+      "n": 154,
+      "baseline_rmse": 8.701409423250814,
+      "model_rmse": 7.742153248296399,
+      "skill": 0.1102414710416006,
+      "sum_predicted": 12650.679741870897,
+      "sum_baseline": 12724.145833303717,
+      "sum_observed": 12720.949999850662,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 94.8916666655491,
+        "baseline": 94.28333333277453,
+        "predicted": 93.73503828345169
+       },
+       {
+        "origin": 1040531,
+        "observed": 77.69166667923953,
+        "baseline": 87.25000001899899,
+        "predicted": 83.58400425543368
+       },
+       {
+        "origin": 1040588,
+        "observed": 84.97499998603017,
+        "baseline": 84.90000000530854,
+        "predicted": 83.51293853519412
+       }
+      ]
+     },
+     "co2_concentration@1": {
+      "n": 154,
+      "baseline_rmse": 107.74723066836509,
+      "model_rmse": 99.3236736977632,
+      "skill": 0.07817887214687436,
+      "sum_predicted": 95566.81191153011,
+      "sum_baseline": 96400.58332421661,
+      "sum_observed": 96674.9166577623,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 597.5833334786197,
+        "baseline": 547.6666665744657,
+        "predicted": 555.4154502336222
+       },
+       {
+        "origin": 1040531,
+        "observed": 1332.8333339340372,
+        "baseline": 749.0833350460357,
+        "predicted": 708.2830885741498
+       },
+       {
+        "origin": 1040588,
+        "observed": 509.91666661358136,
+        "baseline": 511.1666667644556,
+        "predicted": 512.771359474298
+       }
+      ]
+     },
+     "co2_concentration@6": {
+      "n": 154,
+      "baseline_rmse": 195.5052327516357,
+      "model_rmse": 165.2837566372235,
+      "skill": 0.15458141804728429,
+      "sum_predicted": 92821.2933793229,
+      "sum_baseline": 93824.58332765599,
+      "sum_observed": 96595.16665894694,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 749.8333311763909,
+        "baseline": 694.666666892978,
+        "predicted": 653.2100844078363
+       },
+       {
+        "origin": 1040531,
+        "observed": 891.916664397966,
+        "baseline": 795.9166660408179,
+        "predicted": 752.7142169866852
+       },
+       {
+        "origin": 1040588,
+        "observed": 556.1666667532796,
+        "baseline": 683.583333285836,
+        "predicted": 651.6754401794785
+       }
+      ]
+     },
+     "co2_concentration@24": {
+      "n": 154,
+      "baseline_rmse": 193.64358483744343,
+      "model_rmse": 161.27949997188125,
+      "skill": 0.16713223364838356,
+      "sum_predicted": 93236.84517077803,
+      "sum_baseline": 96400.58332421661,
+      "sum_observed": 97005.12498282827,
+      "samples": [
+       {
+        "origin": 1040474,
+        "observed": 542.5833333389213,
+        "baseline": 547.6666665744657,
+        "predicted": 552.5066496444573
+       },
+       {
+        "origin": 1040531,
+        "observed": 577.0833336099361,
+        "baseline": 749.0833350460357,
+        "predicted": 675.3339784262508
+       },
+       {
+        "origin": 1040588,
+        "observed": 501.41666672254604,
+        "baseline": 511.1666667644556,
+        "predicted": 506.86109369968113
+       }
+      ]
+     }
+    },
+    "models": [
+     {
+      "cell": "air_temperature@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": 0.004320987670619384,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.09376606364805742,
+       "target:air_temperature:lag_1h": -0.6954195980363169,
+       "target:air_temperature:lag_2h": 0.01656809682217498,
+       "target:air_temperature:lag_3h": -0.206718317039889,
+       "target:air_temperature:lag_24h": -0.1380940463874587,
+       "target:air_temperature:seasonal_24h_reference": 0.4332703273591381,
+       "target:air_temperature:seasonal_24h_delta": 0.0700185980070436,
+       "time:sin_24h": 0.1805032280637418,
+       "time:cos_24h": -0.33186816429287386,
+       "target:air_temperature:rolling_mean_6h": 0.39822279202426314
+      }
+     },
+     {
+      "cell": "air_temperature@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": -0.02649653428659672,
+      "coefficients": {
+       "target:air_temperature:lag_0h": 0.113467021648528,
+       "target:air_temperature:lag_1h": -0.344503387042895,
+       "target:air_temperature:lag_2h": -0.238795271227903,
+       "target:air_temperature:lag_3h": -0.3978160538694323,
+       "target:air_temperature:lag_24h": -0.0038802527799641235,
+       "target:air_temperature:seasonal_24h_reference": -1.3062933896450208,
+       "target:air_temperature:seasonal_24h_delta": 0.1952240328327588,
+       "time:sin_24h": 1.164696845909215,
+       "time:cos_24h": -0.5138412674075271,
+       "target:air_temperature:rolling_mean_6h": 1.237523307092087
+      }
+     },
+     {
+      "cell": "air_temperature@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:air_temperature:lag_0h",
+       "target:air_temperature:lag_1h",
+       "target:air_temperature:lag_2h",
+       "target:air_temperature:lag_3h",
+       "target:air_temperature:lag_24h",
+       "target:air_temperature:seasonal_24h_reference",
+       "target:air_temperature:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:air_temperature:rolling_mean_6h"
+      ],
+      "intercept": -0.003944983800276673,
+      "coefficients": {
+       "target:air_temperature:lag_0h": -0.5057665922275721,
+       "target:air_temperature:lag_1h": 0.2772333369161604,
+       "target:air_temperature:lag_2h": 0.21083855751820413,
+       "target:air_temperature:lag_3h": 0.19068015916067438,
+       "target:air_temperature:lag_24h": -0.4021683997559805,
+       "target:air_temperature:seasonal_24h_reference": -0.5057665922276543,
+       "target:air_temperature:seasonal_24h_delta": -0.1981266238729664,
+       "time:sin_24h": -0.3915580783283872,
+       "time:cos_24h": -0.7757880021033415,
+       "target:air_temperature:rolling_mean_6h": -0.3127324507994213
+      }
+     },
+     {
+      "cell": "relative_humidity@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": -0.01143077593834893,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -0.17785664461358888,
+       "target:relative_humidity:lag_1h": -4.607028627828465,
+       "target:relative_humidity:lag_2h": 1.6533196830920192,
+       "target:relative_humidity:lag_3h": -0.7614088367585414,
+       "target:relative_humidity:lag_24h": -0.7000027572254073,
+       "target:relative_humidity:seasonal_24h_reference": 2.990913193262652,
+       "target:relative_humidity:seasonal_24h_delta": 0.8503966373588268,
+       "time:sin_24h": -0.2046211244942326,
+       "time:cos_24h": 1.1825816394911384,
+       "target:relative_humidity:rolling_mean_6h": 0.35518947961648506
+      }
+     },
+     {
+      "cell": "relative_humidity@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": 0.7307025831454449,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": 0.34231857538261773,
+       "target:relative_humidity:lag_1h": -2.3105246103619117,
+       "target:relative_humidity:lag_2h": -0.7128830662311115,
+       "target:relative_humidity:lag_3h": -2.0780017747547332,
+       "target:relative_humidity:lag_24h": -0.030215517860822744,
+       "target:relative_humidity:seasonal_24h_reference": -5.474380300214088,
+       "target:relative_humidity:seasonal_24h_delta": 0.6013866082634216,
+       "time:sin_24h": -3.8305360731008213,
+       "time:cos_24h": 3.3144247205558104,
+       "target:relative_humidity:rolling_mean_6h": 5.688614296615711
+      }
+     },
+     {
+      "cell": "relative_humidity@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:relative_humidity:lag_0h",
+       "target:relative_humidity:lag_1h",
+       "target:relative_humidity:lag_2h",
+       "target:relative_humidity:lag_3h",
+       "target:relative_humidity:lag_24h",
+       "target:relative_humidity:seasonal_24h_reference",
+       "target:relative_humidity:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:relative_humidity:rolling_mean_6h"
+      ],
+      "intercept": 0.5739902912403118,
+      "coefficients": {
+       "target:relative_humidity:lag_0h": -1.7905457330171786,
+       "target:relative_humidity:lag_1h": 0.7251920274559713,
+       "target:relative_humidity:lag_2h": 0.10384576657289822,
+       "target:relative_humidity:lag_3h": 0.21183630165745887,
+       "target:relative_humidity:lag_24h": -0.669154992681208,
+       "target:relative_humidity:seasonal_24h_reference": -1.7905457330163659,
+       "target:relative_humidity:seasonal_24h_delta": -1.8239458685314478,
+       "time:sin_24h": 1.7850431960748907,
+       "time:cos_24h": 1.9294638927237917,
+       "target:relative_humidity:rolling_mean_6h": -0.4036745193813128
+      }
+     },
+     {
+      "cell": "co2_concentration@1",
+      "status": "fitted",
+      "training_rows": 540,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 0.7864711960526701,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -17.115276364347697,
+       "target:co2_concentration:lag_1h": -23.30539662717141,
+       "target:co2_concentration:lag_2h": 2.8509998593662087,
+       "target:co2_concentration:lag_3h": 0.9419449194357239,
+       "target:co2_concentration:lag_24h": -27.353403633735656,
+       "target:co2_concentration:seasonal_24h_reference": 41.09438010935061,
+       "target:co2_concentration:seasonal_24h_delta": 8.567425511464107,
+       "time:sin_24h": 1.7089634747778961,
+       "time:cos_24h": -5.358059659032434,
+       "target:co2_concentration:rolling_mean_6h": -0.32489247455936626
+      }
+     },
+     {
+      "cell": "co2_concentration@6",
+      "status": "fitted",
+      "training_rows": 529,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 8.156978570209517,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -3.134920640703089,
+       "target:co2_concentration:lag_1h": -9.163510599549532,
+       "target:co2_concentration:lag_2h": 0.4768666312282962,
+       "target:co2_concentration:lag_3h": -11.290251169130483,
+       "target:co2_concentration:lag_24h": -9.99865783174026,
+       "target:co2_concentration:seasonal_24h_reference": -69.97992673453594,
+       "target:co2_concentration:seasonal_24h_delta": 5.87672419518622,
+       "time:sin_24h": 21.320491004765014,
+       "time:cos_24h": -2.457528350891759,
+       "target:co2_concentration:rolling_mean_6h": 32.56540395105857
+      }
+     },
+     {
+      "cell": "co2_concentration@24",
+      "status": "fitted",
+      "training_rows": 515,
+      "feature_names": [
+       "target:co2_concentration:lag_0h",
+       "target:co2_concentration:lag_1h",
+       "target:co2_concentration:lag_2h",
+       "target:co2_concentration:lag_3h",
+       "target:co2_concentration:lag_24h",
+       "target:co2_concentration:seasonal_24h_reference",
+       "target:co2_concentration:seasonal_24h_delta",
+       "time:sin_24h",
+       "time:cos_24h",
+       "target:co2_concentration:rolling_mean_6h"
+      ],
+      "intercept": 2.0794821972340674,
+      "coefficients": {
+       "target:co2_concentration:lag_0h": -26.365596252059348,
+       "target:co2_concentration:lag_1h": 10.155777914106228,
+       "target:co2_concentration:lag_2h": 2.4096063543710535,
+       "target:co2_concentration:lag_3h": -0.5067532284065527,
+       "target:co2_concentration:lag_24h": -0.9918196187366061,
+       "target:co2_concentration:seasonal_24h_reference": -26.36559625207561,
+       "target:co2_concentration:seasonal_24h_delta": -22.678954316752453,
+       "time:sin_24h": -9.223282939898954,
+       "time:cos_24h": -17.409448476053836,
+       "target:co2_concentration:rolling_mean_6h": -27.200168239451585
+      }
+     }
+    ],
+    "normalization_scales": {
+     "air_temperature": 2.3513722478915198,
+     "relative_humidity": 10.559937068379936,
+     "co2_concentration": 108.81169559667859
+    }
+   }
+  }
+ }
+}

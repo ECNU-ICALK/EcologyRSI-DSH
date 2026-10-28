@@ -1,0 +1,325 @@
+# Autonomous Greenhouse Challenge 2018 (cucumber), Wageningen University & Research.
+# Five teams and a grower reference each ran one greenhouse compartment for
+# about four months; climate and setpoints are logged every five minutes.
+id = "agc_cucumber_2018"
+title = "Autonomous Greenhouse Challenge 2018, cucumber"
+source = "https://doi.org/10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a"
+path = "greenhouse/agc_cucumber_2018"
+loader = "csv_tables"
+step = "1h"
+episodes = "*/Greenhouse_climate.csv"
+external_episodes = ["reference"]
+
+# ---- indoor climate -------------------------------------------------------
+[[columns]]
+name = "air_temperature"
+role = "environment"
+unit = "degC"
+label = "室内气温"
+aliases = ["Tair"]
+required = true
+
+[[columns]]
+name = "relative_humidity"
+role = "environment"
+unit = "percent"
+label = "室内相对湿度"
+aliases = ["RHair", "Rhair"]
+required = true
+valid = [0.0, 100.0]
+
+[[columns]]
+name = "co2_concentration"
+role = "environment"
+unit = "ppm"
+label = "室内 CO2 浓度"
+aliases = ["CO2air"]
+required = true
+valid = [0.0, 5000.0]
+
+[[columns]]
+name = "humidity_deficit"
+role = "environment"
+unit = "g_m3"
+label = "湿度亏缺"
+aliases = ["HumDef"]
+
+[[columns]]
+name = "supplemental_light"
+role = "environment"
+unit = "percent"
+label = "补光比例"
+aliases = ["AssimLight"]
+
+[[columns]]
+name = "heating_pipe_temperature"
+role = "environment"
+unit = "degC"
+label = "加热管温度"
+aliases = ["PipeLow"]
+
+[[columns]]
+name = "ventilation_leeward"
+role = "environment"
+unit = "percent"
+label = "背风侧通风开度"
+aliases = ["VentLee"]
+
+[[columns]]
+name = "ventilation_windward"
+role = "environment"
+unit = "percent"
+label = "迎风侧通风开度"
+aliases = ["Ventwind"]
+
+# ---- outside weather (one station for all compartments) --------------------
+[[columns]]
+name = "outside_temperature"
+role = "outside_weather"
+unit = "degC"
+label = "室外气温"
+aliases = ["Tout"]
+
+[[columns]]
+name = "outside_relative_humidity"
+role = "outside_weather"
+unit = "percent"
+label = "室外相对湿度"
+aliases = ["Rhout"]
+valid = [0.0, 100.0]
+
+[[columns]]
+name = "outside_radiation"
+role = "outside_weather"
+unit = "W_m2"
+label = "室外辐射"
+aliases = ["Iglob"]
+
+[[columns]]
+name = "outside_wind_speed"
+role = "outside_weather"
+unit = "m_s"
+label = "室外风速"
+aliases = ["Windsp"]
+
+# ---- irrigation and root zone (daily) ---------------------------------------
+[[columns]]
+name = "irrigation_water"
+role = "resource"
+unit = "L_m2_day"
+label = "灌溉水量"
+aliases = ["Water", "water"]
+
+[[columns]]
+name = "drain_water"
+role = "root_zone"
+unit = "L_m2_day"
+label = "排水量"
+aliases = ["drain"]
+
+[[columns]]
+name = "drain_ph"
+role = "root_zone"
+unit = "pH"
+label = "排液 pH"
+aliases = ["pH_Drain"]
+valid = [2.0, 14.0]
+
+[[columns]]
+name = "drain_ec"
+role = "root_zone"
+unit = "dS_m"
+label = "排液电导率"
+aliases = ["EC_Drain"]
+valid = [0.0, 30.0]
+
+# ---- production and resources (daily outcomes, never model inputs) ---------
+[[columns]]
+name = "marketable_yield"
+role = "outcome"
+unit = "kg_m2_cumulative"
+label = "一级果累计产量"
+aliases = ["ProdA_cum"]
+
+[[columns]]
+name = "class_b_yield"
+role = "outcome"
+unit = "kg_m2_cumulative"
+label = "二级果累计产量"
+aliases = ["ProdB_cum"]
+
+[[columns]]
+name = "total_yield"
+role = "outcome"
+unit = "kg_m2_cumulative"
+label = "累计总产量"
+aliases = ["Total_Prod_cum"]
+
+[[columns]]
+name = "production_value"
+role = "outcome"
+unit = "EUR_cumulative"
+label = "累计产值"
+aliases = ["Prod_value_cum"]
+
+[[columns]]
+name = "water_use"
+role = "outcome"
+unit = "L_m2_day"
+label = "净用水量"
+aliases = ["net_water"]
+
+[[columns]]
+name = "co2_use"
+role = "outcome"
+unit = "kg_m2_day"
+label = "CO2 用量"
+aliases = ["CO2_dosage"]
+
+[[columns]]
+name = "heating_energy_use"
+role = "outcome"
+unit = "kWh_m2_day"
+label = "供热能耗"
+aliases = ["Heating_Energy", "Heating_Eenrgy"]
+
+[[columns]]
+name = "electricity_use"
+role = "outcome"
+unit = "kWh_m2_day"
+label = "照明用电"
+aliases = ["Electricity_Lamp", "Electricity_Lamps"]
+
+[[columns]]
+name = "labour_use"
+role = "outcome"
+unit = "hours_day"
+label = "人工投入"
+aliases = ["Labour"]
+
+# ---- crop records (weekly) -------------------------------------------------
+[[columns]]
+name = "fruit_development_time"
+role = "crop"
+unit = "days"
+label = "果实发育时间"
+aliases = ["FruitGrw"]
+
+[[columns]]
+name = "leaf_formation_rate"
+role = "crop"
+unit = "leaves_stem_week"
+label = "叶片形成速率"
+aliases = ["LeafFormRate"]
+
+[[columns]]
+name = "cumulative_leaves"
+role = "crop"
+unit = "leaves_stem"
+label = "累计叶片数"
+aliases = ["N_leaves"]
+
+[[columns]]
+name = "pruning_fraction"
+role = "crop"
+unit = "percent"
+label = "修剪比例"
+aliases = ["Pruning"]
+
+[[columns]]
+name = "stem_elongation"
+role = "crop"
+unit = "cm_week"
+label = "茎伸长量"
+aliases = ["Stem_elong"]
+
+# ---- controller setpoints (each team's climate strategy) -------------------
+[[columns]]
+name = "co2_setpoint"
+role = "action"
+unit = "ppm"
+label = "CO2 设定值"
+aliases = ["CO2_Vip"]
+
+[[columns]]
+name = "heating_setpoint"
+role = "action"
+unit = "degC"
+label = "加热设定值"
+aliases = ["HeatTemp_Vip"]
+
+[[columns]]
+name = "humidity_deficit_setpoint"
+role = "action"
+unit = "g_kg"
+label = "湿差设定值"
+aliases = ["HumDef_Vip"]
+
+[[columns]]
+name = "ventilation_setpoint"
+role = "action"
+unit = "degC"
+label = "通风设定值"
+aliases = ["VentLeew_Vip", "VentWind_Vip"]
+
+[[columns]]
+name = "irrigation_interval"
+role = "action"
+unit = "minutes"
+label = "灌溉间隔"
+aliases = ["WaterSupInt_Vip"]
+
+# ---- source tables ---------------------------------------------------------
+# The first table defines each episode's time steps.
+[[tables]]
+file = "Greenhouse_climate.csv"
+time = ["GHtime", "time"]
+interval_minutes = 5
+columns = [
+    "air_temperature", "relative_humidity", "co2_concentration", "humidity_deficit",
+    "supplemental_light", "heating_pipe_temperature", "ventilation_leeward", "ventilation_windward",
+]
+
+[[tables]]
+file = "meteo.csv"
+scope = "dataset"
+time = ["time"]
+interval_minutes = 5
+columns = ["outside_temperature", "outside_relative_humidity", "outside_radiation", "outside_wind_speed"]
+
+[[tables]]
+file = "vip.csv"
+time = ["time"]
+interval_minutes = 5
+allow_suffix = true
+columns = ["co2_setpoint", "heating_setpoint", "humidity_deficit_setpoint", "ventilation_setpoint", "irrigation_interval"]
+
+[[tables]]
+file = "Irrigation.csv"
+time = ["time"]
+interval_minutes = 1440
+delay = 24
+columns = ["irrigation_water", "drain_water", "drain_ph", "drain_ec"]
+
+[[tables]]
+file = "Production.csv"
+time = ["time"]
+interval_minutes = 1440
+delay = 24
+columns = ["marketable_yield", "class_b_yield", "total_yield", "production_value"]
+
+[[tables]]
+file = "ResourceCalculations.csv"
+time = ["time"]
+interval_minutes = 1440
+delay = 24
+columns = ["water_use", "co2_use", "heating_energy_use", "electricity_use", "labour_use"]
+
+[[tables]]
+file = "CropManagement.csv"
+time = ["weeks"]
+time_format = "iso_week"
+week_year = 2018
+interval_minutes = 10080
+delay = 168
+columns = ["fruit_development_time", "leaf_formation_rate", "cumulative_leaves", "pruning_fraction", "stem_elongation"]
