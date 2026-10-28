@@ -9,6 +9,7 @@ handlers run on the server's threads, so sub-agents can call concurrently.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import uuid
@@ -20,6 +21,16 @@ from typing import Any
 from ..kernel.canonical import jsonable
 
 PROTOCOL_VERSION = "2025-06-18"
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """Dropped connections are normal when the episode is torn down; don't dump their tracebacks."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            super().handle_error(request, client_address)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,8 +61,7 @@ class McpServer:
         return int(self._server.server_address[1])
 
     def start(self) -> McpServer:
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
-        self._server.daemon_threads = True
+        self._server = _QuietServer(("127.0.0.1", 0), _handler(self))
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
 

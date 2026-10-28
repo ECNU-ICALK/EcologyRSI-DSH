@@ -64,7 +64,8 @@ def summarize(found: list[dict[str, Any]]) -> dict[str, Any]:
                     with contextlib.suppress(json.JSONDecodeError, AttributeError):
                         searches.extend(json.loads(data.get("arguments") or "{}").get("queries") or [])
             elif kind == "assistant/message":
-                for key, value in ((data.get("message") or {}).get("usage") or {}).items():
+                found_usage = data.get("usage") or (data.get("message") or {}).get("usage") or {}
+                for key, value in found_usage.items():
                     if isinstance(value, int):
                         usage[key] += value
     return {"sessions": len(found), "subagents": sum(1 for item in found if item["depth"]),

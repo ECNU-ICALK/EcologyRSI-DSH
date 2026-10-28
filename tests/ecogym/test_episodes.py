@@ -26,6 +26,7 @@ from ecogym.episodes import sandbox as sbx
 from ecogym.episodes.gateway import Gateway, tokens_of, usage_of
 from ecogym.episodes.judge import Limits, iso, judge, predictor_spec, run_predictor, stage_stream
 from ecogym.episodes.mcp import McpServer, Tool
+from ecogym.episodes.trajectory import summarize
 from ecogym.episodes.workspace import LOCAL_STAGE, SCORED_STAGE, boundaries, export_visible
 
 from .helpers import synthetic_bench, synthetic_frame
@@ -374,6 +375,28 @@ class SandboxTests(unittest.TestCase):
         self.assertTrue(out["secret"].startswith("DENIED"), out)
         self.assertTrue(out["data"].startswith("DENIED"), out)
         self.assertTrue(out["net"].startswith("DENIED"), out)  # port 9 is not the gateway port
+
+
+class TrajectorySummaryTests(unittest.TestCase):
+    def test_summary_counts_tokens_queries_and_subagents(self):
+        parent = {"id": "root", "parent": None, "depth": 0, "events": [
+            {"type": "assistant/message", "data": {"usage": {"inputTokens": 100, "outputTokens": 20,
+                                                             "totalTokens": 120}}},
+            {"type": "assistant/message", "data": {"usage": {"inputTokens": 30, "outputTokens": 5,
+                                                            "totalTokens": 35}}},
+            {"type": "tool/call", "data": {"name": "web_search",
+                                           "arguments": json.dumps({"queries": ["cucumber VPD", "greenhouse co2"]})}},
+            {"type": "tool/call", "data": {"name": "bash"}},
+        ]}
+        child = {"id": "sub", "parent": "root", "depth": 1, "events": [
+            {"type": "assistant/message", "data": {"message": {"usage": {"totalTokens": 7}}}},  # older shape
+        ]}
+        summary = summarize([parent, child])
+        self.assertEqual(summary["sessions"], 2)
+        self.assertEqual(summary["subagents"], 1)
+        self.assertEqual(summary["usage"], {"inputTokens": 130, "outputTokens": 25, "totalTokens": 162})
+        self.assertEqual(summary["web_queries"], ["cucumber VPD", "greenhouse co2"])
+        self.assertEqual(summary["tool_calls"], {"web_search": 1, "bash": 1})
 
 
 if __name__ == "__main__":

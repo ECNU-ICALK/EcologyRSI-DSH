@@ -18,6 +18,7 @@ import contextlib
 import http.client
 import json
 import ssl
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -30,6 +31,16 @@ PREFIX = "/deepseek"
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
        "upgrade", "content-length", "content-encoding", "host", "authorization", "x-api-key", "accept-encoding"}
 LOG_RESPONSE_LIMIT = 4_000_000
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """Dropped connections are normal when the episode is torn down; don't dump their tracebacks."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            super().handle_error(request, client_address)
 
 
 def tokens_of(usage: dict[str, Any] | None) -> int:
@@ -95,8 +106,7 @@ class Gateway:
         return f"http://127.0.0.1:{self.port}{PREFIX}"
 
     def start(self) -> Gateway:
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
-        self._server.daemon_threads = True
+        self._server = _QuietServer(("127.0.0.1", 0), _handler(self))
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
 
