@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from threading import RLock
 from typing import Any
 
-from ..core.models import digest
+from ..core.models import canonical_json, digest
+from ..evolution import genome_owned_prediction as ownership
 from .sample_contracts import _causal_wave_identity, _safe_mapping, _normalized_operation_max_tokens, _normalized_remote_critic_policy
 from .shared_sample_context import normalized_sample_planner_prompt_profile
 from .sample_execution import SampleExecutionPausedError, SampleExecutionCancelledError, SampleExecutionControlUnavailableError, classify_sample_failure
+from .sample_execution import _MAX_PLAN_BYTES
 from ..core.errors import (
     DshNativeRuntimeUnavailableError, DshSamplePlannerOutputBudgetError,
     dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable,
@@ -61,6 +64,60 @@ def _sample_routing_wave(
         "available_tools": [dict(item) for item in available_tools],
         "allowed_reason_codes": sorted(REMOTE_REASON_CODES),
     }
+
+
+def _bounded_number(value: Any) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(f"{float(value):.6g}")
+
+
+def _compact_experience_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the error evidence a sample Agent can act on, drop audit identities."""
+    parameters = row.get("parameters")
+    numeric = {
+        name: value for name, value in sorted(parameters.items())
+        if isinstance(name, str) and len(name) <= 100
+        and type(value) in (int, float) and math.isfinite(value)
+    } if isinstance(parameters, Mapping) else {}
+    result = {key: row[key] for key in ("tool_id", "target", "horizon_hours", "resolved_predictor_id")
+              if key in row}
+    for key in ("n", "cited", "failed"):
+        if type(row.get(key)) is int:
+            result[key] = row[key]
+    for key in ("rmse", "mae", "agent_adjustment_mae_gain"):
+        if key in row:
+            result[key] = _bounded_number(row[key])
+    if numeric:
+        result["parameters"] = dict(list(numeric.items())[:16])
+    return result
+
+
+def _sample_policy_view(policy: Any, *, max_rows: int, keep_attribution: bool) -> Any:
+    """A bounded sample-Agent projection of the frozen candidate Agent policy.
+
+    The full policy, including every experience row and its digest, stays in
+    the proposal; ``policy_digest`` names it. Only the copy shown to sample
+    Agents is compacted, so the batch plan stays inside its frozen bound.
+    """
+    if not isinstance(policy, Mapping):
+        return policy
+    experience = policy.get("experience") if isinstance(policy.get("experience"), Mapping) else {}
+    rows = [row for row in experience.get("rows", ()) if isinstance(row, Mapping)]
+    view = {key: deepcopy(value) for key, value in policy.items() if key not in {"experience", "profile"}}
+    compact = {
+        "projection": "sample_agent_policy_view@1",
+        "scope": experience.get("scope"),
+        "source_analysis_digest": experience.get("source_analysis_digest"),
+        "source_row_count": len(rows),
+        "rows": [_compact_experience_row(row) for row in rows[:max_rows]],
+    }
+    if isinstance(experience.get("same_genome_repeatability"), Mapping):
+        compact["same_genome_repeatability"] = deepcopy(dict(experience["same_genome_repeatability"]))
+    if keep_attribution and experience.get("candidate_attribution"):
+        compact["candidate_attribution"] = deepcopy(list(experience["candidate_attribution"]))[:1]
+    view["experience"] = compact
+    return view
 
 
 class _DshSampleDecisionClient:
@@ -301,7 +358,10 @@ class DshSampleCollaborationAdapter:
         sample_reflection_policy: str | None = None,
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
         operation_max_tokens: Mapping[str, int] | None = None,
+        prediction_ownership_policy: str | None = None,
     ) -> None:
+        # Frozen per run. ``None`` keeps the archived Agent-selected contract.
+        self.prediction_ownership_policy = ownership.validate_policy(prediction_ownership_policy)
         if not callable(forecast_bundle_tool):
             raise TypeError("strict DSH execution requires a vector prediction tool")
         if not callable(prediction_tool_binder):
@@ -486,7 +546,9 @@ class DshSampleCollaborationAdapter:
                 frozen_requests, tool_id, parameters, profile.get("strategy_program")
             ),
             prediction_tool_call_budget=prediction_tool_call_budget,
-            allowed_methods=_allowed_prediction_methods(profile),
+            allowed_methods=(ownership.SAMPLE_COPY_METHODS
+                             if context.get("prediction_contract", {}).get("prediction_ownership_policy")
+                             == ownership.POLICY else _allowed_prediction_methods(profile)),
             identity_digests=self._decision_client.identity_digests,
             **({"mean_blend_required": True} if mean_required else {}),
             **({"formula_policy": formula_policy} if formula_policy == EVIDENCE_FORMULA_POLICY else {}),
@@ -674,13 +736,24 @@ class DshSampleCollaborationAdapter:
         fields = {"run_id", "candidate_id", "dataset_digest", "partition", "algorithm_id", "algorithm_version",
             "evaluator_id", "horizons_hours", "candidate_parameters", "tool_experience", "agent_policy",
             "stage_context_digest", "candidate_genome_digest", "candidate_agent_profile", "candidate_execution_identity", "derived_execution_plan", "evaluation_scope"}
-        decision_context = _safe_mapping({key: context[key] for key in fields if key in context}, "sample policy context")
+        raw_context = {key: context[key] for key in fields if key in context}
+        copy_mode = self.prediction_ownership_policy == ownership.POLICY
+        if copy_mode:
+            # An exact copy of the candidate's own output needs no tool
+            # experience; the full rows stay in the frozen proposal.
+            raw_context.pop("tool_experience", None)
+            if "agent_policy" in raw_context:
+                raw_context["agent_policy"] = _sample_policy_view(
+                    raw_context["agent_policy"], max_rows=0, keep_attribution=False)
+        decision_context = _safe_mapping(raw_context, "sample policy context")
         plan = {"plan_id": "native-origin-agent@1", "remote_sample_agents": True,
                 "strategy_model_id": self.strategy_model_id, "review_model_id": self.review_model_id,
                 "sample_concurrency": self.sample_concurrency, "microbatch_size": self.microbatch_size,
                 "require_remote_planner": True, "require_remote_critic": self.require_remote_critic,
                 "remote_critic_policy": self.remote_critic_policy,
                 "decision_context": decision_context, "decision_context_digest": digest(decision_context)}
+        if copy_mode:
+            plan["prediction_ownership_policy"] = ownership.POLICY
         require_success_critic = bool(
             self.require_remote_critic
             or self.remote_critic_policy is None
@@ -717,7 +790,40 @@ class DshSampleCollaborationAdapter:
              "definition_digest": digest(tool)}
             for tool in catalog
         ]
+        if len(canonical_json(plan).encode("utf-8")) > _MAX_PLAN_BYTES:
+            plan = self._compact_overflowing_plan(plan, raw_context)
         return plan
+
+    @staticmethod
+    def _compact_overflowing_plan(plan: Mapping[str, Any], raw_context: Mapping[str, Any]) -> dict[str, Any]:
+        """Bound a plan whose inherited experience outgrew the frozen contract.
+
+        Plans that already fit are returned byte-identical, so archived
+        checkpoints keep their execution identity. Only a plan that used to
+        abort the whole evaluation is projected: the duplicated
+        ``tool_experience`` list is dropped and the Agent policy is shown as a
+        compact view with as many experience rows as fit.
+        """
+        base = {key: value for key, value in raw_context.items() if key != "tool_experience"}
+        policy = base.get("agent_policy")
+        source_rows = (len(policy.get("experience", {}).get("rows", ()))
+                       if isinstance(policy, Mapping) and isinstance(policy.get("experience"), Mapping) else 0)
+        # Prefer more experience rows; keep one attribution report when it fits.
+        attempts = [(rows, attribution)
+                    for rows in sorted({source_rows, 24, 16, 8, 4, 0}, reverse=True) if rows <= source_rows
+                    for attribution in (True, False)]
+        for max_rows, keep_attribution in attempts or [(0, False)]:
+            candidate_context = dict(base)
+            if "agent_policy" in candidate_context:
+                candidate_context["agent_policy"] = _sample_policy_view(
+                    candidate_context["agent_policy"], max_rows=max_rows, keep_attribution=keep_attribution)
+            decision_context = _safe_mapping(candidate_context, "sample policy context")
+            compacted = {**plan, "decision_context": decision_context,
+                         "decision_context_digest": digest(decision_context),
+                         "decision_context_projection": "bounded_sample_policy_view@1"}
+            if len(canonical_json(compacted).encode("utf-8")) <= _MAX_PLAN_BYTES:
+                return compacted
+        raise SampleExecutionContractError("sample batch plan exceeds the bounded contract after compaction")
 
     def reflect_sample(
         self,
@@ -864,6 +970,15 @@ class DshSampleCollaborationAdapter:
             {"tool_id": "persistence", "version": "1", "purpose": "Latest causal history value", "parameters": {}},
             *self._agent_tool_catalog, *extras,
         ]
+        if plan.get("prediction_ownership_policy") == ownership.POLICY:
+            # The genome owns the forecast: expose only its own executable tool.
+            wanted = (ownership.CANDIDATE_PROGRAM_TOOL if program and self._joint_tools(plan)
+                      else ownership.CANDIDATE_MODEL_TOOL)
+            catalog = [
+                {**tool, "purpose": ("This candidate's own forecast for the whole origin vector. "
+                                     "Call it once and copy each sample's exact output.")}
+                for tool in catalog if tool["tool_id"] == wanted
+            ]
         expected = plan.get("tool_catalog_digest")
         if expected is not None and digest(catalog) != expected:
             raise SampleExecutionContractError("native prediction tool catalog changed after batch planning")
@@ -968,7 +1083,11 @@ class DshSampleCollaborationAdapter:
         # validate_predictions, so the contract it read is the contract it is
         # held to.
         formula_policy = (decision_context.get("agent_policy") or {}).get("inference", {}).get("prediction_formula_policy")
-        allowed_methods = tuple(sorted(frozen_prediction_methods(
+        copy_mode = plans[indices[0]].get("prediction_ownership_policy") == ownership.POLICY
+        if copy_mode and formula_policy != EVIDENCE_FORMULA_POLICY:
+            raise SampleExecutionContractError(
+                "genome-owned prediction requires the frozen evidence formula policy")
+        allowed_methods = ownership.SAMPLE_COPY_METHODS if copy_mode else tuple(sorted(frozen_prediction_methods(
             _allowed_prediction_methods(decision_context.get("candidate_agent_profile")),
             formula_policy=formula_policy,
         )))
@@ -1021,6 +1140,31 @@ class DshSampleCollaborationAdapter:
                 "Tool choice and permitted mid-reasoning retrieval remain autonomous."
             )
         catalog = self._available_tool_catalog(selected[0], plans[indices[0]], role=role)
+        if copy_mode:
+            tool_id = catalog[0]["tool_id"] if len(catalog) == 1 else None
+            if tool_id is None:
+                raise SampleExecutionContractError("genome-owned prediction requires exactly one candidate tool")
+            context["prediction_contract"].update({
+                "owner": "candidate_genome_copied_by_sample_agent",
+                "prediction_ownership_policy": ownership.POLICY,
+                "candidate_tool_id": tool_id,
+                "analysis_stopping_rule": (
+                    f"Call {tool_id} once with parameters={{}} and a new call_id over this whole origin "
+                    "vector. It is the only capability: its numbers are this candidate's genome output, "
+                    "which is what the evolution loop measures. Do not analyze alternatives, reconstruct "
+                    "models or search. If the call fails, retry it once with a new call_id, then submit."
+                ),
+                "final_prediction": (
+                    "For every sample_id submit method=model, evidence_call_ids=[the successful call_id], "
+                    "reason_code=candidate_forecast, and predicted equal to the exact number that call "
+                    "returned for that same sample_id. Copy every digit; never round, offset, blend or "
+                    "replace a value. Report confidence as your belief that the copied value is physically "
+                    "plausible given the causal observations; it does not change the value. The Host "
+                    "rejects any number that is not an exact copy."
+                ),
+            })
+            context["evolution_context"].pop("tool_experience", None)
+            context.pop("candidate_strategy_guidance", None)
         try:
             with self._prediction_tool_context(
                 role=role, model_id=self.strategy_model_id, requests=selected,
@@ -1112,6 +1256,12 @@ class DshSampleCollaborationAdapter:
             return True
         if self.remote_critic_policy["version"] == "always@1":
             return True
+        if self.prediction_ownership_policy == ownership.POLICY:
+            # An advisory critic can only send the Agent back to copy the same
+            # genome output again; repeated revisions would just exhaust the
+            # attempt budget and drop a valid origin. Required review above
+            # stays the Host's and is never waived.
+            return False
         return decision["confidence"] < self.remote_critic_policy["min_planner_confidence"]
 
     def _advisory_critic_degradation(self, successful, outcomes, reason_code, failure_class):

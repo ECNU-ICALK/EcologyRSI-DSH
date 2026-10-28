@@ -323,6 +323,7 @@
     };
     body.prediction_selection_policy = "model_during_run@1";
     if (payload.targeted_search_policy) { body.targeted_search_policy = payload.targeted_search_policy; }
+    if (payload.seed_prior_policy) { body.seed_prior_policy = payload.seed_prior_policy; }
     body.search_guard_policy = "practical_delta_cell_noninferiority_paired_blocks@1";
     body.require_model_contract_preflight = true;
     var signature = JSON.stringify(body);

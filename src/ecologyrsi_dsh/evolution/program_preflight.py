@@ -46,7 +46,8 @@ def validate_program_inputs(task, *, predictor_id, parameters, role_profiles):
     from ..data.adapters import dataset_adapter
     from ..evaluators.agent_model_tools import _CONFIGS, _defaults
     from ..evaluators.feature_recipe import compile_feature_plan
-    from ..evaluators.greenhouse_prediction import RecipeRidgeConfig
+    from ..evaluators.diurnal_profile import compile_diurnal_profile_plan
+    from ..evaluators.greenhouse_prediction import DiurnalProfileEnsembleConfig, RecipeRidgeConfig
     from ..evaluators.strategy_program import validate_strategy_program, _causal_parameters
     from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
 
@@ -70,6 +71,10 @@ def validate_program_inputs(task, *, predictor_id, parameters, role_profiles):
         if isinstance(cfg, RecipeRidgeConfig):
             return compile_feature_plan(cfg.recipe, target=target, horizon_hours=horizon,
                                         origin_history_alignment=alignment).required_timestamp_offsets
+        if isinstance(cfg, DiurnalProfileEnsembleConfig):
+            # Sparse host-authored plan: the prompt window holds exactly these reads.
+            return compile_diurnal_profile_plan(target=target, horizon_hours=horizon,
+                                                origin_history_alignment=alignment).required_timestamp_offsets
         return tuple(-lag for lag in range(cfg.history_steps))
 
     for raw in programs:

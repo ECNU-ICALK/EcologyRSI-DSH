@@ -4,5 +4,5 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "ecologyrsi-dsh"
-version = "0.10.31"
+version = "0.10.33"
 source = { editable = "." }

@@ -719,6 +719,17 @@ def execute_next_formal_batch(
     )
 
 
+def _genome_owned_prediction_context(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy-mode semantics and label-safe residual evidence for the local editor."""
+    from ..evolution import genome_owned_prediction
+    if not genome_owned_prediction.enabled(metadata):
+        return {}
+    from ..science.residual_panel import METADATA_KEY, validated_panel
+    panel = validated_panel(metadata.get(METADATA_KEY))
+    return {"genome_owned_prediction": genome_owned_prediction.proposal_contract(),
+            **({"fit_partition_residual_panel": panel} if panel is not None else {})}
+
+
 def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRevision, batch: Any) -> LocalEditContext:
     genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
     # Use the same Host-owned registered target catalog exposed to the proposer.
@@ -810,6 +821,10 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         role = next(row for row in genome.agent_program["candidate_execution_program"]["role_profiles"]
                     if row["role"] == "sample-planner")
         targets["component_reset"] = tuple(key for key in RESETTABLE_ROLE_COMPONENTS if key in role)
+    from ..evolution import genome_owned_prediction
+    if genome_owned_prediction.enabled(state.task_manifest.metadata):
+        # A copied forecast changes only through the genome's executable output.
+        targets = genome_owned_prediction.restrict_targets(targets)
     raw_plan = state.proposal(candidate.proposal_id).metadata.get("derived_execution_plan")
     plan = DerivedExecutionPlan.from_dict(raw_plan) if isinstance(raw_plan, Mapping) else derive_execution_plan(None)
     base_policy = SampleExecutionPolicy.from_mapping(state.task_manifest.metadata.get("sample_execution_policy"))
@@ -1811,6 +1826,7 @@ def _local_edit_proposal(
         ),
         **({"prediction_formula_contract": formula}
            if (formula := prediction_formula_contract(state.task_manifest.metadata)) else {}),
+        **_genome_owned_prediction_context(state.task_manifest.metadata),
         **({"legal_strategy_program_grammar": strategy_program_grammar()} if advertised.get("strategy_program") else {}),
         **({"legal_skill_grammar": skill_grammar()} if advertised.get("skill_program") else {}),
         "recent_edit_history": _recent_local_edit_history(

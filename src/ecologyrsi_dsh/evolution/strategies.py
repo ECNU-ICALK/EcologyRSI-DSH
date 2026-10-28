@@ -36,6 +36,7 @@ from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ..evaluators.greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
     BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+    DIURNAL_PROFILE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     RECIPE_RIDGE_MODEL_ID,
@@ -99,6 +100,7 @@ from .genome import (
 from .agent_policy import build_agent_policy
 from . import joint_policy, novelty, program_preflight
 from . import exploration_policy, mechanisms
+from . import genome_owned_prediction
 from ..evaluators.strategy_program import strategy_program_grammar, seed_strategy_program
 from .interventions import apply_bounded_interventions, expert_directive_context
 from .parameter_activity import (
@@ -176,6 +178,19 @@ def _predictor_semantics(parent: EcologyEvolutionPluginGenome) -> dict[str, Any]
             residual_scale_authority="genome controls the default tool parameters; each sample Agent can override supported call parameters. Fitting ridge coefficients never optimizes these scales",
             variant_fit_parameter_count="at identical history and feature settings, changing residual scale layout does not add fitted ridge coefficients",
             numerical_formula="persistence + genome residual scale * independently fitted ridge residual",
+        )
+    if predictor_id == DIURNAL_PROFILE_MODEL_ID:
+        parameters = program["parameter_overrides"]
+        result.update(
+            fit_scope=("per target-horizon cell on training_fit: a free ridge over the host-authored diurnal-profile "
+                       "and mechanism terms, and a sum-to-one profile-anomaly regression without intercept"),
+            shared_hyperparameters=["ridge_alpha", "ensemble_weight"],
+            residual_scale_scope="one independent fit-selected-baseline residual scale per target and horizon",
+            residual_scale_values={k: v for k, v in parameters.items() if k.endswith("_residual_scale")},
+            fit_updates_residual_scales=False,
+            numerical_formula=("training-fit-selected baseline + residual scale * [w * free ridge residual + "
+                               "(1 - w) * constrained profile-anomaly residual], w = ensemble_weight"),
+            prediction_usage=prediction_usage(predictor_id, parameters),
         )
     if predictor_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID):
         result["numerical_formula"] = "training-fit-selected persistence/seasonal baseline + genome residual scale * ridge residual fitted against that same baseline"
@@ -1178,6 +1193,22 @@ class StrategyRouterDSHAdapter:
     # defined -- without it a recipe run divided by zero before proposing.
     _GREENHOUSE_RECIPE_RIDGE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {}
     _GREENHOUSE_RECIPE_RIDGE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = ({},)
+    # Expert prior: the read plan is host-authored, so only the blend, the free
+    # member's ridge strength and the nine per-cell scales are searchable.
+    _GREENHOUSE_DIURNAL_PROFILE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {
+        "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
+        "ensemble_weight": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        **{f"{target}_{horizon}h_residual_scale": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+           for target in ("air_temperature", "relative_humidity", "co2_concentration")
+           for horizon in (1, 6, 24)},
+    }
+    _GREENHOUSE_DIURNAL_PROFILE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = tuple(
+        {"ridge_alpha": alpha, "ensemble_weight": weight,
+         **{f"{target}_{horizon}h_residual_scale": 1.0
+            for target in ("air_temperature", "relative_humidity", "co2_concentration")
+            for horizon in (1, 6, 24)}}
+        for alpha, weight in ((0.5, 0.5), (0.1, 0.4), (1.0, 0.6), (0.5, 0.75))
+    )
     _TOY_SWEEP = (
         {"alpha": 0.20, "window": 3, "water_threshold": 0.35},
         {"alpha": 0.35, "window": 5, "water_threshold": 0.40},
@@ -3439,6 +3470,22 @@ class StrategyRouterDSHAdapter:
                     }
                 )
                 continue
+            if genome_owned_prediction.enabled(task.metadata):
+                inert = genome_owned_prediction.non_prediction_operations(mutation["operations"])
+                if inert:
+                    host_rejections.append(
+                        {
+                            "reason": "invalid_mutation_contract",
+                            "rejection_code": "mutation_has_no_effect",
+                            "validation_detail": (
+                                "genome-owned prediction: operations "
+                                f"{', '.join(inert)} cannot change a copied forecast; use only "
+                                f"{', '.join(sorted(genome_owned_prediction.PREDICTION_OPERATIONS))}"
+                            )[:500],
+                            "rejected_operations": deepcopy(mutation["operations"]),
+                        }
+                    )
+                    continue
             try:
                 validate_formula_profile(
                     resolve_candidate_agent_profile(proposed_child, current_program_registry()),
@@ -4223,7 +4270,7 @@ def _registered_mutation_targets(
         ):
             instruction_ids.append(instruction_id)
 
-    return {
+    targets = {
         "scientific_parameter": tuple(sorted(
             set(parameter_schemas)
         )),
@@ -4259,6 +4306,12 @@ def _registered_mutation_targets(
         "skill_program": (SKILL_POLICY_ID,),
         **({"strategy_program": (joint_policy.PROGRAM_POLICY,)} if joint_policy.enabled(task.metadata) else {}),
     }
+    if genome_owned_prediction.enabled(task.metadata):
+        # Only edits that change the genome's executable output can change a
+        # copied forecast. The same restricted set feeds research directions,
+        # the mechanism portfolio, proposal admission and replay.
+        return genome_owned_prediction.restrict_targets(targets)
+    return targets
 
 
 def _frozen_search_gate_context(task: TaskManifest) -> dict[str, Any] | None:
@@ -4331,6 +4384,11 @@ def _mutation_contract_catalog(
 ) -> dict[str, Any]:
     targets = _registered_mutation_targets(task, genome)
     registry = current_program_registry()
+    owned_prediction = genome_owned_prediction.enabled(task.metadata)
+    panel = None
+    if owned_prediction:
+        from ..science.residual_panel import METADATA_KEY as panel_key, validated_panel
+        panel = validated_panel(task.metadata.get(panel_key))
     sample_budget_class = task.metadata.get("sample_budget_class")
     if sample_budget_class not in {"diagnostic_smoke", "selection_eligible"}:
         sample_budget_class = None
@@ -4402,7 +4460,19 @@ def _mutation_contract_catalog(
             "baseline_only_choice": BASELINE_REFERENCE_PREDICTOR_ID,
             "instructions": "Research evolves the optional default model and Agent policy. Each sample Agent decides whether to use that model, invoke other registered tools with bounded parameters, combine evidence or predict directly. Evaluate the final Agent numbers; evaluator, data and gates remain fixed.",
             "predictor_options": _predictor_selection_options(task, genome),
-        }} if task.metadata.get("prediction_selection_policy") == RUNTIME_PREDICTION_POLICY else {}),
+        }} if task.metadata.get("prediction_selection_policy") == RUNTIME_PREDICTION_POLICY
+            and not owned_prediction else {}),
+        **({"prediction_selection": {
+            "owner": "candidate_genome", "current_usage": prediction_usage(
+                str(genome.scientific_program["predictor_ref"]["id"]), genome.scientific_program["parameter_overrides"]),
+            "current_candidate_tool": genome_owned_prediction.candidate_tool_id(current_profile),
+            "instructions": (
+                "Every forecast is the exact output of this candidate's own tool. Research evolves that "
+                "tool: the bound model's nine per-cell residual scales and the strategy program. "
+                "Evaluator, data and gates remain fixed."
+            ),
+        }, "genome_owned_prediction": genome_owned_prediction.proposal_contract(),
+            **({"fit_partition_residual_panel": panel} if panel is not None else {})} if owned_prediction else {}),
         "mutation_axis_effects": axis_contract["mutation_axis_effects"],
         "evaluation_evidence_contract": {
             "schema_version": "ecologyrsi-dsh.evaluation-evidence-contract/1",
@@ -4449,14 +4519,15 @@ def _mutation_contract_catalog(
                     "instruction_templates", instruction_id
                 )["skill_name"],
             }
-            for instruction_id in targets["instruction_profile"]
+            for instruction_id in targets.get("instruction_profile", ())
         ],
         # The clause whitelist an authored directive has to satisfy. Published
         # alongside the template list because the two are alternatives for the
         # same slot: a proposer choosing between selecting and authoring needs
         # to see both, and one that authors without the grammar can only guess
         # at the enumerations its text will be rejected against.
-        "directive_grammar": _directive_authoring_contract(genome, metadata=task.metadata),
+        **({"directive_grammar": _directive_authoring_contract(genome, metadata=task.metadata)}
+           if "instruction_directive" in targets or not owned_prediction else {}),
         **({"prediction_formula_contract": formula}
            if (formula := prediction_formula_contract(task.metadata)) else {}),
         **({"strategy_program_grammar": strategy_program_grammar()} if joint_policy.enabled(task.metadata) else {}),
@@ -5064,6 +5135,9 @@ def _task_parameter_space(
     )
     if predictor_id == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID:
         return ("greenhouse_baseline_aligned_cellwise_ridge", StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SCHEMAS, StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SWEEP)
+    if predictor_id == DIURNAL_PROFILE_MODEL_ID:
+        return ("greenhouse_diurnal_profile_ensemble", StrategyRouterDSHAdapter._GREENHOUSE_DIURNAL_PROFILE_SCHEMAS,
+                StrategyRouterDSHAdapter._GREENHOUSE_DIURNAL_PROFILE_SWEEP)
     if predictor_id == BASELINE_ALIGNED_RIDGE_MODEL_ID:
         return ("greenhouse_baseline_aligned_ridge", StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SCHEMAS, StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SWEEP)
     if predictor_id == EXOGENOUS_RIDGE_MODEL_ID:

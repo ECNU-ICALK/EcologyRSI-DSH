@@ -159,9 +159,11 @@ class FrozenIdentityBaselineTests(unittest.TestCase):
         catalog = current.to_dict()
         legacy = tuple(SeedGenomeTemplate.from_dict(item) for item in catalog["seed_templates"]
                        if item["template_id"].endswith("@1")
-                       and item["template_id"] != "greenhouse-baseline-aligned-cellwise-default@1")
+                       and item["template_id"] not in {"greenhouse-baseline-aligned-cellwise-default@1",
+                                                       "greenhouse-diurnal-profile-expert@1"})
         historical_programs = catalog["programs"]
         historical_programs["predictors"].pop("greenhouse-baseline-aligned-ridge@2")
+        historical_programs["predictors"].pop("greenhouse-diurnal-profile-ensemble@1")
         historical = ProgramRegistrySnapshot.from_programs(historical_programs, seed_templates=legacy)
         self.assertEqual(historical.catalog_digest, PROGRAM_CATALOG_DIGEST)
         self.assertNotEqual(current.catalog_digest, PROGRAM_CATALOG_DIGEST)

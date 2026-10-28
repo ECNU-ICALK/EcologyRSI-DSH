@@ -92,6 +92,7 @@ _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _EVALUATOR_VERSIONS = {
     "greenhouse_multihorizon_time_forward@4": "greenhouse-runtime-model-selection-forward/1",
     "greenhouse_multihorizon_time_forward@5": "greenhouse-cellwise-aligned-forward/1",
+    "greenhouse_multihorizon_time_forward@6": "greenhouse-cellwise-aligned-forward/1",
     "toy_time_forward@1": "toy-time-forward/3",
     "greenhouse_time_forward@1": "greenhouse-time-forward/5",
     "greenhouse_multihorizon_time_forward@1": (

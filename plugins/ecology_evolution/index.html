@@ -105,6 +105,7 @@
                   <label hidden><span>独立评测器</span><select id="evaluator-id"></select><small id="evaluator-help">由系统依据数据和模型输出自动绑定。</small></label>
                 </div>
                 <label><span>新运行的搜索方式</span><select id="targeted-search-policy" name="targeted_search_policy" aria-describedby="targeted-search-help"><option value="">标准搜索</option><option value="cellwise_training_evidence@1">逐目标、逐时距改进</option></select><small id="targeted-search-help">标准搜索生成联合候选；逐目标、逐时距方式按训练证据选择局部因素，并启用工具预测与最终预测的差异诊断。两种方式均保留 10／25／50 时点比较和科学门槛。此选择只在创建新运行时冻结，不会改变已有运行。</small></label>
+                <label><span>新运行的初始模型</span><select id="seed-prior-policy" name="seed_prior_policy" aria-describedby="seed-prior-help"><option value="">基线锚点（残差全为 0）</option><option value="expert_diurnal_profile@1">专家先验：昼夜廓线-机理集成</option></select><small id="seed-prior-help">专家先验以离线研究得到的昼夜廓线-机理集成预测器作为第 0 代在任者，后续候选必须在相同的冻结评分与逐格门槛下超过它；仅适用于黄瓜 2018 数据且需选择“逐目标、逐时距改进”。此选择只在创建新运行时冻结。</small></label>
                 <div id="data-partition-summary" class="dataset-task-summary" aria-live="polite"></div>
                 <input id="autonomous-mode" name="autonomous_mode" type="hidden" value="true">
                 <input id="research-domain-id" name="research_domain_id" type="hidden" value="">
@@ -334,7 +335,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.10.31 · 本地研究版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.10.33 · 本地研究版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

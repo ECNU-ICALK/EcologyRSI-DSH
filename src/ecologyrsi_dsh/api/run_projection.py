@@ -58,7 +58,7 @@ def build_frozen_feature_policies(task: Any) -> dict[str, object]:
         "candidate_executability_policy", "candidate_exploration_policy", "mutation_effect_scope_policy",
         "execution_outcome_policy", "local_edit_memory_policy", "adaptive_tool_feedback_policy",
         "comparison_retrieval_policy", "prediction_formula_policy", "candidate_attribution_policy",
-        "inference_repeatability_policy")}
+        "inference_repeatability_policy", "prediction_ownership_policy", "seed_prior_policy")}
 
 
 def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[str, object]:

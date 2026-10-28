@@ -1206,6 +1206,11 @@ class GreenhouseEvaluationTests(unittest.TestCase):
                 "greenhouse-cellwise-aligned-forward/1",
                 "greenhouse-runtime-model-selection-forward/1",
             ),
+            # Same cellwise scoring as @5; a separate id admits the expert predictor.
+            "greenhouse_multihorizon_time_forward@6": (
+                "greenhouse-cellwise-aligned-forward/1",
+                "greenhouse-runtime-model-selection-forward/1",
+            ),
             "greenhouse_recipe_multihorizon_forward@1": (
                 "greenhouse-recipe-multihorizon-forward/1",
                 "greenhouse-baseline-aligned-multihorizon-forward/1",

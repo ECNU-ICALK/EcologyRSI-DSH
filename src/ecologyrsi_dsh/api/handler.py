@@ -19,6 +19,8 @@ from ..core.prediction_policy import (
     RUNTIME_PREDICTION_POLICY,
     RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, TARGETED_SEARCH_POLICY, CONTRIBUTION_POLICY,
     BASELINE_REFERENCE_PREDICTOR_ID,
+    CELLWISE_EVALUATOR_IDS, DIURNAL_PROFILE_PREDICTOR_ID, EXPERT_CELLWISE_EVALUATOR_ID,
+    EXPERT_SEED_PRIOR_POLICY, SEED_PRIOR_POLICY_KEY,
 )
 from ..knowledge.retrieval_policy import DEFAULT_RETRIEVAL_POLICY, validate_retrieval_policy
 
@@ -261,6 +263,7 @@ _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
     "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@3",
     "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@3",
     "greenhouse-baseline-aligned-ridge@2": "greenhouse-baseline-aligned-cellwise-default@3",
+    DIURNAL_PROFILE_PREDICTOR_ID: "greenhouse-diurnal-profile-expert@3",
     "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@3",
     "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@3",
     "toy-rolling-water@1": "toy-default@3",
@@ -1957,7 +1960,7 @@ class EvolutionRequestHandler(
             metadata = dict(raw.get("metadata", {}))
             for name in ("execution_protocol", "prediction_selection_policy", "targeted_search_policy", "prediction_model_id",
                          "evaluator_id", "seed_genome_template_id", CANDIDATE_NOVELTY_POLICY_KEY,
-                         "knowledge_online_enabled", "retrieval_policy"):
+                         "knowledge_online_enabled", "retrieval_policy", SEED_PRIOR_POLICY_KEY):
                 value = self._request_binding(body, name)
                 if name in body or name in metadata:
                     metadata[name] = value
@@ -2327,6 +2330,7 @@ class EvolutionRequestHandler(
             **({"targeted_search_policy": body["targeted_search_policy"]} if body.get("targeted_search_policy") else {}),
             **({CANDIDATE_NOVELTY_POLICY_KEY: body[CANDIDATE_NOVELTY_POLICY_KEY]}
                if CANDIDATE_NOVELTY_POLICY_KEY in body else {}),
+            **({SEED_PRIOR_POLICY_KEY: body[SEED_PRIOR_POLICY_KEY]} if body.get(SEED_PRIOR_POLICY_KEY) else {}),
             "prediction_model_id": body.get("prediction_model_id"),
             "evaluator_id": body.get("evaluator_id"),
             "seed_genome_template_id": body.get("seed_genome_template_id"),
@@ -2665,6 +2669,29 @@ class EvolutionRequestHandler(
             metadata = freeze_comparison_retrieval_metadata(metadata)
             metadata["prediction_formula_policy"] = "evidence-mean-or-model@1"
             metadata[attribution_key] = attribution_policy
+            from ..evolution import genome_owned_prediction as ownership
+            from ..science.residual_panel import METADATA_KEY as panel_key, fit_partition_residual_panel
+            # New runs: the candidate genome owns every forecast; sample Agents
+            # copy its exact output. Replayed manifests keep their own policy.
+            metadata[ownership.POLICY_KEY] = ownership.POLICY
+            metadata.pop(panel_key, None)
+            try:
+                panel_view = self.server.datasets.selection_view(
+                    dataset_id,
+                    str(metadata.get("episode_id")) if metadata.get("episode_id") is not None else None,
+                    expected_dataset_digest=metadata.get("dataset_digest"),
+                    expected_split_manifest_digest=metadata.get("split_manifest_digest"),
+                )
+                metadata[panel_key] = fit_partition_residual_panel(
+                    panel_view,
+                    candidate_model_id=(DIURNAL_PROFILE_PREDICTOR_ID
+                                        if metadata.get(SEED_PRIOR_POLICY_KEY) == EXPERT_SEED_PRIOR_POLICY
+                                        else None),
+                )
+            except (AttributeError, KeyError, TypeError, ValueError):
+                # Advisory search evidence only. A view without enough complete
+                # fit history (or a stub view) must not block run creation.
+                metadata[panel_key] = None
         elif metadata.get(EXECUTION_OUTCOME_POLICY_KEY) is not None:
             raise ValueError("execution outcome policy requires a native autonomous greenhouse run")
         elif metadata.get(exploration_policy.POLICY_KEY) is not None:
@@ -2678,6 +2705,16 @@ class EvolutionRequestHandler(
         targeted_policy = metadata.get("targeted_search_policy")
         if targeted_policy not in (None, TARGETED_SEARCH_POLICY):
             raise ValueError("unsupported targeted_search_policy")
+        seed_prior = metadata.get(SEED_PRIOR_POLICY_KEY)
+        if seed_prior is None:
+            metadata.pop(SEED_PRIOR_POLICY_KEY, None)
+        elif seed_prior != EXPERT_SEED_PRIOR_POLICY:
+            raise ValueError("unsupported seed_prior_policy")
+        elif not (native_protocol and autonomous_mode and targeted_policy
+                  and dataset_id == "agc_cucumber_2018"):
+            raise ValueError(
+                "the expert seed prior requires a native autonomous targeted run on agc_cucumber_2018"
+            )
         if targeted_policy:
             if not native_protocol or not autonomous_mode or dataset_id == TOY_DATASET_ID:
                 raise ValueError("targeted search requires a native autonomous greenhouse run")
@@ -2695,9 +2732,18 @@ class EvolutionRequestHandler(
             if any(metadata.get(key) for key in ("prediction_model_id", "evaluator_id", "seed_genome_template_id")):
                 raise ValueError("runtime predictor selection does not accept a preselected predictor, evaluator or seed template")
             metadata["prediction_selection_policy"] = RUNTIME_PREDICTION_POLICY
-            # This is a no-residual comparison anchor, not a user's chosen model.
-            metadata["prediction_model_id"] = ("greenhouse-baseline-aligned-ridge@2" if targeted_policy else BASELINE_REFERENCE_PREDICTOR_ID)
-            metadata["evaluator_id"] = (CELLWISE_EVALUATOR_ID if targeted_policy else dataset_adapter(dataset_id).evaluator_id)
+            if seed_prior == EXPERT_SEED_PRIOR_POLICY:
+                # Opt-in: the research-derived expert predictor is the gen-0
+                # incumbent, and every challenger must beat it under the same
+                # frozen cellwise gates (v6 scores exactly like v5).
+                metadata["prediction_model_id"] = DIURNAL_PROFILE_PREDICTOR_ID
+                metadata["evaluator_id"] = EXPERT_CELLWISE_EVALUATOR_ID
+            else:
+                # This is a no-residual comparison anchor, not a user's chosen model.
+                metadata["prediction_model_id"] = ("greenhouse-baseline-aligned-ridge@2" if targeted_policy else BASELINE_REFERENCE_PREDICTOR_ID)
+                metadata["evaluator_id"] = (CELLWISE_EVALUATOR_ID if targeted_policy else dataset_adapter(dataset_id).evaluator_id)
+        elif seed_prior is not None:
+            raise ValueError("the expert seed prior is installed by runtime predictor selection")
         prediction_model_id = str(
             metadata.get("prediction_model_id")
             or self.server.evaluators.default_predictor(dataset_id)
@@ -2712,13 +2758,13 @@ class EvolutionRequestHandler(
         if (
             native_protocol
             and dataset_id != TOY_DATASET_ID
-            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
+            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, EXPERT_CELLWISE_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
         ):
             raise ValueError(
                 "DSH-native greenhouse runs require "
                 f"a registered multi-horizon evaluator ({RUNTIME_EVALUATOR_ID} for runtime model choice)"
             )
-        if targeted_policy and evaluator_id != CELLWISE_EVALUATOR_ID:
+        if targeted_policy and evaluator_id not in CELLWISE_EVALUATOR_IDS:
             raise ValueError("targeted search requires the versioned cellwise evaluator")
         strategy_model_id = str(
             metadata.get("strategy_model_id")
@@ -2923,7 +2969,8 @@ class EvolutionRequestHandler(
             supplied = metadata.get(field)
             if supplied is not None and supplied != computed:
                 raise ValueError(f"任务清单中的{label}校验值与服务端配置不一致")
-        if prediction_model_id in ("greenhouse-baseline-aligned-ridge@1", "greenhouse-baseline-aligned-ridge@2"):
+        if prediction_model_id in ("greenhouse-baseline-aligned-ridge@1", "greenhouse-baseline-aligned-ridge@2",
+                                   DIURNAL_PROFILE_PREDICTOR_ID):
             metadata.setdefault("search_guard_policy", SEARCH_GUARD_POLICY)
         if native_protocol:
             from ..core.model_execution_policy import (

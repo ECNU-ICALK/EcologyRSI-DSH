@@ -24,7 +24,12 @@ _CONFIGS = {
     'greenhouse-targetwise-ridge@1': ridge.TargetwiseExogenousRidgeConfig,
     'greenhouse-horizon-targetwise-ridge@1': ridge.HorizonTargetwiseExogenousRidgeConfig,
     'greenhouse-recipe-ridge@1': ridge.RecipeRidgeConfig,
+    ridge.DIURNAL_PROFILE_MODEL_ID: ridge.DiurnalProfileEnsembleConfig,
 }
+# Tools advertised to sample Agents only when they are the candidate's own
+# bound model. Listing them unconditionally would change the registered tool
+# contract every exported policy bundle was frozen against.
+_DEFAULT_ONLY_TOOLS = frozenset({ridge.BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID, ridge.DIURNAL_PROFILE_MODEL_ID})
 _FIT_WORKERS = BoundedSemaphore(2)
 # Residual scaling is applied after the fit, so it must not fragment the fit
 # cache. The scalar path pins every ``*residual_scale*`` field to this value;
@@ -38,6 +43,8 @@ def _defaults(config_type, horizons=(1, 6, 24)):
         # default never depends on a column this ecology may not have. Exogenous
         # terms are the Agent's (or the adapter's) explicit choice.
         return ridge.seed_recipe_parameters(horizons=horizons)
+    if config_type is ridge.DiurnalProfileEnsembleConfig:
+        return config_type.defaults().to_dict()
     values = {'history_steps': 6, 'ridge_alpha': 0.1}
     values.update({name: _FIT_IDENTITY_RESIDUAL_SCALE for name in config_type.__dataclass_fields__
                    if 'residual_scale' in name and not name.startswith('_')})
@@ -121,7 +128,7 @@ class AgentModelTools:
     def catalog(self):
         entries = []
         for name, config in _CONFIGS.items():
-            if name == ridge.BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID and name != self._default_tool_id:
+            if name in _DEFAULT_ONLY_TOOLS and name != self._default_tool_id:
                 continue
             candidate_default = name == self._default_tool_id
             purpose_suffix = (
@@ -223,6 +230,15 @@ class AgentModelTools:
         cohort could not serve, which then failed one origin at a time instead
         of once, legibly, at the call the Agent made.
         """
+        alignment = (ridge.COHORT_HISTORY_HOURS if self.origin_history_alignment is None
+                     else self.origin_history_alignment)
+        if isinstance(config, ridge.DiurnalProfileEnsembleConfig):
+            key = (ridge.DIURNAL_PROFILE_MODEL_ID, target, horizon_hours)
+            if key not in self._plans:
+                self._plans[key] = ridge.compile_diurnal_profile_plan(
+                    target=target, horizon_hours=horizon_hours, series=self.series,
+                    allowed_roles=ridge._ALLOWED_EXOGENOUS_ROLES, origin_history_alignment=alignment)
+            return self._plans[key]
         if not isinstance(config, ridge.RecipeRidgeConfig):
             return None
         key = (config.recipe.digest, target, horizon_hours)

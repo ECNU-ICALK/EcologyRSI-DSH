@@ -76,6 +76,24 @@ _REGISTERED_PIPELINES: dict[str, dict[str, Any]] = {
             ("host.postprocess.physical-bounds@1", "postprocess", ()),
         ),
     },
+    "greenhouse-diurnal-profile-ensemble@1": {
+        "pipeline_version": "greenhouse-diurnal-profile-ensemble-operator-graph/1",
+        "parameter_names": ("ridge_alpha", "ensemble_weight", *tuple(
+            f"{t}_{h}h_residual_scale" for t in ("air_temperature", "relative_humidity", "co2_concentration")
+            for h in (1, 6, 24))),
+        "operators": (
+            ("host.feature.compiled-diurnal-profile-plan@1", "feature", ()),
+            ("host.fit.partition-selected-baseline@1", "fit", ()),
+            ("host.fit.partition-statistics@1", "fit", ()),
+            ("host.fit.baseline-aligned-closed-form-ridge@1", "fit", ("ridge_alpha",)),
+            ("host.fit.sum-to-one-profile-anomaly@1", "fit", ()),
+            ("host.fit.member-ensemble@1", "fit", ("ensemble_weight",)),
+            ("host.predictor.fit-selected-baseline-cellwise-residual@1", "predict", tuple(
+                f"{t}_{h}h_residual_scale" for t in ("air_temperature", "relative_humidity", "co2_concentration")
+                for h in (1, 6, 24))),
+            ("host.postprocess.physical-bounds@1", "postprocess", ()),
+        ),
+    },
     "greenhouse-baseline-aligned-ridge@1": {
         "pipeline_version": "greenhouse-baseline-aligned-ridge-operator-graph/1",
         "parameter_names": ("history_steps", "ridge_alpha",

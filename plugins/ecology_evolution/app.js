@@ -216,6 +216,7 @@
         sample_concurrency: Number(form.get("sample_concurrency")),
         max_candidates: Number(form.get("max_candidates")),
         targeted_search_policy: form.get("targeted_search_policy") || "",
+        seed_prior_policy: form.get("seed_prior_policy") || "",
         fixed_seed: form.get("fixed_seed") === "on", knowledge_online_enabled: form.get("knowledge_online_enabled") === "on"
       });
     });

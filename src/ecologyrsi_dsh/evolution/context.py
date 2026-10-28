@@ -82,6 +82,13 @@ _PARAMETER_SEMANTICS: dict[str, dict[str, str]] = {
         **{f"{t}_{h}h_residual_scale": f"Residual correction for {t} at {h}h only; zero selects the training-fit-selected persistence or seasonal baseline."
            for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)},
     },
+    "greenhouse_diurnal_profile_ensemble": {
+        "ridge_alpha": "L2 strength of the free ridge member over the host-authored diurnal-profile and mechanism terms; fitted on training_fit only.",
+        "ensemble_weight": ("Weight w of the free ridge member; the sum-to-one profile-anomaly member gets 1 - w. "
+                            "Lower w keeps the current level (less pull toward the training-period mean)."),
+        **{f"{t}_{h}h_residual_scale": f"Residual scale for {t} at {h}h only; zero restores the training-fit-selected baseline in this cell, one is the full ensemble."
+           for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)},
+    },
     "greenhouse_baseline_aligned_ridge": {
         "history_steps": "Number of prior hourly feature steps supplied to the causal ridge model.",
         "ridge_alpha": "L2 ridge regularization strength; learned coefficients use training_fit only.",

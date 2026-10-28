@@ -56,6 +56,8 @@ from .greenhouse_prediction import (
     BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
     BaselineAlignedRidgeConfig,
     BaselineAlignedCellwiseRidgeConfig,
+    DIURNAL_PROFILE_MODEL_ID,
+    DiurnalProfileEnsembleConfig,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
@@ -1379,6 +1381,9 @@ class EvaluationPipeline:
                 operation_max_tokens=task.metadata.get(
                     "sample_operation_max_tokens"
                 ),
+                prediction_ownership_policy=task.metadata.get(
+                    "prediction_ownership_policy"
+                ),
             )
             return CollaborativeSampleExecutor(
                 adapter,
@@ -1732,6 +1737,7 @@ class EvaluationPipeline:
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             RECIPE_RIDGE_MODEL_ID,
+            DIURNAL_PROFILE_MODEL_ID,
         }:
             horizons = tuple(next(item for item in self.catalog(dataset_id)
                                   if item["id"] == evaluator_id)["horizons_hours"])
@@ -3025,6 +3031,8 @@ class EvaluationPipeline:
         parameters = (
             BaselineAlignedCellwiseRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
+            else DiurnalProfileEnsembleConfig.from_mapping(proposal.changes)
+            if predictor_model_id == DIURNAL_PROFILE_MODEL_ID
             else BaselineAlignedRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
             else RecipeRidgeConfig.from_mapping(proposal.changes)
@@ -3738,7 +3746,8 @@ class EvaluationPipeline:
                 **({
                     "baseline_history_source_partitions": ["training_fit", "training_feedback"],
                     "baseline_reference_cutoff": "forecast_origin",
-                } if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID) else {}),
+                } if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+                                            DIURNAL_PROFILE_MODEL_ID) else {}),
                 "minimum_history_steps": MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
                 "embargo_rows_visible": False,
                 **(
@@ -3829,7 +3838,8 @@ class EvaluationPipeline:
                     "runtime_contract": {key: task.metadata.get(key) for key in ("strategy_model_id", "review_model_id", "preset_content_digest", "standing_tool_surface_digest", "resolved_policy_route_config_digest", "resolved_review_route_config_digest")}}
                    if agent_model_tools is not None else {}),
                 **({"baseline_profile": prediction["baseline_profile"]}
-                   if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID) else {}),
+                   if predictor_model_id in (BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+                                             DIURNAL_PROFILE_MODEL_ID) else {}),
             },
             metrics=training_metrics,
         )

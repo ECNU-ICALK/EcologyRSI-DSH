@@ -2347,6 +2347,11 @@
       : policy ? "未识别的冻结搜索策略：" + policy : "标准搜索（未启用逐目标、逐时距改进）";
   }
 
+  function seedPriorLabel(policy) {
+    return policy === "expert_diurnal_profile@1" ? "专家先验：昼夜廓线-机理集成"
+      : policy ? "未识别的冻结初始模型：" + policy : "基线锚点（残差全为 0）";
+  }
+
   function frozenRunFeatureRows(run) {
     // Use this run's frozen configuration, never the current creation form or
     // the presence of newer server code/diagnostic output.
@@ -2359,6 +2364,7 @@
     var contribution = run && run.evolution_funnel && run.evolution_funnel.prediction_contribution;
     return [
       ["冻结搜索方式", searchModeLabel(configuration.targeted_search_policy)],
+      ["初始模型", seedPriorLabel(configuration.seed_prior_policy)],
       ["预测贡献诊断", ["prediction_contribution@1", "prediction_contribution@2", "prediction_contribution@3"].indexOf(diagnostics) >= 0
         ? "已启用" + (contribution && contribution.latest_training_summary ? "，已有训练证据" : "，等待训练证据")
         : diagnostics ? "未识别的冻结策略：" + diagnostics : "未启用（冻结合同未记录）"],

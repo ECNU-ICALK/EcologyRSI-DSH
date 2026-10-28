@@ -34,6 +34,14 @@ HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = (
 )
 RECIPE_RIDGE_MODEL_ID = "greenhouse-recipe-ridge@1"
 from ..evolution.mutation_specs import RECIPE_FEATURE_POLICY_ID
+from .diurnal_profile import (
+    DIURNAL_PROFILE_MODEL_ID,
+    DIURNAL_PROFILE_PLAN_VERSION,
+    compile_diurnal_profile_plan,
+    ensemble_standardized_coefficients,
+    lag_name as _diurnal_lag_name,
+    profile_name as _diurnal_profile_name,
+)
 
 _RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-exogenous-ridge-result/1"
 _TARGETWISE_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-targetwise-ridge-result/1"
@@ -41,6 +49,7 @@ _HORIZON_TARGETWISE_RESULT_SCHEMA = (
     "ecologyrsi-dsh.greenhouse-horizon-targetwise-ridge-result/1"
 )
 _RECIPE_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-recipe-ridge-result/1"
+_DIURNAL_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-diurnal-profile-ensemble-result/1"
 _ALLOWED_EXOGENOUS_ROLES = frozenset(
     {"environment", "outside_weather", "action", "crop", "root_zone", "resource"}
 )
@@ -457,18 +466,102 @@ class RecipeRidgeConfig:
         return self.recipe.residual_scale_for(target, horizon_hours)
 
 
+@dataclass(frozen=True, slots=True)
+class DiurnalProfileEnsembleConfig:
+    """Expert prior: diurnal-profile + mechanism ensemble, nine per-cell scales.
+
+    The read plan is host-authored (see ``diurnal_profile``), so the only
+    tunables are the free member's ridge strength, the blend weight between
+    the free and the sum-to-one constrained member, and one residual scale per
+    target-horizon cell around the fit-selected baseline (0 restores the
+    baseline in that cell exactly; 1 is the full model).
+    """
+
+    ridge_alpha: float
+    ensemble_weight: float
+    air_temperature_1h_residual_scale: float
+    air_temperature_6h_residual_scale: float
+    air_temperature_24h_residual_scale: float
+    relative_humidity_1h_residual_scale: float
+    relative_humidity_6h_residual_scale: float
+    relative_humidity_24h_residual_scale: float
+    co2_concentration_1h_residual_scale: float
+    co2_concentration_6h_residual_scale: float
+    co2_concentration_24h_residual_scale: float
+
+    _SCALE_FIELDS: ClassVar[dict[tuple[str, int], str]] = {
+        (target, horizon): f"{target}_{horizon}h_residual_scale"
+        for target in ("air_temperature", "relative_humidity", "co2_concentration")
+        for horizon in (1, 6, 24)
+    }
+    DEFAULTS: ClassVar[dict[str, float]] = {
+        "ridge_alpha": 0.5,
+        "ensemble_weight": 0.5,
+        **{f"{target}_{horizon}h_residual_scale": 1.0
+           for target in ("air_temperature", "relative_humidity", "co2_concentration")
+           for horizon in (1, 6, 24)},
+    }
+
+    def __post_init__(self) -> None:
+        _bounded_number("ridge_alpha", self.ridge_alpha, 1e-4, 1.0)
+        _bounded_number("ensemble_weight", self.ensemble_weight, 0.0, 1.0)
+        for name in self._SCALE_FIELDS.values():
+            _bounded_number(name, getattr(self, name), 0.0, 1.0)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "DiurnalProfileEnsembleConfig":
+        if not isinstance(value, Mapping):
+            raise TypeError("diurnal profile parameters must be an object")
+        required = set(cls.DEFAULTS)
+        missing = required.difference(value)
+        unknown = set(value).difference(required)
+        if missing or unknown:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(sorted(missing)))
+            if unknown:
+                details.append("unsupported " + ", ".join(sorted(unknown)))
+            raise ValueError("diurnal profile parameters are invalid: " + "; ".join(details))
+        return cls(**{name: value[name] for name in cls.DEFAULTS})
+
+    @classmethod
+    def defaults(cls) -> "DiurnalProfileEnsembleConfig":
+        return cls.from_mapping(cls.DEFAULTS)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {name: float(getattr(self, name)) for name in self.DEFAULTS}
+
+    @property
+    def history_steps(self) -> int:
+        """The cohort alignment the plan needs: reach 47 h, so 48 observations."""
+
+        return COHORT_HISTORY_HOURS
+
+    def residual_scale_for(self, target: str, horizon_hours: int) -> float:
+        try:
+            name = self._SCALE_FIELDS[(target, horizon_hours)]
+        except KeyError:
+            raise ValueError(
+                f"diurnal profile target-horizon is not registered: {target}@{horizon_hours}h"
+            ) from None
+        return float(getattr(self, name))
+
+
 _RIDGE_CONFIG_TYPES = (
     ExogenousRidgeConfig,
     TargetwiseExogenousRidgeConfig,
     HorizonTargetwiseExogenousRidgeConfig,
     RecipeRidgeConfig,
+    DiurnalProfileEnsembleConfig,
 )
 RidgeConfig = (
     ExogenousRidgeConfig
     | TargetwiseExogenousRidgeConfig
     | HorizonTargetwiseExogenousRidgeConfig
     | RecipeRidgeConfig
+    | DiurnalProfileEnsembleConfig
 )
+_PLAN_CONFIG_TYPES = (RecipeRidgeConfig, DiurnalProfileEnsembleConfig)
 
 
 def _uses_selected_baseline(config: RidgeConfig) -> bool:
@@ -476,7 +569,8 @@ def _uses_selected_baseline(config: RidgeConfig) -> bool:
 
     if isinstance(config, RecipeRidgeConfig):
         return config.anchor == "fit_selected_baseline"
-    return isinstance(config, (BaselineAlignedRidgeConfig, BaselineAlignedCellwiseRidgeConfig))
+    return isinstance(config, (BaselineAlignedRidgeConfig, BaselineAlignedCellwiseRidgeConfig,
+                               DiurnalProfileEnsembleConfig))
 
 
 def _predictor_model_id(config: RidgeConfig) -> str:
@@ -484,6 +578,8 @@ def _predictor_model_id(config: RidgeConfig) -> str:
         return BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
     if isinstance(config, RecipeRidgeConfig):
         return RECIPE_RIDGE_MODEL_ID
+    if isinstance(config, DiurnalProfileEnsembleConfig):
+        return DIURNAL_PROFILE_MODEL_ID
     if isinstance(config, BaselineAlignedRidgeConfig):
         return BASELINE_ALIGNED_RIDGE_MODEL_ID
     if isinstance(config, HorizonTargetwiseExogenousRidgeConfig):
@@ -502,6 +598,14 @@ def _fit_parameters_digest(config: RidgeConfig) -> str:
                 "feature_recipe_features": [dict(term) for term in config.recipe.features],
                 "ridge_alpha": config.ridge_alpha,
                 "anchor": config.anchor,
+            }
+        )
+    if isinstance(config, DiurnalProfileEnsembleConfig):
+        return _digest(
+            {
+                "plan_version": DIURNAL_PROFILE_PLAN_VERSION,
+                "ridge_alpha": float(config.ridge_alpha),
+                "ensemble_weight": float(config.ensemble_weight),
             }
         )
     return _digest(
@@ -530,6 +634,19 @@ def _feature_policy(
         "label_imputation": False,
         "baseline_imputation": False,
     }
+    if isinstance(config, DiurnalProfileEnsembleConfig):
+        policy.update(
+            {
+                "policy_id": "host_diurnal_profile_mechanisms@1",
+                "plan_version": DIURNAL_PROFILE_PLAN_VERSION,
+                "cohort_history_hours": COHORT_HISTORY_HOURS,
+                "feature_plans": [
+                    plans[key].summary()
+                    for key in sorted(plans, key=lambda item: (item[0], item[1]))
+                ],
+            }
+        )
+        return policy
     if not isinstance(config, RecipeRidgeConfig):
         return policy
     policy.update(
@@ -776,6 +893,16 @@ def fit_predict_exogenous_ridge(
                     allowed_roles=_ALLOWED_EXOGENOUS_ROLES,
                     origin_history_alignment=COHORT_HISTORY_HOURS,
                 )
+    elif isinstance(resolved_config, DiurnalProfileEnsembleConfig):
+        for target in resolved_targets:
+            for horizon in resolved_horizons:
+                recipe_plans[(target, horizon)] = compile_diurnal_profile_plan(
+                    target=target,
+                    horizon_hours=horizon,
+                    series=series,
+                    allowed_roles=_ALLOWED_EXOGENOUS_ROLES,
+                    origin_history_alignment=COHORT_HISTORY_HOURS,
+                )
     baseline_profile = (
         fit_baseline_profile(
             series, targets=resolved_targets, horizons=resolved_horizons
@@ -931,6 +1058,8 @@ def fit_predict_exogenous_ridge(
         "schema_version": (
             _RECIPE_RESULT_SCHEMA
             if model_id == RECIPE_RIDGE_MODEL_ID
+            else _DIURNAL_RESULT_SCHEMA
+            if model_id == DIURNAL_PROFILE_MODEL_ID
             else "ecologyrsi-dsh.greenhouse-baseline-aligned-ridge-result/1"
             if model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
             else _HORIZON_TARGETWISE_RESULT_SCHEMA
@@ -1168,6 +1297,11 @@ def _fit_model(
         coefficients = _ridge_coefficients(
             normalized_rows, residuals, float(config.ridge_alpha), check_control=check_control,
         )
+        ensemble_audit: dict[str, Any] | None = None
+        if isinstance(config, DiurnalProfileEnsembleConfig):
+            coefficients, ensemble_audit = _diurnal_ensemble(
+                plan, samples, raw_rows, residuals, statistics, coefficients, config,
+            )
         if not all(math.isfinite(value) for value in coefficients):
             raise ArithmeticError("ridge coefficients are not finite")
         status = "fitted"
@@ -1177,6 +1311,7 @@ def _fit_model(
         statistics = []
         status = "fallback_zero_residual"
         fallback_reason = "numerical_fit_failure"
+        ensemble_audit = None
 
     model = _model_metadata(
         target,
@@ -1187,7 +1322,50 @@ def _fit_model(
         statistics,
         coefficients,
     )
+    if ensemble_audit is not None:
+        model["diurnal_profile_ensemble"] = ensemble_audit
     return model, coefficients, tuple(statistics)
+
+
+def _diurnal_ensemble(
+    plan: FeaturePlan | None,
+    samples: Sequence[_BaseSample],
+    raw_rows: Sequence[Sequence[float]],
+    residuals: Sequence[float],
+    statistics: Sequence[_FeatureStatistic],
+    free_coefficients: Sequence[float],
+    config: DiurnalProfileEnsembleConfig,
+) -> tuple[tuple[float, ...], dict[str, Any]]:
+    """Blend the free ridge with the sum-to-one member against the cell's baseline."""
+
+    if plan is None:
+        raise ValueError("diurnal profile fit requires its compiled plan")
+    resolved = {
+        (sample.baseline_reference or {}).get("baseline_id", "persistence") for sample in samples
+    }
+    if len(resolved) != 1:
+        raise ValueError("diurnal profile cell mixes baseline anchors")
+    baseline_id = next(iter(resolved))
+    if baseline_id == "seasonal_24h" and plan.horizon_hours < 24:
+        anchor = _diurnal_profile_name(plan.target, 1)
+    elif baseline_id in {"persistence", "seasonal_24h"}:
+        anchor = _diurnal_lag_name(plan.target, 0)
+    else:
+        raise ValueError(f"diurnal profile cannot anchor on {baseline_id}")
+    blended, audit = ensemble_standardized_coefficients(
+        plan=plan,
+        raw_rows=raw_rows,
+        residuals=residuals,
+        baselines=[sample.baseline for sample in samples],
+        means=[item.mean for item in statistics],
+        scales=[item.scale for item in statistics],
+        free_coefficients=free_coefficients,
+        anchor_feature=anchor,
+        ensemble_weight=config.ensemble_weight,
+    )
+    audit.update({"anchor_feature": anchor, "baseline_id": baseline_id,
+                  "plan_version": DIURNAL_PROFILE_PLAN_VERSION})
+    return blended, audit
 
 
 def _model_metadata(
@@ -1261,6 +1439,16 @@ def _predict_rows(
             "feature_recipe_digest": plan.recipe_digest,
             "feature_recipe_anchor": config.anchor,
             "recipe_term_count": config.recipe.term_count,
+            "required_timestamp_offsets": list(plan.required_timestamp_offsets),
+            "cohort_history_hours": COHORT_HISTORY_HOURS,
+        })
+    elif isinstance(config, DiurnalProfileEnsembleConfig):
+        if plan is None or index_by_timestamp is None:
+            raise ValueError("a diurnal profile prediction requires a compiled plan and index")
+        predictor_state.update({
+            "diurnal_plan_digest": plan.recipe_digest,
+            "diurnal_plan_version": DIURNAL_PROFILE_PLAN_VERSION,
+            "ensemble_weight": float(config.ensemble_weight),
             "required_timestamp_offsets": list(plan.required_timestamp_offsets),
             "cohort_history_hours": COHORT_HISTORY_HOURS,
         })

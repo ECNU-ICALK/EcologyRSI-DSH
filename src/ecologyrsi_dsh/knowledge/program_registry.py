@@ -27,9 +27,13 @@ from ..evaluators.feature_recipe import (
     recipe_grammar,
 )
 from ..evaluators.greenhouse_prediction import (
+    DIURNAL_PROFILE_MODEL_ID,
     GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
     seed_feature_recipe,
 )
+
+# Seed template ids for the expert predictor (all derived revisions share it).
+EXPERT_SEED_TEMPLATE_PREFIX = "greenhouse-diurnal-profile-expert@"
 from ..evaluators.skill_program import SKILL_POLICY_ID, skill_grammar
 
 
@@ -126,6 +130,18 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
                 "ridge_alpha": _parameter(minimum=0.0001, maximum=1.0, default=0.1),
                 **{f"{t}_{h}h_residual_scale": _parameter(minimum=0., maximum=1., default=0.)
                    for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)}},
+        },
+        DIURNAL_PROFILE_MODEL_ID: {
+            "version": "greenhouse-diurnal-profile-ensemble-operator-graph/1",
+            # The read plan is host-authored (evaluators.diurnal_profile); only
+            # the blend, the free member's ridge strength and the nine per-cell
+            # residual scales around the fit-selected baseline are evolvable.
+            "parameters": {
+                "ridge_alpha": _parameter(minimum=0.0001, maximum=1.0, default=0.5),
+                "ensemble_weight": _parameter(minimum=0.0, maximum=1.0, default=0.5),
+                **{f"{t}_{h}h_residual_scale": _parameter(minimum=0., maximum=1., default=1.)
+                   for t in ("air_temperature", "relative_humidity", "co2_concentration") for h in (1, 6, 24)},
+            },
         },
         "greenhouse-baseline-aligned-ridge@1": {
             "version": "greenhouse-baseline-aligned-ridge-operator-graph/1",
@@ -729,6 +745,9 @@ class ProgramRegistrySnapshot:
         templates = seed_templates or (
             _seed_template(thawed, template_id="greenhouse-baseline-aligned-cellwise-default@1",
                 predictor_id="greenhouse-baseline-aligned-ridge@2", feature_policy_id="registered_greenhouse_features@1"),
+            *((_seed_template(thawed, template_id=EXPERT_SEED_TEMPLATE_PREFIX + "1",
+                predictor_id=DIURNAL_PROFILE_MODEL_ID, feature_policy_id="registered_greenhouse_features@1"),)
+              if DIURNAL_PROFILE_MODEL_ID in thawed["predictors"] else ()),
             _seed_template(
                 thawed,
                 template_id="greenhouse-default@1",
@@ -931,22 +950,32 @@ _CURRENT_PROGRAM_REGISTRY = ProgramRegistrySnapshot.from_programs(_CURRENT_PROGR
 
 
 # Additive capabilities must not rebind already-frozen genomes. Reconstruct the
-# exact prior snapshot from unchanged entries; never relax an arbitrary digest.
-_prior_catalog = _CURRENT_PROGRAM_REGISTRY.to_dict()
-_prior_catalog["programs"]["predictors"].pop("greenhouse-baseline-aligned-ridge@2")
-_PRE_CELLWISE_PROGRAM_REGISTRY = ProgramRegistrySnapshot.from_programs(
-    _prior_catalog["programs"], seed_templates=tuple(
-        SeedGenomeTemplate.from_dict(item) for item in _prior_catalog["seed_templates"]
-        if not item["template_id"].startswith("greenhouse-baseline-aligned-cellwise-default@")))
-del _prior_catalog
+# exact prior snapshots from unchanged entries; never relax an arbitrary digest.
+def _without(snapshot: ProgramRegistrySnapshot, predictor_id: str, template_prefix: str) -> ProgramRegistrySnapshot:
+    prior = snapshot.to_dict()
+    prior["programs"]["predictors"].pop(predictor_id)
+    return ProgramRegistrySnapshot.from_programs(
+        prior["programs"], seed_templates=tuple(
+            SeedGenomeTemplate.from_dict(item) for item in prior["seed_templates"]
+            if not item["template_id"].startswith(template_prefix)))
+
+
+# Newest first: the registry before the expert predictor, then before cellwise.
+_PRE_EXPERT_PROGRAM_REGISTRY = _without(
+    _CURRENT_PROGRAM_REGISTRY, DIURNAL_PROFILE_MODEL_ID, EXPERT_SEED_TEMPLATE_PREFIX)
+_PRE_CELLWISE_PROGRAM_REGISTRY = _without(
+    _PRE_EXPERT_PROGRAM_REGISTRY, "greenhouse-baseline-aligned-ridge@2",
+    "greenhouse-baseline-aligned-cellwise-default@")
+_PRIOR_PROGRAM_REGISTRIES = (_PRE_EXPERT_PROGRAM_REGISTRY, _PRE_CELLWISE_PROGRAM_REGISTRY)
 
 
 def registry_for_frozen_catalog(registry: ProgramRegistrySnapshot, catalog_digest: str) -> ProgramRegistrySnapshot:
     if registry.catalog_digest == catalog_digest:
         return registry
-    if (registry.catalog_digest == _CURRENT_PROGRAM_REGISTRY.catalog_digest
-            and catalog_digest == _PRE_CELLWISE_PROGRAM_REGISTRY.catalog_digest):
-        return _PRE_CELLWISE_PROGRAM_REGISTRY
+    if registry.catalog_digest == _CURRENT_PROGRAM_REGISTRY.catalog_digest:
+        for prior in _PRIOR_PROGRAM_REGISTRIES:
+            if catalog_digest == prior.catalog_digest:
+                return prior
     raise ValueError("genome registry catalog binding mismatch")
 
 

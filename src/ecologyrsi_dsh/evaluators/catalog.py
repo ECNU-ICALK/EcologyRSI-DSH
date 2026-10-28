@@ -1,7 +1,7 @@
 """Model registration, parameter contracts and frozen evaluator identities."""
 from __future__ import annotations
 
-from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, EXPERT_CELLWISE_EVALUATOR_ID
 import math
 from collections.abc import Mapping
 from typing import Any
@@ -30,6 +30,7 @@ from .baselines import BASELINE_PROFILE_VERSION, BASELINE_SELECTION_TOLERANCE
 from .greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
     BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+    DIURNAL_PROFILE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     RECIPE_FEATURE_POLICY_ID,
@@ -354,6 +355,14 @@ class EvaluatorCatalog:
             "description": "独立九格残差系数；沿用训练拟合分区选定基线和固定科学门槛。",
             "prediction_model_ids": [*reference["prediction_model_ids"], BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID],
             "implementation": "greenhouse-cellwise-aligned-forward/1"})
+        # Identical cellwise scoring; the only addition is the expert predictor,
+        # so v5 and every run frozen against it keep their digest.
+        items.append({**reference, "id": EXPERT_CELLWISE_EVALUATOR_ID,
+            "label": "温室逐目标逐时距残差评测 v6（专家先验）",
+            "description": "与 v5 相同的九格评分与科学门槛；额外登记昼夜廓线-机理集成专家预测器。",
+            "prediction_model_ids": [*reference["prediction_model_ids"], BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+                                     DIURNAL_PROFILE_MODEL_ID],
+            "implementation": "greenhouse-cellwise-aligned-forward/1"})
         adapter = dataset_adapter(dataset_id) if dataset_id and dataset_id != TOY_DATASET_ID else None
         if dataset_id is not None:
             items = [item for item in items if dataset_id in item["dataset_ids"]]
@@ -528,6 +537,18 @@ class EvaluatorCatalog:
                 f"{t}_{h}h_residual_scale" for t in GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS for h in (1, 6, 24)]],
             "scientific_scope": "historical_replay_prediction_non_causal",
             "implementation": "greenhouse-baseline-aligned-ridge/2"})
+        items.append({"id": DIURNAL_PROFILE_MODEL_ID,
+            "label": "温室昼夜廓线-机理集成预测器（专家先验）",
+            "description": (
+                "每格读取目标在 t、t-24、t+h-24、t+h-48 的值（近两日昼夜廓线），温湿度加最近一小时变化，"
+                "温度加昨日同时段加热/通风设定值阶跃，CO2 加通风交换、光照吸收、补气缺口与昨日设定值阶跃；"
+                "自由岭回归与和为一约束廓线异常回归等权集成，仅在训练拟合分区拟合，九格残差缩放围绕选定基线。"
+            ),
+            "dataset_ids": ["agc_cucumber_2018"],
+            "parameter_names": ["ridge_alpha", "ensemble_weight", *[
+                f"{t}_{h}h_residual_scale" for t in GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS for h in (1, 6, 24)]],
+            "scientific_scope": "historical_replay_prediction_non_causal",
+            "implementation": "greenhouse-diurnal-profile-ensemble/1"})
         for item in items:
             body = {
                 "prediction_model_id": item["id"],
@@ -693,6 +714,26 @@ class EvaluatorCatalog:
                     "parameter_overrides is not supported by "
                     f"{RECIPE_RIDGE_MODEL_ID}; change the feature_recipe instead"
                 )
+            return
+        if predictor_model_id == DIURNAL_PROFILE_MODEL_ID:
+            diurnal_schema = {
+                "ridge_alpha": (float, 0.0001, 1.0),
+                "ensemble_weight": (float, 0.0, 1.0),
+                **{f"{target}_{horizon}h_residual_scale": (float, 0.0, 1.0)
+                   for target in ("air_temperature", "relative_humidity", "co2_concentration")
+                   for horizon in (1, 6, 24)},
+            }
+            unknown = set(overrides) - set(diurnal_schema)
+            if unknown:
+                raise ValueError(
+                    "parameter_overrides contains unsupported fields: " + ", ".join(sorted(unknown))
+                )
+            for name, value in overrides.items():
+                _, minimum, maximum = diurnal_schema[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise TypeError(f"parameter_overrides.{name} must be numeric")
+                if not math.isfinite(float(value)) or not minimum <= float(value) <= maximum:
+                    raise ValueError(f"parameter_overrides.{name} is outside the allowed range")
             return
         schemas = (
             {
