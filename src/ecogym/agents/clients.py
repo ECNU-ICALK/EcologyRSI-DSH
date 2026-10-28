@@ -87,7 +87,9 @@ class OpenAICompatibleClient:
     min_interval: float = 0.0  # seconds between call starts, for rate-limited providers
     max_backoff: float = 300.0
     proxy: str = "system"  # "system" (environment/OS settings), "none", or a proxy URL
+    max_tokens_cap: int = 64000  # a reply cut off by the token limit is retried with up to this budget
     _last_call: float = field(default=0.0, init=False, repr=False)
+    _finish: str | None = field(default=None, init=False, repr=False)
 
     # 410 is what some provider firewalls return for rate-based blocks; it clears after a pause.
     RETRYABLE = (408, 409, 410, 425, 429, 500, 502, 503, 504)
@@ -123,7 +125,9 @@ class OpenAICompatibleClient:
 
         if "text/event-stream" not in (response.headers.get("Content-Type") or ""):
             payload = json.loads(response.read().decode("utf-8"))
-            return (payload["choices"][0]["message"].get("content") or "", str(payload.get("model", self.model)),
+            choice = payload["choices"][0]
+            self._finish = choice.get("finish_reason")
+            return (choice["message"].get("content") or "", str(payload.get("model", self.model)),
                     dict(payload.get("usage") or {}))
         parts, model, usage, finished = [], self.model, {}, False
         for raw in response:
@@ -139,36 +143,47 @@ class OpenAICompatibleClient:
             usage = dict(chunk.get("usage") or usage)
             for choice in chunk.get("choices") or []:
                 parts.append((choice.get("delta") or {}).get("content") or "")
-                finished = finished or bool(choice.get("finish_reason"))
+                if choice.get("finish_reason"):
+                    finished = True
+                    self._finish = choice["finish_reason"]
         if not finished:
             # The connection closed mid-reply; a partial answer must not pass as a whole one.
             raise http.client.IncompleteRead("".join(parts).encode("utf-8"))
         return "".join(parts), model, usage
 
-    def complete(self, messages: Sequence[Message]) -> Reply:
+    def _request(self, messages: Sequence[Message], max_tokens: int) -> urllib.request.Request:
         body: dict[str, Any] = {"model": self.model, "messages": [dict(m) for m in messages],
-                                "max_tokens": self.max_tokens, "stream": self.stream}
+                                "max_tokens": max_tokens, "stream": self.stream}
         if self.stream:
             body["stream_options"] = {"include_usage": True}
         if self.temperature is not None:
             body["temperature"] = self.temperature
-        request = urllib.request.Request(
+        return urllib.request.Request(
             self.base_url.rstrip("/") + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),
             method="POST",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {resolve_secret(self.key_env)}"},
         )
+
+    def complete(self, messages: Sequence[Message]) -> Reply:
         opener = self._opener()
+        budget = self.max_tokens
         last: Exception | None = None
         for attempt in range(self.retries + 1):
             self._pace()
             started = time.monotonic()
+            self._finish = None
             try:
-                with opener.open(request, timeout=self.timeout) as response:
+                with opener.open(self._request(messages, budget), timeout=self.timeout) as response:
                     text, model, usage = self._read(response)
-                if text.strip():
+                if text.strip() and self._finish != "length":
                     return Reply(text, model, round(time.monotonic() - started, 2), usage)
-                last = AgentError("the model returned an empty message (raise max_tokens for reasoning models)")
+                if self._finish == "length":
+                    # A reasoning model spent the whole budget before (or while) answering: give it more room.
+                    budget = min(self.max_tokens_cap, budget * 2)
+                    last = AgentError(f"the reply hit the {budget // 2}-token limit; retrying with {budget}")
+                else:
+                    last = AgentError("the model returned an empty message")
             except urllib.error.HTTPError as error:
                 last = error
                 if error.code not in self.RETRYABLE:

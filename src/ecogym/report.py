@@ -65,6 +65,15 @@ def _generation(generation: dict[str, Any]) -> str:
         f"<p class='muted'>screening {screen['origins']} origins / {len(screen['blocks'])} days; "
         f"holdout {hold['origins']} origins / {len(hold['blocks'])} days</p>",
     ]
+    sections = (("Observations", "observations"), ("Hypotheses", "hypotheses"), ("Directions", "directions"))
+    for note in generation.get("notes", []):
+        for title, key in sections:
+            items = note.get(key) or []
+            if items:
+                parts.append(f"<p class='muted'>{title}</p><ul>" + "".join(f"<li>{_e(item)}</li>" for item in items)
+                             + "</ul>")
+    for error in generation.get("agent_errors", []):
+        parts.append(f"<p class='bad'>agent error: {_e(error)}</p>")
     screened = (generation.get("screened") or {}).get("candidates", [])
     rows = []
     for item in screened:
@@ -75,6 +84,8 @@ def _generation(generation: dict[str, Any]) -> str:
                      _e(item.get("error", rationale))])
     for item in generation.get("rejected", []):
         rows.append([_changes(item["edit"]), "<span class='bad'>rejected</span>", _e("; ".join(item["problems"]))])
+    for item in generation.get("dropped", []):
+        rows.append([_changes(item), "<span class='muted'>dropped by review</span>", _e(item.get("reason", ""))])
     parts.append(_table(["edit", "screening Δ", "rationale / problem"], rows))
     comparison = generation.get("comparison")
     if comparison:

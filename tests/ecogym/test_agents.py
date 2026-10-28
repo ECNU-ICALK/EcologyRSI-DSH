@@ -19,6 +19,7 @@ from ecogym.arena import Arena, RunConfig, fold, replay
 from ecogym.arena.proposers import make_proposer
 from ecogym.kernel.ledger import Ledger
 from ecogym.protocol.cohorts import plan_generation
+from ecogym.report import render_run
 
 from .helpers import synthetic_bench
 from .test_arena import WEAK
@@ -85,6 +86,7 @@ class _FakeProvider(BaseHTTPRequestHandler):
     calls: ClassVar[list[dict]] = []
     fail_first = False
     cut_stream = False
+    length_first = False
 
     def log_message(self, *args):
         return None
@@ -100,6 +102,10 @@ class _FakeProvider(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
+            if type(self).length_first and len(type(self).calls) == 1:
+                cut = {"choices": [{"delta": {"content": ""}, "finish_reason": "length"}]}
+                self.wfile.write(f"data: {json.dumps(cut)}\n\ndata: [DONE]\n\n".encode())
+                return
             for piece in ('{"ok":', " true}"):
                 chunk = {"model": "fake", "choices": [{"delta": {"content": piece}}]}
                 self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
@@ -155,6 +161,16 @@ class HttpClientTests(unittest.TestCase):
             self.assertEqual(len(_FakeProvider.calls), 2)
         finally:
             _FakeProvider.cut_stream = False
+
+    def test_a_reply_cut_by_the_token_limit_gets_a_larger_budget(self):
+        _FakeProvider.length_first = True
+        try:
+            client = OpenAICompatibleClient(self.base, "fake", key_env="ECOGYM_TEST_KEY", retries=1, max_tokens=1000)
+            with mock.patch("ecogym.agents.clients.time.sleep"):
+                self.assertEqual(client.complete([{"role": "user", "content": "hi"}]).text, '{"ok": true}')
+            self.assertEqual([call["body"]["max_tokens"] for call in _FakeProvider.calls], [1000, 2000])
+        finally:
+            _FakeProvider.length_first = False
 
     def test_transient_errors_are_retried(self):
         _FakeProvider.fail_first = True
@@ -230,6 +246,9 @@ class LLMProposerTests(unittest.TestCase):
         self.assertEqual(len(generation["rejected"]), 1)  # edit 2 leaves the trust region
         self.assertEqual(generation["notes"][0]["observations"], ["误差在白天更大"])
         self.assertEqual(generation["dropped"], [{"changes": {"scale.y@6": 0.4}, "reason": "duplicate in effect"}])
+        page = render_run(view)
+        self.assertIn("误差在白天更大", page)
+        self.assertIn("dropped by review", page)
         system = client.seen[0][0]["content"]
         self.assertIn("How proposals are judged", system)
         self.assertNotIn("validation data", system.lower())
