@@ -86,6 +86,7 @@ class OpenAICompatibleClient:
     stream: bool = True
     min_interval: float = 0.0  # seconds between call starts, for rate-limited providers
     max_backoff: float = 300.0
+    proxy: str = "system"  # "system" (environment/OS settings), "none", or a proxy URL
     _last_call: float = field(default=0.0, init=False, repr=False)
 
     # 410 is what some provider firewalls return for rate-based blocks; it clears after a pause.
@@ -111,8 +112,10 @@ class OpenAICompatibleClient:
 
     def _opener(self) -> urllib.request.OpenerDirector:
         host = urlparse(self.base_url).hostname or ""
-        if host in ("127.0.0.1", "localhost", "::1"):
+        if self.proxy == "none" or host in ("127.0.0.1", "localhost", "::1"):
             return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        if self.proxy != "system":
+            return urllib.request.build_opener(urllib.request.ProxyHandler({"http": self.proxy, "https": self.proxy}))
         return urllib.request.build_opener()
 
     def _read(self, response: Any) -> tuple[str, str, dict[str, Any]]:
@@ -273,6 +276,7 @@ def make_client(options: Mapping[str, Any]) -> ChatClient:
             stream=bool(options.get("stream", True)),
             min_interval=float(options.get("min_interval", 0.0)),
             max_backoff=float(options.get("max_backoff", 300.0)),
+            proxy=str(options.get("proxy", "system")),
         )
     if transport == "dsh":
         return DshHeadlessClient(

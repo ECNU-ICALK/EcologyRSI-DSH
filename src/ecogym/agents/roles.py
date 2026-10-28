@@ -190,6 +190,7 @@ class LLMProposer:
     retries: int = 4
     min_interval: float = 0.0
     max_backoff: float = 300.0
+    proxy: str = "system"
     fallbacks: tuple[dict[str, Any], ...] = ()
     max_tool_calls: int = 5
     max_calls: int = 10
