@@ -1,0 +1,99 @@
+# Forecast the indoor climate of one AGC 2019 tomato compartment 1, 6 and 24 hours ahead (winter to spring).
+id = "greenhouse.agc2019.tomato.climate@1"
+title = "AGC 2019 tomato, team AICU: indoor climate at 1, 6 and 24 h"
+dataset = "agc_tomato_2019"
+episodes = ["AICU"]
+horizons = [1, 6, 24]
+history_steps = 48
+history_scope = "partition"
+block_steps = 24
+season_steps = 24
+periods = [24, 168]
+knowledge_files = ["../knowledge.md"]
+notes = """
+A lit winter tomato crop (December to May): lamps run long hours, vents are mostly closed in winter and open
+more in spring. Setpoints (role "action") are known at the origin; outcomes are never inputs.
+"""
+
+[[targets]]
+name = "air_temperature"
+weight = 0.3333333333333333
+bounds = [-10.0, 60.0]
+
+[[targets]]
+name = "relative_humidity"
+weight = 0.3333333333333333
+bounds = [0.0, 100.0]
+
+[[targets]]
+name = "co2_concentration"
+weight = 0.3333333333333333
+bounds = [0.0, 5000.0]
+
+[exogenous]
+roles = ["environment", "outside_weather", "action", "crop", "root_zone", "resource"]
+min_coverage = 0.2
+
+[exogenous.max_fill_age]
+environment = 6
+outside_weather = 6
+action = 6
+crop = 168
+root_zone = 168
+resource = 168
+
+[baselines]
+menu = ["persistence", "seasonal"]
+
+[protocol]
+kind = "four_stage"
+
+[gates]
+min_delta = 0.005
+
+# ---- seed methods -----------------------------------------------------------
+# The cucumber expert's structure with this dataset's column names; not tuned on tomato.
+[presets.expert]
+solver = "greenhouse.diurnal_profile@1"
+note = "cucumber expert structure, tomato column names"
+
+[presets.expert.params]
+alpha = 0.5
+ensemble_weight = 0.5
+scale = 1.0
+profile_days = [1, 2]
+
+[presets.expert.params.terms]
+air_temperature = [
+    { op = "trend" },
+    { op = "schedule_step", col = "heating_setpoint" },
+]
+relative_humidity = [{ op = "trend" }]
+co2_concentration = [
+    { op = "exchange", col = "ventilation_leeward", reference = 400.0 },
+    { op = "exchange", col = "ventilation_windward", reference = 400.0 },
+    { op = "now", col = "outside_radiation" },
+    { op = "now", col = "supplemental_light" },
+    { op = "gap", col = "co2_setpoint" },
+    { op = "schedule_step", col = "co2_setpoint" },
+]
+
+[presets.recipe_seed]
+solver = "recipe_ridge@1"
+note = "target lags, seasonal reference and delta, diurnal phase, 6 h mean"
+
+[presets.recipe_seed.params]
+alpha = 0.1
+anchor = "baseline"
+scale = 0.5
+terms = [
+    { op = "target_lag", k = 0 },
+    { op = "target_lag", k = 1 },
+    { op = "target_lag", k = 2 },
+    { op = "target_lag", k = 3 },
+    { op = "target_lag", k = 24 },
+    { op = "seasonal_reference", period = 24 },
+    { op = "seasonal_delta", period = 24 },
+    { op = "diurnal_sin_cos", period = 24 },
+    { op = "rolling_mean", w = 6 },
+]

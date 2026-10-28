@@ -9,7 +9,7 @@ history_scope = "partition" # reads and forward-fill never leave the evaluated p
 block_steps = 24            # bootstrap blocks are calendar days
 season_steps = 24           # the diurnal cycle: seasonal baseline period
 periods = [24, 168]         # seasonal periods recipe terms may use
-knowledge_file = "../knowledge.md"  # domain knowledge shown to research agents
+knowledge_files = ["../knowledge.md", "../knowledge-agc2018.md"]  # shown to research agents
 notes = """
 Climate is controlled: setpoints (role "action") are each team's strategy and
 are known at the origin. Outcomes (yield, resource use) are never inputs.

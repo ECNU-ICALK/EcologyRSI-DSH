@@ -245,7 +245,7 @@ def load_task_spec(path: str | Path) -> TaskSpec:
         gates=_gates(fields.table("gates")),
         presets=presets,
         notes=fields.raw("notes", ""),
-        knowledge=_knowledge(Path(path), fields.raw("knowledge_file", None)),
+        knowledge=_knowledge(Path(path), fields.strs("knowledge_files", ())),
         origin=str(path),
     )
     fields.done()
@@ -255,13 +255,16 @@ def load_task_spec(path: str | Path) -> TaskSpec:
     return _with_digest(spec)
 
 
-def _knowledge(card: Path, relative: str | None) -> str:
-    if relative is None:
-        return ""
-    path = (card.parent / relative).resolve()
-    if not path.is_file():
-        raise ConfigError(f"{card.name}: knowledge_file {relative} not found")
-    return path.read_text(encoding="utf-8")
+def _knowledge(card: Path, files: tuple[str, ...]) -> str:
+    """Concatenated knowledge notes, paths relative to the card."""
+
+    texts = []
+    for relative in files:
+        path = (card.parent / relative).resolve()
+        if not path.is_file():
+            raise ConfigError(f"{card.name}: knowledge file {relative} not found")
+        texts.append(path.read_text(encoding="utf-8").strip())
+    return "\n\n".join(texts)
 
 
 def _with_digest(spec: TaskSpec) -> TaskSpec:

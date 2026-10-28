@@ -28,13 +28,13 @@ def golden() -> dict:
     return json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
-def agc_available() -> bool:
+def dataset_available(dataset_id: str) -> bool:
     load_domains()
-    return dataset_dir(dataset_spec("agc_cucumber_2018")).is_dir()
+    return dataset_dir(dataset_spec(dataset_id)).is_dir()
 
 
 requires_agc = unittest.skipUnless(
-    agc_available(), f"AGC 2018 data not found under {data_root()} (set ECOGYM_DATA_ROOT)"
+    dataset_available("agc_cucumber_2018"), f"AGC 2018 data not found under {data_root()} (set ECOGYM_DATA_ROOT)"
 )
 
 
@@ -47,9 +47,8 @@ def agc_bench():
 
 
 def synthetic_bench(task: TaskSpec | None = None, frame: Frame | None = None):
-    from ecogym.evaluation import Bench
-
     import ecogym.solvers  # noqa: F401  (registers recipe_ridge@1)
+    from ecogym.evaluation import Bench
 
     frame = frame if frame is not None else synthetic_frame()
     return Bench(task or synthetic_task(), frame, optimization=list(frame.episode_ids))

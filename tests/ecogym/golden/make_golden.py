@@ -241,6 +241,35 @@ def evaluate(series, adapter, config, targets, horizons, partition_name):
     }
 
 
+def data_only(dataset_id: str, episode_id: str) -> None:
+    """Loader parity for a second dataset: episodes and every column of one episode."""
+
+    registry = DatasetRegistry()
+    descriptor = registry._descriptor(dataset_id)
+    canonical = registry._load_series(descriptor)
+    episode = next(item for item in canonical.episodes if item.episode_id == episode_id)
+    golden = {
+        "schema": f"ecogym.golden.{dataset_id}/1",
+        "source": "ecologyrsi-dsh v0.10.33",
+        "episodes": [
+            {"episode_id": item.episode_id, "row_count": item.row_count,
+             "first_timestamp": item.timestamps[0], "last_timestamp": item.timestamps[-1]}
+            for item in canonical.episodes
+        ],
+        "episode": {
+            "episode_id": episode_id,
+            "timestamps_digest": sha(list(episode.timestamps)),
+            "columns": {
+                name: {"finite": sum(value is not None for value in values), "digest": column_digest(values)}
+                for name, values in sorted(episode.values.items())
+            },
+        },
+    }
+    path = OUT / f"{dataset_id}.json"
+    path.write_text(json.dumps(golden, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    print("wrote", path)
+
+
 def main() -> None:
     registry = DatasetRegistry()
     adapter, view = selection_view()
@@ -303,3 +332,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    data_only("agc_tomato_2019", "agc_tomato_2019:AICU")

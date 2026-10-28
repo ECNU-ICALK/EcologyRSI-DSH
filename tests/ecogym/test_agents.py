@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
+from unittest import mock
 
 import numpy as np
-from ecogym.agents import LLMProposer, ResearchTools
-from ecogym.agents.clients import AgentError, Reply, render_transcript, resolve_secret
+
+from ecogym.agents import LLMProposer, OpenAICompatibleClient, ResearchTools
+from ecogym.agents.clients import AgentError, Reply, make_client, render_transcript, resolve_secret
 from ecogym.agents.replies import extract_json
 from ecogym.arena import Arena, RunConfig, fold, replay
 from ecogym.arena.proposers import make_proposer
@@ -73,6 +78,78 @@ class ReplyTests(unittest.TestCase):
                     os.environ.pop("ECOGYM_CREDENTIALS_FILE")
                 else:
                     os.environ["ECOGYM_CREDENTIALS_FILE"] = previous
+
+
+class _FakeProvider(BaseHTTPRequestHandler):
+    calls: ClassVar[list[dict]] = []
+    fail_first = False
+
+    def log_message(self, *args):
+        return None
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).calls.append({"body": body, "auth": self.headers.get("Authorization")})
+        if type(self).fail_first and len(type(self).calls) == 1:
+            self.send_response(503)
+            self.end_headers()
+            return
+        if body.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for piece in ('{"ok":', " true}"):
+                chunk = {"model": "fake", "choices": [{"delta": {"content": piece}}]}
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b'data: {"choices": [], "usage": {"total_tokens": 7}}\n\ndata: [DONE]\n\n')
+        else:
+            payload = json.dumps({"model": "fake", "choices": [{"message": {"content": '{"ok": false}'}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+
+class HttpClientTests(unittest.TestCase):
+    def setUp(self):
+        _FakeProvider.calls = []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeProvider)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        os.environ["ECOGYM_TEST_KEY"] = "secret-123"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        os.environ.pop("ECOGYM_TEST_KEY", None)
+
+    def test_streamed_and_plain_replies(self):
+        client = OpenAICompatibleClient(self.base, "fake", key_env="ECOGYM_TEST_KEY", retries=0)
+        reply = client.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(reply.text, '{"ok": true}')
+        self.assertEqual(reply.usage, {"total_tokens": 7})
+        self.assertEqual(_FakeProvider.calls[0]["auth"], "Bearer secret-123")
+        plain = OpenAICompatibleClient(self.base, "fake", key_env="ECOGYM_TEST_KEY", retries=0, stream=False)
+        self.assertEqual(plain.complete([{"role": "user", "content": "hi"}]).text, '{"ok": false}')
+        self.assertNotIn("secret-123", json.dumps(client.describe()))
+
+    def test_fallback_endpoints_answer_when_the_primary_fails(self):
+        options = {"base_url": "http://127.0.0.1:9/v1", "model": "down", "key_env": "ECOGYM_TEST_KEY", "retries": 0,
+                   "fallbacks": [{"base_url": self.base, "model": "fake"}]}
+        client = make_client(options)
+        self.assertEqual(client.describe()["fallbacks"][0]["model"], "fake")
+        self.assertEqual(client.complete([{"role": "user", "content": "hi"}]).text, '{"ok": true}')
+
+    def test_transient_errors_are_retried(self):
+        _FakeProvider.fail_first = True
+        try:
+            client = OpenAICompatibleClient(self.base, "fake", key_env="ECOGYM_TEST_KEY", retries=1)
+            with mock.patch("ecogym.agents.clients.time.sleep"):
+                self.assertEqual(client.complete([{"role": "user", "content": "hi"}]).text, '{"ok": true}')
+            self.assertEqual(len(_FakeProvider.calls), 2)
+        finally:
+            _FakeProvider.fail_first = False
 
 
 class ToolTests(unittest.TestCase):

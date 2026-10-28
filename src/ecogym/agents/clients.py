@@ -16,7 +16,9 @@ chat model works.
 
 from __future__ import annotations
 
+import http.client
 import json
+import logging
 import os
 import re
 import subprocess
@@ -31,6 +33,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 Message = Mapping[str, str]  # {"role": "system" | "user" | "assistant", "content": str}
+LOG = logging.getLogger("ecogym.agents")
 
 DSH_DISABLED_TOOLS = (
     "tool-bash", "tool-pwsh", "tool-fs", "tool-fs-search", "tool-web", "tool-subagent", "tool-subagent-fork",
@@ -78,8 +81,12 @@ class OpenAICompatibleClient:
     key_env: str = "ECOGYM_LLM_API_KEY"
     temperature: float | None = 0.4
     max_tokens: int = 16000
-    timeout: float = 300.0
+    timeout: float = 300.0  # per socket read; a streamed reply resets it with every chunk
     retries: int = 4
+    stream: bool = True
+    min_interval: float = 0.0  # seconds between call starts, for rate-limited providers
+    max_backoff: float = 300.0
+    _last_call: float = field(default=0.0, init=False, repr=False)
 
     # 410 is what some provider firewalls return for rate-based blocks; it clears after a pause.
     RETRYABLE = (408, 409, 410, 425, 429, 500, 502, 503, 504)
@@ -88,15 +95,53 @@ class OpenAICompatibleClient:
         return {"transport": "http", "base_url": self.base_url, "model": self.model, "key_env": self.key_env,
                 "temperature": self.temperature, "max_tokens": self.max_tokens}
 
+    def _pace(self) -> None:
+        wait = self._last_call + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+
+    def _backoff(self, attempt: int, error: Exception | None) -> float:
+        delay = min(self.max_backoff, 10.0 * 2**attempt)
+        if isinstance(error, urllib.error.HTTPError):
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            if retry_after and retry_after.strip().isdigit():
+                delay = min(self.max_backoff, max(delay, float(retry_after)))
+        return delay
+
     def _opener(self) -> urllib.request.OpenerDirector:
         host = urlparse(self.base_url).hostname or ""
         if host in ("127.0.0.1", "localhost", "::1"):
             return urllib.request.build_opener(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener()
 
+    def _read(self, response: Any) -> tuple[str, str, dict[str, Any]]:
+        """Collect a streamed (server-sent events) or plain completion."""
+
+        if "text/event-stream" not in (response.headers.get("Content-Type") or ""):
+            payload = json.loads(response.read().decode("utf-8"))
+            return (payload["choices"][0]["message"].get("content") or "", str(payload.get("model", self.model)),
+                    dict(payload.get("usage") or {}))
+        parts, model, usage = [], self.model, {}
+        for raw in response:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            model = str(chunk.get("model") or model)
+            usage = dict(chunk.get("usage") or usage)
+            for choice in chunk.get("choices") or []:
+                parts.append((choice.get("delta") or {}).get("content") or "")
+        return "".join(parts), model, usage
+
     def complete(self, messages: Sequence[Message]) -> Reply:
         body: dict[str, Any] = {"model": self.model, "messages": [dict(m) for m in messages],
-                                "max_tokens": self.max_tokens}
+                                "max_tokens": self.max_tokens, "stream": self.stream}
+        if self.stream:
+            body["stream_options"] = {"include_usage": True}
         if self.temperature is not None:
             body["temperature"] = self.temperature
         request = urllib.request.Request(
@@ -108,26 +153,47 @@ class OpenAICompatibleClient:
         opener = self._opener()
         last: Exception | None = None
         for attempt in range(self.retries + 1):
+            self._pace()
             started = time.monotonic()
             try:
                 with opener.open(request, timeout=self.timeout) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                message = payload["choices"][0]["message"]
-                text = message.get("content") or ""
-                if not text.strip():
-                    raise AgentError("the model returned an empty message (raise max_tokens for reasoning models)")
-                return Reply(text, str(payload.get("model", self.model)), round(time.monotonic() - started, 2),
-                             dict(payload.get("usage") or {}))
+                    text, model, usage = self._read(response)
+                if text.strip():
+                    return Reply(text, model, round(time.monotonic() - started, 2), usage)
+                last = AgentError("the model returned an empty message (raise max_tokens for reasoning models)")
             except urllib.error.HTTPError as error:
                 last = error
                 if error.code not in self.RETRYABLE:
                     detail = error.read().decode("utf-8", "replace")[:300]
                     raise AgentError(f"HTTP {error.code} from {self.base_url}: {detail}") from None
-            except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError, KeyError) as error:
-                last = error
+            except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError) as error:
+                last = error  # network failures, cut streams, malformed payloads
             if attempt < self.retries:
-                time.sleep(min(120.0, 10.0 * 2**attempt))
+                delay = self._backoff(attempt, last)
+                LOG.warning("%s %s: attempt %d failed (%s: %s); retrying in %.0f s", self.base_url, self.model,
+                            attempt + 1, type(last).__name__, str(last)[:120], delay)
+                time.sleep(delay)
         raise AgentError(f"LLM call failed after {self.retries + 1} attempts: {type(last).__name__}: {last}")
+
+
+@dataclass
+class FallbackClient:
+    """Tries each client in turn for every call; the first answer wins."""
+
+    clients: tuple[ChatClient, ...]
+
+    def describe(self) -> dict[str, Any]:
+        first = self.clients[0].describe()
+        return {**first, "fallbacks": [client.describe() for client in self.clients[1:]]}
+
+    def complete(self, messages: Sequence[Message]) -> Reply:
+        errors = []
+        for client in self.clients:
+            try:
+                return client.complete(messages)
+            except AgentError as error:
+                errors.append(f"{client.describe().get('model')}: {error}")
+        raise AgentError("every endpoint failed: " + " | ".join(errors))
 
 
 def render_transcript(messages: Sequence[Message]) -> str:
@@ -183,6 +249,12 @@ class DshHeadlessClient:
 
 
 def make_client(options: Mapping[str, Any]) -> ChatClient:
+    """A client from proposer options; ``fallbacks`` lists further option sets tried in order."""
+
+    fallbacks = options.get("fallbacks") or ()
+    if fallbacks:
+        primary = {key: value for key, value in options.items() if key != "fallbacks"}
+        return FallbackClient(tuple(make_client({**primary, **dict(item)}) for item in [{}, *fallbacks]))
     transport = options.get("transport", "http")
     if transport == "http":
         return OpenAICompatibleClient(
@@ -192,6 +264,10 @@ def make_client(options: Mapping[str, Any]) -> ChatClient:
             temperature=options.get("temperature", 0.4),
             max_tokens=int(options.get("max_tokens", 16000)),
             timeout=float(options.get("timeout", 300.0)),
+            retries=int(options.get("retries", 4)),
+            stream=bool(options.get("stream", True)),
+            min_interval=float(options.get("min_interval", 0.0)),
+            max_backoff=float(options.get("max_backoff", 300.0)),
         )
     if transport == "dsh":
         return DshHeadlessClient(
@@ -209,6 +285,7 @@ __all__ = [
     "AgentError",
     "ChatClient",
     "DshHeadlessClient",
+    "FallbackClient",
     "Message",
     "OpenAICompatibleClient",
     "Reply",

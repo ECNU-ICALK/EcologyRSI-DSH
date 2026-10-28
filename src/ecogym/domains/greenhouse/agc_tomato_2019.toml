@@ -1,0 +1,457 @@
+# Converted from agc_tomato_2019.json (ecologyrsi-dsh v0.10.33).
+id = "agc_tomato_2019"
+title = "Autonomous Greenhouse Challenge 2019, tomato"
+source = "https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7"
+path = "greenhouse/agc_tomato_2019"
+loader = "csv_tables"
+step = "1h"
+episodes = "*/GreenhouseClimate.csv"
+external_episodes = ["reference"]
+
+[[columns]]
+name = "air_temperature"
+role = "environment"
+unit = "degC"
+label = "室内气温"
+aliases = ["Tair"]
+required = true
+
+[[columns]]
+name = "relative_humidity"
+role = "environment"
+unit = "percent"
+label = "室内相对湿度"
+aliases = ["RHair", "Rhair"]
+required = true
+valid = [0.0, 100.0]
+
+[[columns]]
+name = "co2_concentration"
+role = "environment"
+unit = "ppm"
+label = "室内 CO2 浓度"
+aliases = ["CO2air"]
+required = true
+valid = [0.0, 5000.0]
+
+[[columns]]
+name = "humidity_deficit"
+role = "environment"
+unit = "g_m3"
+label = "湿度亏缺"
+aliases = ["HumDef"]
+
+[[columns]]
+name = "supplemental_light"
+role = "environment"
+unit = "percent"
+label = "补光比例"
+aliases = ["AssimLight"]
+
+[[columns]]
+name = "heating_pipe_temperature"
+role = "environment"
+unit = "degC"
+label = "加热管温度"
+aliases = ["PipeLow"]
+
+[[columns]]
+name = "ventilation_leeward"
+role = "environment"
+unit = "percent"
+label = "背风侧通风开度"
+aliases = ["VentLee"]
+
+[[columns]]
+name = "ventilation_windward"
+role = "environment"
+unit = "percent"
+label = "迎风侧通风开度"
+aliases = ["Ventwind"]
+
+[[columns]]
+name = "outside_temperature"
+role = "outside_weather"
+unit = "degC"
+label = "室外气温"
+aliases = ["Tout"]
+
+[[columns]]
+name = "outside_relative_humidity"
+role = "outside_weather"
+unit = "percent"
+label = "室外相对湿度"
+aliases = ["Rhout"]
+valid = [0.0, 100.0]
+
+[[columns]]
+name = "outside_radiation"
+role = "outside_weather"
+unit = "W_m2"
+label = "室外辐射"
+aliases = ["Iglob"]
+
+[[columns]]
+name = "outside_wind_speed"
+role = "outside_weather"
+unit = "m_s"
+label = "室外风速"
+aliases = ["Windsp"]
+
+[[columns]]
+name = "root_zone_water_content"
+role = "root_zone"
+unit = "percent"
+label = "根区含水量"
+aliases = ["WC_slab1", "WC_slab2"]
+valid = [0.0, 100.0]
+
+[[columns]]
+name = "root_zone_ec"
+role = "root_zone"
+unit = "dS_m"
+label = "根区电导率"
+aliases = ["EC_slab1", "EC_slab2"]
+valid = [0.0, 30.0]
+
+[[columns]]
+name = "cumulative_irrigation"
+role = "resource"
+unit = "L_m2"
+label = "累计灌溉量"
+aliases = ["Cum_irr"]
+
+[[columns]]
+name = "marketable_yield"
+role = "outcome"
+unit = "kg_m2_harvest"
+label = "一级果产量"
+aliases = ["ProdA"]
+
+[[columns]]
+name = "class_b_yield"
+role = "outcome"
+unit = "kg_m2_harvest"
+label = "二级果产量"
+aliases = ["ProdB"]
+
+[[columns]]
+name = "harvested_trusses"
+role = "crop"
+unit = "trusses_stem"
+label = "已采收果穗数"
+aliases = ["avg_nr_harvested_trusses"]
+
+[[columns]]
+name = "truss_development_time"
+role = "crop"
+unit = "days"
+label = "果穗发育时间"
+aliases = ["Truss development time"]
+
+[[columns]]
+name = "stem_elongation"
+role = "crop"
+unit = "cm_week"
+label = "茎伸长量"
+aliases = ["Stem_elong"]
+
+[[columns]]
+name = "stem_thickness"
+role = "crop"
+unit = "mm"
+label = "茎粗"
+aliases = ["Stem_thick"]
+
+[[columns]]
+name = "cumulative_trusses"
+role = "crop"
+unit = "trusses_stem"
+label = "累计果穗数"
+aliases = ["Cum_trusses"]
+
+[[columns]]
+name = "stem_density"
+role = "crop"
+unit = "stems_m2"
+label = "茎密度"
+aliases = ["stem_dens"]
+
+[[columns]]
+name = "plant_density"
+role = "crop"
+unit = "plants_m2"
+label = "种植密度"
+aliases = ["plant_dens"]
+
+[[columns]]
+name = "fruit_flavour"
+role = "outcome"
+unit = "score_0_100"
+label = "果实风味评分"
+aliases = ["Flavour"]
+
+[[columns]]
+name = "fruit_tss"
+role = "outcome"
+unit = "degBrix"
+label = "可溶性固形物"
+aliases = ["TSS"]
+
+[[columns]]
+name = "fruit_acid"
+role = "outcome"
+unit = "mmol_H3O_100g"
+label = "果实酸度"
+aliases = ["Acid"]
+
+[[columns]]
+name = "fruit_juice"
+role = "outcome"
+unit = "percent"
+label = "果汁比例"
+aliases = ["%Juice"]
+
+[[columns]]
+name = "fruit_bite"
+role = "outcome"
+unit = "N"
+label = "果实咬合力"
+aliases = ["Bite"]
+
+[[columns]]
+name = "fruit_weight"
+role = "outcome"
+unit = "g"
+label = "单果重"
+aliases = ["Weight"]
+
+[[columns]]
+name = "fruit_dry_matter"
+role = "outcome"
+unit = "percent"
+label = "果实干物质比例"
+aliases = ["DMC_fruit"]
+
+[[columns]]
+name = "heating_energy_use"
+role = "outcome"
+unit = "MJ_m2_day"
+label = "供热能耗"
+aliases = ["Heat_cons"]
+
+[[columns]]
+name = "electricity_peak_use"
+role = "resource"
+unit = "kWh_m2_day"
+label = "峰时用电"
+aliases = ["ElecHigh"]
+
+[[columns]]
+name = "electricity_offpeak_use"
+role = "resource"
+unit = "kWh_m2_day"
+label = "谷时用电"
+aliases = ["ElecLow"]
+
+[[columns]]
+name = "electricity_use"
+role = "outcome"
+unit = "kWh_m2_day"
+label = "总用电"
+aliases = []
+
+[[columns]]
+name = "co2_use"
+role = "outcome"
+unit = "kg_m2_day"
+label = "CO2 用量"
+aliases = ["CO2_cons"]
+
+[[columns]]
+name = "irrigation_water"
+role = "resource"
+unit = "L_m2_day"
+label = "灌溉水量"
+aliases = ["Irr"]
+
+[[columns]]
+name = "drain_water"
+role = "root_zone"
+unit = "L_m2_day"
+label = "排水量"
+aliases = ["Drain"]
+
+[[columns]]
+name = "water_use"
+role = "outcome"
+unit = "L_m2_day"
+label = "净用水量"
+aliases = []
+
+[[columns]]
+name = "irrigation_ph"
+role = "root_zone"
+unit = "pH"
+label = "灌溉液 pH"
+aliases = ["irr_PH"]
+valid = [2.0, 14.0]
+
+[[columns]]
+name = "irrigation_ec"
+role = "root_zone"
+unit = "dS_m"
+label = "灌溉液电导率"
+aliases = ["irr_EC"]
+valid = [0.0, 30.0]
+
+[[columns]]
+name = "irrigation_nitrate"
+role = "root_zone"
+unit = "mmol_L"
+label = "灌溉液硝酸盐"
+aliases = ["irr_NO3"]
+
+[[columns]]
+name = "irrigation_potassium"
+role = "root_zone"
+unit = "mmol_L"
+label = "灌溉液钾"
+aliases = ["irr_K"]
+
+[[columns]]
+name = "drain_ph"
+role = "root_zone"
+unit = "pH"
+label = "排液 pH"
+aliases = ["drain_PH"]
+valid = [2.0, 14.0]
+
+[[columns]]
+name = "drain_ec"
+role = "root_zone"
+unit = "dS_m"
+label = "排液电导率"
+aliases = ["drain_EC"]
+valid = [0.0, 30.0]
+
+[[columns]]
+name = "drain_nitrate"
+role = "root_zone"
+unit = "mmol_L"
+label = "排液硝酸盐"
+aliases = ["drain_NO3"]
+
+[[columns]]
+name = "drain_potassium"
+role = "root_zone"
+unit = "mmol_L"
+label = "排液钾"
+aliases = ["drain_K"]
+
+[[columns]]
+name = "co2_setpoint"
+role = "action"
+unit = "ppm"
+label = "CO2 设定值"
+aliases = ["co2_sp", "co2_vip"]
+
+[[columns]]
+name = "heating_setpoint"
+role = "action"
+unit = "degC"
+label = "加热设定值"
+aliases = ["t_heat_sp", "t_heat_vip"]
+
+[[columns]]
+name = "ventilation_temperature_setpoint"
+role = "action"
+unit = "degC"
+label = "通风温度设定值"
+aliases = ["t_vent_sp"]
+
+[[columns]]
+name = "humidity_deficit_setpoint"
+role = "action"
+unit = "g_m3"
+label = "湿差设定值"
+aliases = ["dx_sp", "dx_vip"]
+
+[[columns]]
+name = "lighting_setpoint"
+role = "action"
+unit = "percent"
+label = "照明设定值"
+aliases = ["assim_sp", "assim_vip"]
+
+[[columns]]
+name = "irrigation_interval"
+role = "action"
+unit = "minutes"
+label = "灌溉间隔"
+aliases = ["water_sup_intervals_sp_min", "water_sup_intervals_vip_min"]
+
+[[tables]]
+file = "GreenhouseClimate.csv"
+time = ["%time", "time"]
+interval_minutes = 5
+columns = ["air_temperature", "relative_humidity", "co2_concentration", "humidity_deficit", "supplemental_light", "heating_pipe_temperature", "ventilation_leeward", "ventilation_windward", "cumulative_irrigation", "co2_setpoint", "heating_setpoint", "ventilation_temperature_setpoint", "humidity_deficit_setpoint", "lighting_setpoint", "irrigation_interval"]
+
+[[tables]]
+file = "Weather/Weather.csv"
+scope = "dataset"
+time = ["%time", "time"]
+interval_minutes = 5
+columns = ["outside_temperature", "outside_relative_humidity", "outside_radiation", "outside_wind_speed"]
+
+[[tables]]
+file = "GrodanSens.csv"
+time = ["%time", "time"]
+interval_minutes = 5
+columns = ["root_zone_water_content", "root_zone_ec"]
+
+[[tables]]
+file = "CropParameters.csv"
+time = ["%time", "time"]
+interval_minutes = 10080
+delay = 24
+columns = ["stem_elongation", "stem_thickness", "cumulative_trusses", "stem_density", "plant_density"]
+
+[[tables]]
+file = "Production.csv"
+time = ["%time", "time"]
+interval_minutes = 1440
+delay = 24
+columns = ["marketable_yield", "class_b_yield", "harvested_trusses", "truss_development_time"]
+
+[[tables]]
+file = "TomQuality.csv"
+time = ["%time", "time"]
+interval_minutes = 20160
+delay = 24
+columns = ["fruit_flavour", "fruit_tss", "fruit_acid", "fruit_juice", "fruit_bite", "fruit_weight", "fruit_dry_matter"]
+
+[[tables]]
+file = "Resources.csv"
+time = ["%time", "time"]
+interval_minutes = 1440
+delay = 24
+columns = ["heating_energy_use", "electricity_peak_use", "electricity_offpeak_use", "co2_use", "irrigation_water", "drain_water"]
+
+[[tables]]
+file = "LabAnalysis.csv"
+time = ["%time", "time"]
+interval_minutes = 20160
+delay = 24
+columns = ["irrigation_ph", "irrigation_ec", "irrigation_nitrate", "irrigation_potassium", "drain_ph", "drain_ec", "drain_nitrate", "drain_potassium"]
+
+# Totals the source does not publish directly.
+[[derived]]
+name = "electricity_use"
+op = "sum"
+inputs = ["electricity_peak_use", "electricity_offpeak_use"]
+
+[[derived]]
+name = "water_use"
+op = "difference"
+inputs = ["irrigation_water", "drain_water"]

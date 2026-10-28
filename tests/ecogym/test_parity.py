@@ -11,18 +11,20 @@ import hashlib
 import json
 import math
 import unittest
+from pathlib import Path
 
 import numpy as np
 
 from ecogym.protocol import eligible, open_stage
 
-from .helpers import agc_bench, golden, requires_agc
+from .helpers import agc_bench, dataset_available, golden, requires_agc
 
 TOLERANCE = 1e-9
 
 
 def sha(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 @requires_agc
@@ -48,12 +50,39 @@ class DataParity(unittest.TestCase):
             self.assertEqual(sha(as_json), column["digest"], name)
 
 
+TOMATO = Path(__file__).resolve().parent / "golden" / "agc_tomato_2019.json"
+
+
+@unittest.skipUnless(dataset_available("agc_tomato_2019"), "AGC 2019 data not found (set ECOGYM_DATA_ROOT)")
+class TomatoDataParity(unittest.TestCase):
+    """The second greenhouse dataset loads through the same generic loader, bit for bit."""
+
+    def test_every_column_matches_bit_for_bit(self):
+        from ecogym.data.catalog import dataset_spec, load_frame
+
+        expected = json.loads(TOMATO.read_text(encoding="utf-8"))
+        frame = load_frame(dataset_spec("agc_tomato_2019"))
+        for item in expected["episodes"]:
+            times = frame.present_times(item["episode_id"].split(":", 1)[1])
+            self.assertEqual((times.size, int(times[0]), int(times[-1])),
+                             (item["row_count"], item["first_timestamp"], item["last_timestamp"]))
+        episode = expected["episode"]
+        rows = frame.episode_rows(episode["episode_id"].split(":", 1)[1])
+        present = frame.present[rows]
+        self.assertEqual(sha([int(t) for t in frame.time[rows][present]]), episode["timestamps_digest"])
+        self.assertEqual(set(frame.columns), set(episode["columns"]))
+        for name, column in episode["columns"].items():
+            values = frame.columns[name][rows][present]
+            self.assertEqual(sha([None if math.isnan(v) else float(v) for v in values]), column["digest"], name)
+
+
 @requires_agc
 class ProtocolParity(unittest.TestCase):
     def test_stage_boundaries(self):
         bench = agc_bench()
         for stage, expected in golden()["protocol"]["stages"].items():
-            self.assertEqual(bench.partitions.intervals[stage]["AiCU"], (expected["time_start"], expected["time_end"]), stage)
+            interval = (expected["time_start"], expected["time_end"])
+            self.assertEqual(bench.partitions.intervals[stage]["AiCU"], interval, stage)
             self.assertEqual(bench.partitions.rows[stage]["AiCU"], expected["rows"], stage)
 
     def test_fit_selected_baselines(self):

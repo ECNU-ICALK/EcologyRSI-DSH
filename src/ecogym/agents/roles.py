@@ -175,6 +175,11 @@ class LLMProposer:
     temperature: float | None = 0.4
     max_tokens: int = 16000
     timeout: float = 300.0
+    stream: bool = True
+    retries: int = 4
+    min_interval: float = 0.0
+    max_backoff: float = 300.0
+    fallbacks: tuple[dict[str, Any], ...] = ()
     max_tool_calls: int = 5
     max_calls: int = 10
     review: bool = True

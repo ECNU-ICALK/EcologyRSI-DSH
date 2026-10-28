@@ -1,0 +1,260 @@
+{
+ "schema": "ecogym.golden.agc_tomato_2019/1",
+ "source": "ecologyrsi-dsh v0.10.33",
+ "episodes": [
+  {
+   "episode_id": "agc_tomato_2019:AICU",
+   "row_count": 3983,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055543
+  },
+  {
+   "episode_id": "agc_tomato_2019:Automatoes",
+   "row_count": 3983,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055543
+  },
+  {
+   "episode_id": "agc_tomato_2019:Digilog",
+   "row_count": 3983,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055543
+  },
+  {
+   "episode_id": "agc_tomato_2019:IUACAAS",
+   "row_count": 3983,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055543
+  },
+  {
+   "episode_id": "agc_tomato_2019:Reference",
+   "row_count": 3984,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055544
+  },
+  {
+   "episode_id": "agc_tomato_2019:TheAutomators",
+   "row_count": 3983,
+   "first_timestamp": 1051560,
+   "last_timestamp": 1055543
+  }
+ ],
+ "episode": {
+  "episode_id": "agc_tomato_2019:AICU",
+  "timestamps_digest": "5a52ba5f3607ea9eb0b8b594a1842827dab2cabbf1e9737afc45d1b46359a5e8",
+  "columns": {
+   "air_temperature": {
+    "finite": 3983,
+    "digest": "0c23be51d55e72baa9bd411a886d83e89a12110cb2868aa4e59b1f158c24fb8c"
+   },
+   "class_b_yield": {
+    "finite": 23,
+    "digest": "8d9ff4243ab54e45eef99321c85994d74ef09b901bc5714ac764fdca8712b2df"
+   },
+   "co2_concentration": {
+    "finite": 3983,
+    "digest": "7e650391d93eea4cce47eb17dd1de8701950e860e2ae42f5aca3cf6ab96fd158"
+   },
+   "co2_setpoint": {
+    "finite": 3983,
+    "digest": "417c224d895df26eb3244f056180052df7c48336daf04d7864d2db857c125bb8"
+   },
+   "co2_use": {
+    "finite": 165,
+    "digest": "90e27e97f3132d3fdb90694b0cc28bd8a7d048510024c79acfa0f64a6ad06207"
+   },
+   "cumulative_irrigation": {
+    "finite": 3983,
+    "digest": "118129079b938113ef4c9e719a3a62d2886dd6ebdb092f9249d0b7d07520b7c6"
+   },
+   "cumulative_trusses": {
+    "finite": 18,
+    "digest": "3d08e6c650cf41f6f4de9d816c2d04c178d570bf8fa21d763eed1de5cb14fa9e"
+   },
+   "drain_ec": {
+    "finite": 10,
+    "digest": "e99990517f39f2cdd6607aac91e81c346d64edf30a2b24a6c2255b8a902eb784"
+   },
+   "drain_nitrate": {
+    "finite": 10,
+    "digest": "db686da6a684c92494b515424705bb7a986878fdb4534589bbc37ab0bf2ecd08"
+   },
+   "drain_ph": {
+    "finite": 10,
+    "digest": "ab976e49c796e0f1cfe77ae5755d93cfe25de3c1099dccb45bf6a007f2349fa2"
+   },
+   "drain_potassium": {
+    "finite": 10,
+    "digest": "b4a2129f6183554f30bc2fa64f49225e05c9d564929319d83644ca7b719df202"
+   },
+   "drain_water": {
+    "finite": 165,
+    "digest": "ff7fe8414b098e5079b780ecc0682d826c0382928f54cf43007a7d5c872091a4"
+   },
+   "electricity_offpeak_use": {
+    "finite": 165,
+    "digest": "bb02805df233d5e1c830f9ef628d89058a0ff1187a8f3d210285a6715f32d4af"
+   },
+   "electricity_peak_use": {
+    "finite": 165,
+    "digest": "a2b26386990149af284ad4fa19bf7e6e6f4627088efb9168a1a2e553310eacf5"
+   },
+   "electricity_use": {
+    "finite": 165,
+    "digest": "d36641fd5eadb6ec93762ae9f770e2f62cdfa56e9a988c79d21da06f08c29707"
+   },
+   "fruit_acid": {
+    "finite": 7,
+    "digest": "41179984740485e9a81925f555a9b84b4f39026271b3b7abcfd36f96ba28fe8e"
+   },
+   "fruit_bite": {
+    "finite": 7,
+    "digest": "25644babb6864e310423e3a75d250e0c5615864c703ebb5ae0971015bc395f74"
+   },
+   "fruit_dry_matter": {
+    "finite": 5,
+    "digest": "01f7085201bfec73e1f0cb81d46234222b7f9a27d3929cf787d9ee9e1eae7bcd"
+   },
+   "fruit_flavour": {
+    "finite": 7,
+    "digest": "74045f49f5c91202399765b7ce51523ba7fee20d8a1b4482e792fd48148df7fb"
+   },
+   "fruit_juice": {
+    "finite": 7,
+    "digest": "32a91e3283d011cb8eaecce6fb95299cc912cd00050818b0da71ecc6ee694955"
+   },
+   "fruit_tss": {
+    "finite": 7,
+    "digest": "8fb052c67ea5c5548f2473bf3b592ed38e925c4875d20596736af4570297fb9b"
+   },
+   "fruit_weight": {
+    "finite": 7,
+    "digest": "0a9ec6638800bb9a996aaaa165706e6150296cf1ea0f2ef07eee9f0a31504307"
+   },
+   "harvested_trusses": {
+    "finite": 23,
+    "digest": "64513380605660cb3e02621f925c0f512b9c4a1943fbae6d56efc58011b2f5f9"
+   },
+   "heating_energy_use": {
+    "finite": 165,
+    "digest": "f40fb2f41a360f0cf27c1099367d67b87d90c06966d481dd5cf450d68e7754b3"
+   },
+   "heating_pipe_temperature": {
+    "finite": 3983,
+    "digest": "afa4d84ea8254d40a001ef09eb74d5e485a7cd98c2c6fb8b3d96f5e21f847333"
+   },
+   "heating_setpoint": {
+    "finite": 3983,
+    "digest": "882e643d09343d61087f7946ea51b27465ea66458fadfb6a680869d7220351ec"
+   },
+   "humidity_deficit": {
+    "finite": 3983,
+    "digest": "0934040b0ff584751fc4d44f26168ac8471c2aeeb2b073741363895a96af997c"
+   },
+   "humidity_deficit_setpoint": {
+    "finite": 3983,
+    "digest": "a56baacc6004bf9c4e1f8d4f66ecacfe838be2df4c0451f9e0e0ecd199ab92cc"
+   },
+   "irrigation_ec": {
+    "finite": 10,
+    "digest": "58b1b71193c385b7bb63d881cde097c504e50df69a1e6d31cf0e7c7f108b2574"
+   },
+   "irrigation_interval": {
+    "finite": 3983,
+    "digest": "d61fa723a5301beadade383fcc599be0896355ae1bcd0840748b5bc59f7ceb4c"
+   },
+   "irrigation_nitrate": {
+    "finite": 10,
+    "digest": "6dab8133c8fa4ba504c0abe12a0916031916003e4543ea6752de0773e7ed7273"
+   },
+   "irrigation_ph": {
+    "finite": 10,
+    "digest": "ea9015a62916484480e03023e9cb487cede37d721029f2d2c11437b3c317f8f0"
+   },
+   "irrigation_potassium": {
+    "finite": 10,
+    "digest": "5ca74e724394e41b547c095d2088a3bc302c81850f72ee230ca655c4b04220b8"
+   },
+   "irrigation_water": {
+    "finite": 165,
+    "digest": "b29dcc76d05c698deeba86483a0abc91e051051b075566ac207cdc95ffa8e3c7"
+   },
+   "lighting_setpoint": {
+    "finite": 3983,
+    "digest": "65fd964a92f1fd0015ce78eece15980adcb2c2592e0ab4765493808753cb5bf0"
+   },
+   "marketable_yield": {
+    "finite": 23,
+    "digest": "f45b11fc7a3dc9bfae10f6fb04d079dbc4a3ebdc4f5a87b4941d2407e71a59df"
+   },
+   "outside_radiation": {
+    "finite": 3983,
+    "digest": "8e737cb3153ec37abd5d390cd096502fea2d895d1d0dea7ee266f25908d14ba9"
+   },
+   "outside_relative_humidity": {
+    "finite": 3983,
+    "digest": "376061bd883fcc73daf6dfe3ce6569bec08ac96aea2f540243b9cab29b3b32a9"
+   },
+   "outside_temperature": {
+    "finite": 3983,
+    "digest": "6b306b37be006394d5cc913e41e0085cb6a68a8af9e9649858aa6a7ea0d608ad"
+   },
+   "outside_wind_speed": {
+    "finite": 3983,
+    "digest": "ee1df70b7e0c2759bb20011a9d76fb4151065c6e3f2ec850ed62f4627ab65178"
+   },
+   "plant_density": {
+    "finite": 23,
+    "digest": "6adb3117b08d812095dcddc7558b48ebd0c95fa47cbcc87542804f6c8d53091b"
+   },
+   "relative_humidity": {
+    "finite": 3983,
+    "digest": "a4e254d85765e1bf9e32de57256004f4b074954e82c576d8d772d7e1b24b72fb"
+   },
+   "root_zone_ec": {
+    "finite": 3805,
+    "digest": "9a9cd50148d183e4c0fa044fd243af906e121b586c79d7e63aa464433ce0f74c"
+   },
+   "root_zone_water_content": {
+    "finite": 3805,
+    "digest": "d9310f3d4637f2a5cecb0902a374d92efef9f24768cb96f70e025c73bfb9a11e"
+   },
+   "stem_density": {
+    "finite": 23,
+    "digest": "52af70d224f94c32cf4abc9fb80305f2e44d2b7771a36873d57977c7f3c80db4"
+   },
+   "stem_elongation": {
+    "finite": 18,
+    "digest": "46a21c93a42bef5048a9581f25f78a65cce4de3ff9f71f04cb7b5ddeb6f05fa1"
+   },
+   "stem_thickness": {
+    "finite": 18,
+    "digest": "61ab5cb7fe56be19edd06445113ecdc0c74d0e1038c2bed3848c37750a9f1d61"
+   },
+   "supplemental_light": {
+    "finite": 3983,
+    "digest": "618c21ab88836560d86c1dadae281e54793659f62d94b37fb47b1c1c22c0fcb5"
+   },
+   "truss_development_time": {
+    "finite": 23,
+    "digest": "37ad73b092fe2092813dce9f70dc19e0728ead5196cb93706630a2f3f7801c01"
+   },
+   "ventilation_leeward": {
+    "finite": 3983,
+    "digest": "d413b5ef12e1c5854d0042013026f63aff0f3567c6935068f99157151d86dd14"
+   },
+   "ventilation_temperature_setpoint": {
+    "finite": 2149,
+    "digest": "0e2f780888a2210e237622c8958e8c61a6d870f229e0a0261d86de587328567a"
+   },
+   "ventilation_windward": {
+    "finite": 3983,
+    "digest": "adffba1863bc9444f15bfca715e6e19cbf99e6b2ec3c67b94d51a22145c6a574"
+   },
+   "water_use": {
+    "finite": 165,
+    "digest": "7d3d75852c17fee0e81a20a654fe5a25b9c7a6ef802ae4f1073a6c410dc2ff60"
+   }
+  }
+ }
+}
