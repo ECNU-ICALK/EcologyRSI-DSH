@@ -135,6 +135,18 @@ class Ledger:
             for seq, run, event_kind, at, body, event_hash in self._db.execute(query, values)
         ]
 
+    def first(self, run_id: str) -> Event | None:
+        """The run's first event, without reading the rest."""
+
+        row = self._db.execute("SELECT seq, run_id, kind, at, body, hash FROM events WHERE run_id = ? ORDER BY seq "
+                               "LIMIT 1", (run_id,)).fetchone()
+        return None if row is None else Event(row[0], row[1], row[2], row[3], json.loads(row[4]), row[5])
+
+    def last_seq(self) -> int:
+        """The sequence number of the newest event (0 for an empty ledger)."""
+
+        return int(self._db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0])
+
     def runs(self, first: str | None = None) -> list[str]:
         """Run ids in order of their first event; ``first`` keeps runs whose first event has that kind."""
 

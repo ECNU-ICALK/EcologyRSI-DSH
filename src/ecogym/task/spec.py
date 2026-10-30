@@ -4,6 +4,9 @@ A task card (TOML) binds a dataset to an objective grid (targets x horizons
 in steps), an information set (history length and scope, admissible input
 roles, forward-fill limits), a baseline menu, the partition protocol and the
 promotion gates. Seed genomes ("presets") may be declared alongside.
+
+A task reference ``<task id>:<episode>`` names the same card on another
+episode (site, team) of its dataset, so one card serves every episode.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..data.catalog import dataset_spec
 from ..data.spec import DatasetSpec
 from ..kernel.canonical import digest
 from ..kernel.config import ConfigError, Fields, load_toml
@@ -293,11 +297,34 @@ def register_task(path: str | Path) -> TaskSpec:
     return spec
 
 
-def task_spec(task_id: str) -> TaskSpec:
-    try:
-        return _TASKS[task_id]
-    except KeyError:
-        raise KeyError(f"unknown task {task_id}; known: {', '.join(sorted(_TASKS)) or 'none'}") from None
+def variant(task: TaskSpec, episode: str) -> TaskSpec:
+    """The same card on another episode of its dataset (id ``<task id>:<episode>``)."""
+
+    if task.episodes == (episode,):
+        return task
+    if dataset_spec(task.dataset).is_external(episode):
+        raise ConfigError(f"task {task.id}: episode {episode} is external and cannot be optimized on")
+    own = task.episodes[0] if len(task.episodes) == 1 else ""
+    title = task.title.replace(own, episode) if own and own in task.title else f"{task.title} [{episode}]"
+    return _with_digest(replace(task, id=f"{base_id(task.id)}:{episode}", title=title, episodes=(episode,)))
+
+
+def base_id(task_id: str) -> str:
+    """The card a task reference comes from (``a@1:episode`` -> ``a@1``)."""
+
+    return task_id.partition(":")[0]
+
+
+def task_spec(ref: str) -> TaskSpec:
+    """A registered card, or ``<task id>:<episode>`` for that card on another episode."""
+
+    if ref in _TASKS:
+        return _TASKS[ref]
+    card, sep, episode = ref.partition(":")
+    if sep and episode and card in _TASKS:
+        return variant(_TASKS[card], episode)
+    raise KeyError(f"unknown task {ref}; known: {', '.join(sorted(_TASKS)) or 'none'} "
+                   "(append :<episode> for another episode of a card's dataset)")
 
 
 def task_specs() -> list[TaskSpec]:
@@ -312,9 +339,11 @@ __all__ = [
     "ProtocolSpec",
     "Target",
     "TaskSpec",
+    "base_id",
     "check_task",
     "load_task_spec",
     "register_task",
     "task_spec",
     "task_specs",
+    "variant",
 ]

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "src" / "ecogym"
-LAYERS = ["kernel", "data", "task", "protocol", "solvers", "evaluation", "harness", "episodes",
+LAYERS = ["kernel", "data", "task", "protocol", "solvers", "evaluation", "harness", "episodes", "evolution",
           "arena", "agents", "surface"]
 SURFACE = {"cli", "report", "__main__", "service", "web"}
 DOMAIN_TERMS = ("air_temperature", "relative_humidity", "co2", "greenhouse", "agc_", "cucumber", "tomato")

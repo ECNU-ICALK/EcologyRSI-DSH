@@ -1,0 +1,34 @@
+# Evolve agent harnesses on four greenhouse compartments, verify on six others.
+#
+# Each entry is one team's compartment: the same climate task card, another
+# episode of its dataset. Training mixes both crops and years so a harness
+# cannot specialize to one dataset. Holdout compartments share their dataset's
+# weather and calendar with the training ones but are run by other teams with
+# other climate strategies; the sealed periods (validation, final_test) add
+# independence in time. Only `ecogym evolve verify` runs the holdout tasks.
+id = "greenhouse.climate@1"
+title = "温室气候：两季作物、十个隔间"
+notes = """
+Training: cucumber 2018 AiCU and DeepGreens, tomato 2019 AICU and Automatoes.
+Holdout: cucumber 2018 Croperators, Sonoma and iGrow; tomato 2019 Digilog, IUACAAS and TheAutomators.
+"""
+train = [
+    "greenhouse.agc2018.cucumber.climate@1",
+    "greenhouse.agc2018.cucumber.climate@1:DeepGreens",
+    "greenhouse.agc2019.tomato.climate@1",
+    "greenhouse.agc2019.tomato.climate@1:Automatoes",
+]
+holdout = [
+    "greenhouse.agc2018.cucumber.climate@1:Croperators",
+    "greenhouse.agc2018.cucumber.climate@1:Sonoma",
+    "greenhouse.agc2018.cucumber.climate@1:iGrow",
+    "greenhouse.agc2019.tomato.climate@1:Digilog",
+    "greenhouse.agc2019.tomato.climate@1:IUACAAS",
+    "greenhouse.agc2019.tomato.climate@1:TheAutomators",
+]
+
+[gates]
+min_delta = 0.005   # mean skill gain over the training tasks
+confidence = 0.95   # the interval of the mean task gain must exclude zero
+resamples = 2000
+task_cap = 0.03     # no task may credibly lose more than 0.03 skill

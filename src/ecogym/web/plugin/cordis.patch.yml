@@ -1,0 +1,9 @@
+# @ecogym/dsh-plugin profile layer: DSH starts the ecogym service and shows the 生态进化 panel.
+#
+# `dsh plugin --profile web add link:<this directory>` (what `ecogym dsh install` runs) puts this layer on
+# the profile's stack; `dsh plugin --profile web remove @ecogym/dsh-plugin` takes it off again.
+# Settings (the Python with ecogym, ECOGYM_HOME, extra environment) live in ~/.ecogym/dsh-plugin.json,
+# written by `ecogym dsh install`; a row with id `ecogym` in the profile's own cordis.patch.yml overrides them.
+- insert:
+    - id: ecogym
+      name: '@ecogym/dsh-plugin'

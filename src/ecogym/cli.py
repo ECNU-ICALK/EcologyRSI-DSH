@@ -1,16 +1,39 @@
 """ecogym command line.
 
+DeepSeek Harness plugin (the user interface):
+
+    ecogym dsh install [--profile web]          DSH starts ecogym and shows a 生态进化 panel
+    ecogym dsh status | uninstall               what is installed where; remove it again
+
+Agent harnesses (inner and outer loop):
+
+    ecogym setup                                agent runtime (Python with the scientific stack)
+    ecogym suites                               task suites: training and holdout tasks
+    ecogym models                               model routes: DeepSeek and the providers in DSH's settings
+    ecogym episode run TASK [--harness H]       one sandboxed agent episode, judged on the hidden stage
+    ecogym episode list | show EP               recorded episodes
+    ecogym evolve run --suite S                 evolve a harness on the suite's training tasks
+    ecogym evolve run --resume EVO              continue an interrupted evolution run
+    ecogym evolve list | show EVO               evolution runs: rounds, candidates, decisions
+    ecogym evolve verify EVO --holdout          one-time check on the holdout tasks
+    ecogym evolve verify EVO --sealed validation   one-time check on a sealed period
+    ecogym harness show H | diff A B            inspect harness versions
+    ecogym export --out DIR                     SFT threads, preference pairs, notes, episode index
+    ecogym expert list | answer Q TEXT | note SCOPE TEXT   expert participation
+
+Method arena (parameter-level baselines):
+
     ecogym list                                 datasets, tasks (with presets), solvers
     ecogym describe TASK                        partitions, origins, baselines
     ecogym evaluate TASK --preset expert        score a method on a development stage
-    ecogym run TASK --preset expert             arena run (sweep or random proposer)
+    ecogym run TASK --preset expert             arena run (sweep, random or LLM proposer)
     ecogym runs | show RUN | replay RUN         inspect and re-execute runs
     ecogym seal RUN --stage validation          sealed evaluation of a run's final method
     ecogym report RUN --out run.html            static HTML report
     ecogym verify                               check the ledger hash chain
 
-Runs and sealed exposures go to one ledger, ``$ECOGYM_HOME/ledger.sqlite3``
-(``~/.ecogym`` by default) unless ``--ledger`` names another file.
+Everything goes to one ledger, ``$ECOGYM_HOME/ledger.sqlite3`` (``~/.ecogym``
+by default) unless ``--ledger`` names another file.
 """
 
 from __future__ import annotations
@@ -20,6 +43,7 @@ import json
 import logging
 import os
 import sys
+import time
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -232,16 +256,50 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    """The JSON API; the DSH plugin starts it with ``--port 0 --exit-with-stdin`` and reads the port back."""
+
+    import signal
+    import threading
+
     from .service import Service, make_server
 
-    server = make_server(Service(args.ledger, token=args.token), args.host, args.port)
-    print(f"ecogym workbench on http://{args.host}:{args.port}/  (ledger {args.ledger}; Ctrl-C to stop)")
+    service = Service(args.ledger, token=args.token or os.environ.get("ECOGYM_SERVICE_TOKEN") or None)
+    server = make_server(service, args.host, args.port)
+    print(f"ecogym serving http://{args.host}:{server.server_address[1]}/  (ledger {args.ledger}; Ctrl-C to stop)",
+          flush=True)
+    stopping = threading.Event()  # the first signal or end of stdin starts the shutdown; later ones wait for it
+
+    def interrupt(*_: Any) -> None:
+        if not stopping.is_set():
+            stopping.set()
+            raise KeyboardInterrupt
+
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # Ctrl-C twice or a closed terminal included
+        signal.signal(signum, interrupt)
+    if args.exit_with_stdin:  # the parent holds the pipe open; EOF means it is gone
+        def watch() -> None:
+            try:  # the raw descriptor: a thread blocked in a buffered read would hold its lock at exit
+                while os.read(sys.stdin.fileno(), 4096):
+                    pass
+            except (OSError, ValueError):
+                pass
+            if not stopping.is_set():
+                stopping.set()
+                server.shutdown()
+
+        threading.Thread(target=watch, name="stdin watch", daemon=True).start()
+    threading.Thread(target=service.warm, name="warm up", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stopping.set()
         server.server_close()
+        if not service.close():  # a step outlived the deadline; close() recorded its run as stopped
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)  # do not wait for it: the interpreter would join the episode workers first
     return 0
 
 
@@ -281,6 +339,73 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dsh_install(args: argparse.Namespace) -> int:
+    from .web import install, status
+
+    env = {}
+    for item in args.env:
+        key, sep, value = item.partition("=")
+        if not sep or not key.isidentifier():
+            raise ValueError(f"--env takes KEY=VALUE, not {item!r}")
+        env[key] = value
+    try:
+        result = install(profile=args.profile, home=args.home, ledger=args.ledger, env=env,
+                         keep_legacy=args.keep_legacy)
+    except (RuntimeError, OSError) as error:
+        print(f"ecogym: {error}", file=sys.stderr)
+        return 2
+    check = status(profile=args.profile)
+    if args.json:
+        _print_json({**result, "status": check})
+        return 0
+    print(f"@ecogym/dsh-plugin is a layer of DSH profile {args.profile} ({result['profile_dir']})\n"
+          f"  DSH starts: {result['python']} -m ecogym serve   (ECOGYM_HOME {result['home']})\n"
+          f"  settings:   {result['settings']}")
+    for key, value in result["env"].items():
+        print(f"              {key}={value}")
+    if result["legacy_backup"]:
+        print(f"  removed the EcologyRSI plugin block from cordis.patch.yml (backup {result['legacy_backup']})")
+    for note in result.get("notes") or []:
+        print(f"  note: {note}")
+    if not check["agent_runtime_found"]:
+        print(f"  warning: no agent runtime at {check['agent_runtime']}; run `ecogym setup` "
+              "(or pass --env ECOGYM_RUNTIME_PYTHON=...)")
+    print(f"\nstart DSH with `dsh --profile {args.profile}`{' (or `dsh web`)' if args.profile == 'web' else ''} "
+          "and open 生态进化 in the sidebar")
+    return 0
+
+
+def cmd_dsh_uninstall(args: argparse.Namespace) -> int:
+    from .web import uninstall
+
+    try:
+        result = uninstall(profile=args.profile)
+    except (RuntimeError, OSError) as error:
+        print(f"ecogym: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        _print_json(result)
+        return 0
+    print(f"{'removed @ecogym/dsh-plugin from' if result['removed'] else 'no @ecogym/dsh-plugin in'} "
+          f"{result['profile']}" + (f"; deleted {result['settings_removed']}" if result["settings_removed"] else "")
+          + (f"; kept the settings, they configure profile {result['settings_kept_for']}"
+             if result.get("settings_kept_for") else ""))
+    return 0
+
+
+def cmd_dsh_status(args: argparse.Namespace) -> int:
+    from .web import status
+
+    result = status(profile=args.profile)
+    if args.json:
+        _print_json(result)
+        return 0
+    width = max(len(key) for key in result)
+    for key, value in result.items():
+        print(f"{key:<{width}}  {value}")
+    return 0
+
+
 def cmd_episode_run(args: argparse.Namespace) -> int:
     from .episodes.runner import EpisodeConfig, run_episode
 
@@ -297,8 +422,9 @@ def cmd_episode_run(args: argparse.Namespace) -> int:
 
 def _print_episode(result: dict[str, Any]) -> None:
     scored = result.get("scored")
-    print(f"\n{result['episode']}  {result['status']}  {result['seconds']:.0f} s  {result['tokens']:,} tokens  "
-          f"{result['llm_calls']} model calls  {result['submissions']} submissions")
+    print(f"\n{result['episode']}  {result['status']}  {result['seconds']:.0f} s  {result['tokens']:,} tokens "
+          f"({result['metered_tokens']:,} metered)  {result['llm_calls']} model calls  "
+          f"{result['submissions']} submissions")
     if scored:
         low, high = scored["interval"]
         print(f"\nhidden {scored['stage']}: {scored['score']:+.4f}  95% day-block interval [{low:+.4f}, {high:+.4f}]  "
@@ -309,35 +435,21 @@ def _print_episode(result: dict[str, Any]) -> None:
     print(f"\ntrajectory: {result['trajectory']['dir']}")
 
 
-def _episodes(ledger: Ledger) -> list[dict[str, Any]]:
-    found = []
-    for run_id in ledger.runs(first="episode_started"):
-        record: dict[str, Any] = {"episode": run_id}
-        for event in ledger.events(run_id):
-            if event.kind == "episode_started":
-                record.update(started_at=event.at, task_id=event.body["task_id"], label=event.body.get("label", ""),
-                              harness=event.body["harness"], model=event.body["model"])
-            elif event.kind == "episode_scored":
-                record["scored"] = event.body
-            elif event.kind == "episode_finished":
-                record["finished"] = event.body
-        found.append(record)
-    return found
-
-
 def cmd_episode_list(args: argparse.Namespace) -> int:
+    from .episodes.history import episode_records, summary
+
     with Ledger(args.ledger) as ledger:
-        episodes = _episodes(ledger)
+        episodes = [summary(record) for record in episode_records(ledger)]
     if args.json:
         _print_json(episodes)
         return 0
     rows = []
     for item in episodes:
-        finished, scored = item.get("finished") or {}, item.get("scored") or {}
+        role = item["context"].get("role", "")
         rows.append([item["episode"], item["started_at"][:16].replace("T", " "), item["task_id"],
-                     item["harness"]["digest"][:12], item["model"], finished.get("status", "running"),
-                     f"{scored['score']:+.4f}" if scored else "", item["label"]])
-    print(_table(["episode", "started", "task", "harness", "model", "status", "hidden score", "label"], rows)
+                     (item["harness"].get("digest") or "")[:12], item["model"], item["status"],
+                     f"{item['score']:+.4f}" if isinstance(item["score"], float) else "", role, item["label"]])
+    print(_table(["episode", "started", "task", "harness", "model", "status", "hidden score", "role", "label"], rows)
           if rows else "no episodes in this ledger")
     return 0
 
@@ -365,6 +477,295 @@ def cmd_episode_show(args: argparse.Namespace) -> int:
         elif event["kind"] == "episode_finished":
             detail = f"{body['status']}, {body['seconds']:.0f} s, {body['tokens']:,} tokens"
         print(f"{event['at'][:19].replace('T', ' ')}  {event['kind']:<18} {detail}")
+    return 0
+
+
+def cmd_suites(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from .task.suite import suite_specs
+
+    suites = [{"id": suite.id, "title": suite.title, "train": list(suite.train), "holdout": list(suite.holdout),
+               "gates": asdict(suite.gates), "notes": suite.notes.strip()} for suite in suite_specs()]
+    if args.json:
+        _print_json(suites)
+        return 0
+    for suite in suites:
+        print(f"{suite['id']}  {suite['title']}")
+        print(f"  train   ({len(suite['train'])}): " + ", ".join(suite["train"]))
+        print(f"  holdout ({len(suite['holdout'])}): " + ", ".join(suite["holdout"]))
+        gates = suite["gates"]
+        basis = "t interval of the task gains" if len(suite["train"]) >= 3 else "tasks x replicates x days interval"
+        print(f"  gates: mean gain > {gates['min_delta']}; {gates['confidence']:.0%} {basis} above 0 (Bonferroni "
+              f"across a round's candidates); no task credibly losing more than {gates['task_cap']} (judged once "
+              "both versions have 2+ episodes on it)\n")
+    return 0 if suites else 1
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    from .episodes import providers
+
+    body = providers.describe()
+    if args.json:
+        _print_json(body)
+        return 0
+    print(f"model routes ({body['settings']}; write --model <provider>/<model>):")
+    for route in body["routes"]:
+        state = "runnable" if route["runnable"] else f"not runnable: {route['problem']}"
+        print(f"  {route['provider']}  {route['name']}  {route['api']}  {route['host']}  key {route['key_env']}  "
+              f"[{state}]")
+        for model in route["models"]:
+            print(f"      {route['provider']}/{model}")
+    if body["dsh_default"]:
+        print(f"DSH's own default: {body['dsh_default'].get('provider')}/{body['dsh_default'].get('model')}")
+    if body["error"]:
+        print(f"note: {body['error']}")
+    return 0
+
+
+def _match(ledger: Ledger, ref: str, first: str, prefix: str) -> str:
+    matches = [run for run in ledger.runs(first=first) if run == ref or run.startswith(ref) or run == f"{prefix}{ref}"]
+    if len(matches) != 1:
+        raise SystemExit(f"{ref!r} matches {len(matches)} runs in {ledger.path}")
+    return matches[0]
+
+
+def _progress(kind: str, body: dict[str, Any]) -> None:
+    stamp = time.strftime("%H:%M:%S")
+    if kind == "round_started":
+        print(f"{stamp} round {body['generation']}: incumbent {body['incumbent'][:12]}", flush=True)
+    elif kind == "episode":
+        score = body.get("score")
+        who = "incumbent" if body["role"] == "incumbent" else f"candidate {body['candidate']}"
+        print(f"{stamp}   {who:<12} {body['task']:<52} {body.get('status', ''):<12} "
+              f"{f'{score:+.4f}' if isinstance(score, float) else '–'}  {body.get('episode') or body.get('error', '')}",
+              flush=True)
+    elif kind == "evolver_finished":
+        found = ", ".join(f"{item['name']}={item['status']}" for item in body.get("candidates", []))
+        print(f"{stamp}   evolver {body.get('status')} in {body.get('seconds', 0):.0f} s: {found or body.get('error')}",
+              flush=True)
+    elif kind == "candidate_proposed":
+        print(f"{stamp}   candidate {body['name']} {body['digest'][:12]}: {body.get('summary', '')[:100]}", flush=True)
+    elif kind == "candidate_rejected":
+        print(f"{stamp}   candidate {body['name']} {body['status']}: {'; '.join(body.get('problems', []))[:160]}",
+              flush=True)
+    elif kind == "candidate_compared":
+        decision = body["decision"]
+        if decision.get("delta") is None:
+            print(f"{stamp}   {body['name']}: {decision['reason']}", flush=True)
+        else:
+            low, high = decision["interval"]
+            print(f"{stamp}   {body['name']}: gain {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}] -> "
+                  f"{decision['reason']}", flush=True)
+    elif kind == "harness_adopted":
+        print(f"{stamp}   adopted {body['name']} {body['digest'][:12]} (gain {body['delta']:+.4f})", flush=True)
+    elif kind == "round_finished":
+        print(f"{stamp} round {body['generation']} done: {body.get('outcome')}", flush=True)
+
+
+def cmd_evolve_run(args: argparse.Namespace) -> int:
+    from .evolution import Evolution, EvolveConfig, fold
+
+    run_id = None
+    if args.resume:
+        with Ledger(args.ledger) as ledger:
+            run_id = _match(ledger, args.resume, "evolve_started", "evo:")
+            config = EvolveConfig.from_dict(fold(ledger.events(run_id))["config"])
+    else:
+        if not args.suite:
+            raise SystemExit("evolve run needs --suite (or --resume RUN)")
+        config = EvolveConfig(suite=args.suite, harness=args.harness, generations=args.generations,
+                              candidates=args.candidates, repeats=args.repeats, minutes=args.minutes,
+                              tokens=args.tokens, model=args.model, evolver_minutes=args.evolver_minutes,
+                              evolver_tokens=args.evolver_tokens, evolver_model=args.evolver_model,
+                              concurrency=args.concurrency, retries=args.retries)
+    evolution = Evolution(config, args.ledger, on_event=None if args.json else _progress)
+    run_id = run_id or evolution.start(label=args.label)
+    first, later = config.episodes_per_round(len(evolution.tasks))
+    if not args.json:
+        print(f"{run_id} on {config.suite}: {len(evolution.tasks)} training tasks, {config.generations} rounds x "
+              f"{config.candidates} candidates, {config.repeats} episode(s) per harness and task\n"
+              f"  {first + config.generations * later} episodes (plus retries and rerun rounds) of "
+              f"{config.minutes:g} min and "
+              f"{config.generations} evolver sessions of {config.evolver_minutes:g} min, "
+              f"{config.concurrency} at a time (ledger {args.ledger})", flush=True)
+    result = evolution.run(run_id)
+    if args.json:
+        _print_json({"run_id": run_id, **result})
+        return 0
+    print(f"\n{run_id} finished: seed {result['seed'][:12]} -> final {result['final'][:12]}, "
+          f"{result['adoptions']} adoption(s), {result['episodes']} episodes, {result['tokens']:,} tokens")
+    print(f"next: ecogym evolve verify {run_id} --holdout")
+    return 0
+
+
+def cmd_evolve_list(args: argparse.Namespace) -> int:
+    from .evolution import fold, summary
+
+    with Ledger(args.ledger) as ledger:
+        runs = [summary(fold(ledger.events(run_id))) for run_id in ledger.runs(first="evolve_started")]
+    if args.json:
+        _print_json(runs)
+        return 0
+    rows = [[item["run_id"], item["started_at"][:16].replace("T", " "), item["suite"]["id"], item["status"],
+             f"{item['rounds_finished']}/{item['generations']}", item["adoptions"], item["episodes"],
+             f"{item['seed']['digest'][:12]} -> {item['incumbent'][:12]}",
+             ", ".join((["holdout"] if item["verified"]["holdout"] else []) + item["verified"]["sealed"]),
+             item["label"]] for item in runs]
+    print(_table(["run", "started", "suite", "status", "rounds", "adopted", "episodes", "seed -> final", "verified",
+                  "label"], rows) if rows else "no evolution runs in this ledger")
+    return 0
+
+
+def cmd_evolve_show(args: argparse.Namespace) -> int:
+    from .evolution import fold
+
+    with Ledger(args.ledger) as ledger:
+        view = fold(ledger.events(_match(ledger, args.run, "evolve_started", "evo:")))
+    if args.json:
+        _print_json(view)
+        return 0
+    print(f"{view['run_id']}  {view['status']}  suite {view['suite']['id']}  seed {view['seed']['digest'][:12]} -> "
+          f"incumbent {view['incumbent'][:12]}")
+    for round_ in view["rounds"]:
+        scores: dict[str, list[float]] = {}
+        for entry in round_["episodes"]:
+            if isinstance(entry.get("score"), float):
+                key = "incumbent" if entry["role"] == "incumbent" else f"candidate {entry['candidate']}"
+                scores.setdefault(key, []).append(entry["score"])
+        means = ", ".join(f"{key} {sum(values) / len(values):+.4f} ({len(values)})" for key, values in scores.items())
+        print(f"\nround {round_['generation']}  {round_.get('outcome') or 'unfinished'}  episodes: {means or '–'}")
+        for candidate in round_["candidates"]:
+            decision = candidate.get("decision") or {}
+            gain = (f"gain {decision['delta']:+.4f} [{decision['interval'][0]:+.4f}, {decision['interval'][1]:+.4f}] "
+                    f"{decision['reason']}" if decision.get("delta") is not None else "; ".join(
+                        candidate.get("problems", []))[:120])
+            print(f"  {candidate['name']} {str(candidate.get('digest') or '')[:12]:<12} {candidate['status']:<12} "
+                  f"{gain}")
+            if candidate.get("summary"):
+                print(f"      {candidate['summary'][:160]}")
+    verification = view["verification"]
+    for name, body in [("holdout", verification["holdout"]), *verification["sealed"].items()]:
+        if body:
+            decision = body.get("decision") or {}
+            means = ", ".join(f"{key} {body['means'][key]:+.4f}" for key in ("seed", "final")
+                              if body["means"].get(key) is not None)
+            gain = f"; final - seed {decision['delta']:+.4f} -> {decision['reason']}" if decision else ""
+            print(f"\nverified on {name}: {means}{gain}")
+    return 0
+
+
+def cmd_evolve_verify(args: argparse.Namespace) -> int:
+    from .evolution import verify_holdout, verify_sealed
+
+    with Ledger(args.ledger) as ledger:
+        run_id = _match(ledger, args.run, "evolve_started", "evo:")
+    body = verify_holdout(args.ledger, run_id) if args.holdout else verify_sealed(args.ledger, run_id, args.sealed)
+    if args.json:
+        _print_json(body)
+        return 0
+    stage = "holdout" if args.holdout else args.sealed
+    print(f"{run_id} on {stage}:")
+    for label in ("seed", "final"):
+        version = body["versions"].get(label)
+        if version is None:
+            continue
+        items = version.get("episodes") or version.get("tasks") or {}
+        cells = ", ".join(f"{task} {item['score']:+.4f}" for task, item in items.items()
+                          if isinstance(item.get("score"), float))
+        mean = body["means"].get(label)
+        print(f"  {label} {version['digest'][:12]}: mean {f'{mean:+.4f}' if mean is not None else '–'}; {cells}")
+    decision = body.get("decision")
+    if decision:
+        low, high = decision["interval"]
+        print(f"  final - seed: {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}] -> {decision['reason']}")
+    return 0
+
+
+def cmd_harness_show(args: argparse.Namespace) -> int:
+    from .harness import content_files, resolve
+
+    harness = resolve(args.harness)
+    body = {**harness.describe(), "root": str(harness.root),
+            "files": [path.as_posix() for path in content_files(harness.root)]}
+    if args.json:
+        _print_json(body)
+        return 0
+    print(f"{harness.name}  {harness.digest}\n  parent {harness.parent or '–'}  author {harness.author}\n"
+          f"  {harness.summary}\n  agent {body['agent']}\n  {harness.root}")
+    for path in body["files"]:
+        print(f"    {path}")
+    return 0
+
+
+def cmd_harness_diff(args: argparse.Namespace) -> int:
+    from .harness import diff, resolve
+
+    changes = diff(resolve(args.before).root, resolve(args.after).root)
+    if args.json:
+        _print_json(changes)
+        return 0
+    for change in changes:
+        print(change["patch"] or f"{change['status']} {change['path']}")
+    print(f"\n{len(changes)} file(s) changed")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from .episodes.export import export
+
+    manifest = export(args.ledger, Path(args.out), min_score=None if args.all else args.min_score,
+                      include_failed=args.all, evolver=not args.no_evolver, margin=args.margin,
+                      cross_prompt=args.cross_prompt)
+    if args.json:
+        _print_json(manifest)
+        return 0
+    counts = manifest["counts"]
+    print(f"wrote {args.out}: {counts['sft']} SFT threads from {counts['sessions']} sessions, "
+          f"{counts['preferences']} preference pairs, {counts['episodes']} episodes, {counts['notes']} notes")
+    for reason, count in manifest["skipped"].items():
+        print(f"  skipped {count}: {reason}")
+    return 0
+
+
+def cmd_expert_list(args: argparse.Namespace) -> int:
+    from .episodes import expert
+
+    with Ledger(args.ledger) as ledger:
+        questions, notes = expert.questions(ledger), expert.notes(ledger)
+    if args.json:
+        _print_json({"questions": questions, "notes": notes})
+        return 0
+    shown = [item for item in questions if args.all or not item["answers"]]
+    for item in shown:
+        print(f"{item['id']}  {item['at'][:16].replace('T', ' ')}  {item['task_id'] or 'evolver'}"
+              f"{'  (answered)' if item['answers'] else ''}\n  Q: {item['question']}")
+        if item["context"]:
+            print(f"     {item['context'][:300]}")
+        for answer in item["answers"]:
+            print(f"  A: {answer['text']}")
+    for note in notes:
+        print(f"note {note['seq']}  [{note['scope']}]  {note['text']}")
+    if not shown and not notes:
+        print("no open questions" if questions else "no questions or notes yet")
+    return 0
+
+
+def cmd_expert_answer(args: argparse.Namespace) -> int:
+    from .episodes import expert
+
+    with Ledger(args.ledger) as ledger:
+        body = expert.answer(ledger, args.question, args.text, by=args.by)
+    print(f"answered {args.question} (seq {body['seq']}); later episodes on matching tasks will see it")
+    return 0
+
+
+def cmd_expert_note(args: argparse.Namespace) -> int:
+    from .episodes import expert
+
+    with Ledger(args.ledger) as ledger:
+        body = expert.add_note(ledger, args.scope, args.text, by=args.by)
+    print(f"noted for {args.scope} (seq {body['seq']})")
     return 0
 
 
@@ -412,12 +813,34 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("run")
     report.add_argument("--out")
     command("verify", cmd_verify, "check the ledger hash chain", ledger=True)
-    serve = command("serve", cmd_serve, "web workbench and JSON API", ledger=True)
+    serve = command("serve", cmd_serve, "JSON API for the DSH plugin (DSH starts it)", ledger=True)
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8850)
-    serve.add_argument("--token", default=None, help="required for non-loopback hosts")
+    serve.add_argument("--port", type=int, default=8850, help="0 lets the OS choose; the URL line reports it")
+    serve.add_argument("--token", default=None,
+                       help="bearer token for every API call (default $ECOGYM_SERVICE_TOKEN); required beyond loopback")
+    serve.add_argument("--exit-with-stdin", action="store_true", help="shut down when stdin reaches end of file")
     setup = command("setup", cmd_setup, "create the agent runtime (Python with the scientific stack)")
     setup.add_argument("--force", action="store_true", help="rebuild it")
+
+    dsh = commands.add_parser("dsh", help="the DSH plugin: DSH starts ecogym and shows the 生态进化 panel")
+    dshs = dsh.add_subparsers(dest="dsh_command", required=True)
+    for name, handler, text in (("install", cmd_dsh_install, "add the plugin to a DSH profile"),
+                                ("uninstall", cmd_dsh_uninstall, "remove the plugin from a DSH profile"),
+                                ("status", cmd_dsh_status, "where the plugin is installed and what it starts")):
+        sub = dshs.add_parser(name, help=text)
+        sub.set_defaults(handler=handler)
+        sub.add_argument("--json", action="store_true", help="machine-readable output")
+        sub.add_argument("--profile", default="web", help="DSH profile under $DSH_HOME/profiles (default web)")
+        if name == "install":
+            sub.add_argument("--home", type=Path, default=None,
+                             help="ECOGYM_HOME of the service (default $ECOGYM_HOME or ~/.ecogym)")
+            sub.add_argument("--ledger", type=Path, default=None, help="ledger file (default <home>/ledger.sqlite3)")
+            sub.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                             help="extra environment for the service (repeatable); ECOGYM_DATA_ROOT, "
+                                  "ECOGYM_RUNTIME_PYTHON, ECOGYM_DSH_BIN and ECOGYM_CACHE_DIR are taken from "
+                                  "this shell")
+            sub.add_argument("--keep-legacy", action="store_true",
+                             help="leave the EcologyRSI plugin block in the profile's cordis.patch.yml")
 
     episode = commands.add_parser("episode", help="agent episodes: a DSH agent solves a task, the judge scores it")
     episodes = episode.add_subparsers(dest="episode_command", required=True)
@@ -430,15 +853,101 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     run_episode = episode_command("run", cmd_episode_run, "run one sandboxed agent episode on a task")
-    run_episode.add_argument("task", help="task id (see `ecogym list`)")
+    run_episode.add_argument("task", help="task id, or <task id>:<episode> for another episode of its dataset")
     run_episode.add_argument("--harness", default="seed", help="seed, a harness directory, or a stored digest prefix")
     run_episode.add_argument("--minutes", type=float, default=30.0, help="wall-clock budget")
-    run_episode.add_argument("--tokens", type=int, default=4_000_000, help="token budget (all model calls)")
-    run_episode.add_argument("--model", default=None, help="override the harness model (a DeepSeek model id)")
+    run_episode.add_argument("--tokens", type=int, default=4_000_000,
+                             help="token budget (cost-weighted: cached prompt tokens count a tenth)")
+    run_episode.add_argument("--model", default=None,
+                             help="override the harness model: <provider>/<model> (see `ecogym models`) or a "
+                                  "DeepSeek model id")
     run_episode.add_argument("--label", default="")
     run_episode.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
     episode_command("list", cmd_episode_list, "episodes in the ledger")
     episode_command("show", cmd_episode_show, "an episode's events").add_argument("episode")
+
+    command("suites", cmd_suites, "task suites: training and holdout tasks")
+    command("models", cmd_models, "model routes the agents can use: DeepSeek and DSH's providers")
+
+    evolve = commands.add_parser("evolve", help="evolve an agent harness on a suite's training tasks")
+    evolves = evolve.add_subparsers(dest="evolve_command", required=True)
+
+    def evolve_command(name: str, handler, help_text: str):
+        sub = evolves.add_parser(name, help=help_text)
+        sub.set_defaults(handler=handler)
+        sub.add_argument("--json", action="store_true", help="machine-readable output")
+        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
+        return sub
+
+    start = evolve_command("run", cmd_evolve_run, "start (or --resume) an evolution run")
+    start.add_argument("--suite", help="suite id (see `ecogym suites`) or a suite TOML file")
+    start.add_argument("--resume", metavar="RUN", help="continue this run after its last finished round")
+    start.add_argument("--harness", default="seed", help="starting harness: seed, a directory or a stored digest")
+    start.add_argument("--generations", type=int, default=3, help="proposal rounds after the baseline round")
+    start.add_argument("--candidates", type=int, default=2, help="candidate harnesses per round (1-6)")
+    start.add_argument("--repeats", type=int, default=1, help="episodes per harness and training task per round")
+    start.add_argument("--minutes", type=float, default=20.0, help="wall-clock budget of one episode")
+    start.add_argument("--tokens", type=int, default=3_000_000, help="cost-weighted token budget of one episode")
+    start.add_argument("--model", default=None,
+                       help="pin the inner agents' model, <provider>/<model> (default: each harness's own)")
+    start.add_argument("--evolver-minutes", type=float, default=30.0)
+    start.add_argument("--evolver-tokens", type=int, default=4_000_000)
+    start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
+    start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
+    start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
+    start.add_argument("--label", default="")
+    evolve_command("list", cmd_evolve_list, "evolution runs in the ledger")
+    evolve_command("show", cmd_evolve_show, "rounds, candidates and decisions of a run").add_argument("run")
+    check = evolve_command("verify", cmd_evolve_verify, "one-time verification on holdout tasks or a sealed period")
+    check.add_argument("run")
+    target = check.add_mutually_exclusive_group(required=True)
+    target.add_argument("--holdout", action="store_true", help="run seed and final harness on the holdout tasks")
+    target.add_argument("--sealed", choices=("validation", "final_test"),
+                        help="re-judge their programs on a sealed period")
+
+    harness = commands.add_parser("harness", help="inspect harness versions")
+    harnesses = harness.add_subparsers(dest="harness_command", required=True)
+    show = harnesses.add_parser("show", help="a harness's metadata and files")
+    show.set_defaults(handler=cmd_harness_show)
+    show.add_argument("harness", help="seed, a directory or a stored digest prefix")
+    show.add_argument("--json", action="store_true")
+    compare = harnesses.add_parser("diff", help="unified diff between two harness versions")
+    compare.set_defaults(handler=cmd_harness_diff)
+    compare.add_argument("before")
+    compare.add_argument("after")
+    compare.add_argument("--json", action="store_true")
+
+    export = command("export", cmd_export, "training data: SFT threads, preference pairs, notes", ledger=True)
+    export.add_argument("--out", required=True, help="output directory")
+    export.add_argument("--min-score", type=float, default=0.0,
+                        help="SFT only from episodes with an accepted submission scoring above this on the hidden "
+                             "stage (0: the naive baseline)")
+    export.add_argument("--all", action="store_true", help="export every session; filter later with meta")
+    export.add_argument("--margin", type=float, default=0.02, help="smallest score gap of a preference pair")
+    export.add_argument("--cross-prompt", action="store_true",
+                        help="also pair episodes whose prompts differ (they carry rejected_prompt)")
+    export.add_argument("--no-evolver", action="store_true", help="leave out evolver sessions")
+
+    expert = commands.add_parser("expert", help="expert questions, answers and notes")
+    experts = expert.add_subparsers(dest="expert_command", required=True)
+
+    def expert_command(name: str, handler, help_text: str):
+        sub = experts.add_parser(name, help=help_text)
+        sub.set_defaults(handler=handler)
+        sub.add_argument("--json", action="store_true", help="machine-readable output")
+        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
+        return sub
+
+    expert_command("list", cmd_expert_list, "open questions (--all: answered too) and notes").add_argument(
+        "--all", action="store_true")
+    reply = expert_command("answer", cmd_expert_answer, "answer a question (later episodes see the answer)")
+    reply.add_argument("question", help="question id, as shown by `ecogym expert list`")
+    reply.add_argument("text")
+    reply.add_argument("--by", default="")
+    note = expert_command("note", cmd_expert_note, "leave a note for every episode in a scope")
+    note.add_argument("scope", help="* (all tasks), a dataset id, a task id or <task id>:<episode>")
+    note.add_argument("text")
+    note.add_argument("--by", default="")
     return parser
 
 

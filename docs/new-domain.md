@@ -128,6 +128,27 @@ terms = [
 
 分区规则（四阶段、时间前向）、门槛参数和默认值见 `src/ecogym/task/spec.py`。默认分区为：前 60% 时间用于训练，其中前一半再按 70%／30% 分为 `calibration_fit` 和 `calibration_uq`，后一半为 `model_selection`；随后 20% 为 `validation`，最后为 `final_test`，相邻分区之间留出隔离期。日历切点在数据集全部非外部时段上统一计算。
 
+任务卡写一次就能用在数据集的每个时段上：`soil.site_x.moisture@1:plot_b` 是同一张卡换成时段 `plot_b`（外部时段不能用）。智能体回合和任务组都接受这种引用。
+
+## 3b. 任务组（进化 Harness 用）
+
+任务组列出训练任务（比较 Harness 版本）和留出任务（只在最终验证时运行，进化中的智能体看不到），放在领域包的 `suites/` 下并在 `__init__.py` 的 `SUITES` 中声明，或作为单独的 TOML 文件用 `ecogym evolve run --suite path/to/suite.toml` 传入：
+
+```toml
+id = "soil.moisture@1"
+title = "Site X 土壤水分：三个样地训练，两个留出"
+train = ["soil.site_x.moisture@1", "soil.site_x.moisture@1:plot_b", "soil.site_x.moisture@1:plot_c"]
+holdout = ["soil.site_x.moisture@1:plot_d", "soil.site_x.moisture@1:plot_e"]
+
+[gates]
+min_delta = 0.005   # 候选 − 在任的平均增益至少这么多
+confidence = 0.95   # 依次重抽任务、回合和天的区间下限须大于 0
+resamples = 2000
+task_cap = 0.03     # 任何任务的可信损失不得超过它
+```
+
+每个条目必须是单时段任务，同一个（数据集，时段）不能出现两次，也不能同时出现在训练和留出两边。训练任务越多、越不同，被采纳的改进越可能是通用的；同一数据集的留出时段与训练时段共享日历（和共享的外部输入），它们检验的是向其他站点或管理方式的迁移，向未来时期的迁移由封存时期检验。
+
 ## 4. 领域求解器（可选）
 
 通用求解器 `recipe_ridge@1` 已能表达滞后、季节参照、滚动统计、日周期相位和外生输入。需要领域结构时，在领域包中登记一个 `SolverSpec`：
@@ -161,6 +182,8 @@ ecogym list                                   # 新数据集、任务和求解�
 ecogym describe soil.site_x.moisture@1        # 分区边界、各阶段计分起点数、逐格选定的基线
 ecogym evaluate soil.site_x.moisture@1 --preset recipe_seed
 ecogym run soil.site_x.moisture@1 --preset recipe_seed --proposer sweep
+ecogym suites                                 # 任务组的训练与留出任务都能解析
+ecogym episode run soil.site_x.moisture@1:plot_b --minutes 5   # 一个智能体回合，确认工作区和裁判都正常
 python -m unittest tests.ecogym.test_domains  # 领域一致性测试：每个任务卡都能在自己的数据上跑通
 ```
 

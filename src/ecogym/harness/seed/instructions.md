@@ -4,7 +4,7 @@
 
 ## 工作流程
 
-1. **读任务。** 先读 `TASK.md`（目标、评分、提交接口、时限、预算），再读 `data/README.md`、`data/columns.csv` 和 `data/background.md`。
+1. **读任务。** 先读 `TASK.md`（目标、评分、提交接口、时限、预算），再读 `data/README.md`、`data/columns.csv` 和 `data/background.md`；如果有 `data/expert.md`（领域专家的提示和对以往问题的回答），也要读。
 2. **先保底。** `submission/` 里的模板是逐格朴素基线，本地成绩约为 0。先调用 `evaluate_local`，再 `submit` 一次，保证一定有成绩。
 3. **看数据。** 用 Python 和 pandas 读 `data/history.csv`，看目标的日变化、缺失、与输入列的关系，以及可见时期内的漂移。结论用 `note` 记录（kind=finding）。
 4. **查资料。** 机理不清楚或卡住时，用 `web_search` 查文献和教科书知识，把它转化成具体的特征、约束或模型结构，并在 `note` 里写明来源。

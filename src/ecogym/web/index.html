@@ -1,118 +1,21 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ecogym 生态预测训练场</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f5c45'/%3E%3Cpath d='M9 22c0-8 6-13 15-13-1 9-6 14-13 14' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M9 23l8-8' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ecogym service</title>
+<style>
+  body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; max-width: 640px; margin: 64px auto; padding: 0 24px; color: #1f2328; }
+  code { background: #f2f3f5; padding: 1px 6px; border-radius: 4px; }
+</style>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#" aria-label="ecogym 首页">
-      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M9 22c0-8 6-13 15-13-1 9-6 14-13 14"/><path d="M9 23l8-8"/></svg>
-      <span class="brand-name">ecogym</span><span class="brand-tagline">生态预测训练场</span>
-    </a>
-    <span class="topbar-meta" id="ledger-info"></span>
-    <a class="button primary" href="#new" id="new-run-link"><span aria-hidden="true">＋</span> 新建运行</a>
-  </header>
-
-  <div class="layout">
-    <nav class="sidebar" aria-label="运行列表">
-      <div class="sidebar-head">
-        <h2>运行 <span class="count" id="run-count"></span></h2>
-        <input id="run-filter" type="search" placeholder="按标签、任务、模型或状态筛选" aria-label="筛选运行">
-      </div>
-      <ul class="run-list" id="runs"></ul>
-    </nav>
-    <main class="main" id="main" tabindex="-1">
-      <div class="placeholder">正在加载…</div>
-    </main>
-  </div>
-
-  <div class="toasts" id="toasts" aria-live="polite"></div>
-
-  <template id="new-run-template">
-    <form class="new-run" id="new-run" novalidate>
-      <header class="page-head">
-        <h1>新建运行</h1>
-        <p>从一个种子方法出发，每代由提案者给出修改。候选先在初筛日上排名，最好的一个在不重叠的留出日上与在任方法配对比较，通过全部门槛才晋级。所有预测都由宿主计算，每一步写入账本。</p>
-      </header>
-
-      <section class="panel">
-        <h2>任务与种子方法</h2>
-        <label class="field"><span class="field-label">任务</span><select name="task" required></select></label>
-        <p class="hint" data-hint="task"></p>
-        <div class="field"><span class="field-label">种子方法</span><div class="choices" data-choices="preset"></div></div>
-      </section>
-
-      <section class="panel">
-        <h2>提案者</h2>
-        <div class="choices" data-choices="proposer"></div>
-        <fieldset class="subsection" data-when="llm" hidden>
-          <legend>LLM 设置</legend>
-          <p class="hint">密钥不经过网页：这里只填环境变量名，服务端从环境变量或 <code>$ECOGYM_CREDENTIALS_FILE</code> 读取。</p>
-          <div class="grid">
-            <label class="field"><span class="field-label">传输</span>
-              <select name="transport"><option value="http">OpenAI 兼容 HTTP</option><option value="dsh">DeepSeek Harness 无头模式</option></select></label>
-            <label class="field"><span class="field-label">模型</span>
-              <input name="model" autocomplete="off" placeholder="留空则用 ECOGYM_LLM_MODEL"></label>
-            <label class="field" data-transport="http"><span class="field-label">代理</span>
-              <select name="proxy"><option value="system">跟随系统设置</option><option value="none">不使用代理</option></select></label>
-            <label class="field wide" data-transport="http"><span class="field-label">接口地址</span>
-              <input name="base_url" autocomplete="off" placeholder="https://api.example.com/v1（留空则用 ECOGYM_LLM_BASE_URL）"></label>
-            <label class="field" data-transport="http"><span class="field-label">密钥环境变量</span>
-              <input name="key_env" autocomplete="off" value="ECOGYM_LLM_API_KEY"></label>
-            <label class="field" data-transport="dsh"><span class="field-label">dsh 可执行文件</span>
-              <input name="dsh_bin" autocomplete="off" placeholder="留空则用 ECOGYM_DSH_BIN 或 dsh"></label>
-            <label class="field wide" data-transport="dsh"><span class="field-label">模型配置补丁（每行一个文件路径）</span>
-              <textarea name="patches" rows="2" spellcheck="false"></textarea></label>
-            <label class="field"><span class="field-label">研究员每代工具调用</span>
-              <input name="max_tool_calls" type="number" min="0" max="20" step="1" value="5"></label>
-            <label class="check"><input name="review" type="checkbox" checked> 启用评审角色（剔除理由不足的修改）</label>
-          </div>
-        </fieldset>
-      </section>
-
-      <section class="panel">
-        <h2>竞技设置</h2>
-        <div class="grid">
-          <label class="field"><span class="field-label">代数</span>
-            <input name="generations" type="number" min="1" max="20" step="1" value="3" required></label>
-          <label class="field"><span class="field-label">每代候选数</span>
-            <input name="candidates" type="number" min="1" max="12" step="1" value="4" required></label>
-          <label class="field"><span class="field-label">随机种子</span>
-            <input name="seed" type="number" min="0" step="1" value="0" required>
-            <small>决定每代初筛日与留出日的划分，以及随机提案</small></label>
-        </div>
-        <details class="advanced">
-          <summary>高级设置</summary>
-          <div class="grid">
-            <label class="field"><span class="field-label">信赖域</span>
-              <input name="max_step" type="number" min="0.01" max="1" step="0.01" value="0.15">
-              <small>每个坐标一次最多移动其取值范围的比例</small></label>
-            <label class="field"><span class="field-label">每个修改最多改动的坐标数</span>
-              <input name="max_changes" type="number" min="1" max="20" step="1" value="3"></label>
-            <label class="field wide"><span class="field-label">其他提案者选项（JSON 对象，可选）</span>
-              <textarea name="extra" rows="3" spellcheck="false" placeholder='{"min_interval": 20, "max_calls": 10}'></textarea>
-              <small>与上面的设置合并，同名时以这里为准</small></label>
-          </div>
-        </details>
-      </section>
-
-      <section class="panel">
-        <label class="field"><span class="field-label">标签</span>
-          <input name="label" maxlength="200" placeholder="说明这次运行，例如：专家种子 + LLM 研究智能体，3 代"></label>
-      </section>
-
-      <div class="form-actions">
-        <button type="submit" class="primary">开始运行</button>
-        <a class="button" href="#" data-cancel>取消</a>
-        <span class="form-error" role="alert"></span>
-      </div>
-    </form>
-  </template>
-
-  <script src="/static/app.js"></script>
+<h1>ecogym service</h1>
+<p>这是 ecogym 的 JSON API（<code>/api/*</code>）。界面在 DeepSeek Harness 里：</p>
+<ol>
+  <li>安装插件：<code>ecogym dsh install</code></li>
+  <li>启动 DSH：<code>dsh web</code>，DSH 会一并启动这个服务</li>
+  <li>在 DSH 侧栏点 <b>生态进化</b></li>
+</ol>
 </body>
 </html>

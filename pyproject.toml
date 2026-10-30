@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecogym"
-version = "0.1.0"
-description = "A reproducible training ground for ecological forecasting methods"
+version = "0.2.0"
+description = "An ecological forecasting training ground for research agents and their self-evolving harnesses"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
 license-files = ["LICENSE", "NOTICE"]
@@ -32,7 +32,8 @@ where = ["src"]
 include = ["ecogym*"]
 
 [tool.setuptools.package-data]
-"ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml"]
-"ecogym.web" = ["*.html", "*.js", "*.css"]
+"ecogym.domains.greenhouse" = ["*.toml", "*.md", "tasks/*.toml", "suites/*.toml"]
+"ecogym.evolution" = ["*.md"]
+"ecogym.web" = ["*.html", "plugin/package.json", "plugin/cordis.patch.yml", "plugin/README.md", "plugin/lib/*.js"]
 "ecogym.harness" = ["seed/*.toml", "seed/*.md", "seed/skills/*/*.md", "seed/template/*.py", "seed/template/ecotk/*.py",
                     "seed/memory/*.md"]

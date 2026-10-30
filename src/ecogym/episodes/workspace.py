@@ -48,8 +48,12 @@ def boundaries(bench: Bench) -> dict[str, Any]:
     }
 
 
-def export_visible(bench: Bench, data_dir: Path) -> dict[str, Any]:
+def export_visible(bench: Bench, data_dir: Path, *, expert: str = "") -> dict[str, Any]:
+    """Write the visible data, its documentation and (if any) the expert guidance into ``data_dir``."""
+
     data_dir.mkdir(parents=True, exist_ok=True)
+    if expert.strip():
+        (data_dir / "expert.md").write_text(expert.strip() + "\n", encoding="utf-8")
     bounds = boundaries(bench)
     rows = bench.frame.episode_rows(bounds["episode"])
     times = bench.frame.time[rows]
@@ -80,11 +84,13 @@ def export_visible(bench: Bench, data_dir: Path) -> dict[str, Any]:
         background.append(task.knowledge.strip())
     (data_dir / "background.md").write_text("\n\n".join(background) + "\n", encoding="utf-8")
     coverage = {name: round(float(np.isfinite(column).mean()), 3) for name, column in zip(columns, values, strict=True)}
-    (data_dir / "README.md").write_text(_data_readme(bench, bounds, int(keep.sum()), coverage), encoding="utf-8")
-    return {"rows": int(keep.sum()), "columns": list(columns), "boundaries": bounds}
+    readme = _data_readme(bench, bounds, int(keep.sum()), coverage, expert=bool(expert.strip()))
+    (data_dir / "README.md").write_text(readme, encoding="utf-8")
+    return {"rows": int(keep.sum()), "columns": list(columns), "boundaries": bounds, "expert": bool(expert.strip())}
 
 
-def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict[str, float]) -> str:
+def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict[str, float], *,
+                 expert: bool = False) -> str:
     frame = bench.frame
     lines = [
         "# 可见数据",
@@ -95,6 +101,7 @@ def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict
         "- `columns.csv`：每列的含义、角色、单位、有效范围，以及读数保持可用的最长步数（用于前向填充）。",
         "- `spec.json`：裁判传给 `Predictor(spec)` 的同一份说明。",
         "- `background.md`：任务提供的背景资料。",
+        *(["- `expert.md`：领域专家的提示，以及对以往回合中问题的回答。"] if expert else []),
         "",
         f"本地检验（`evaluate_local`）：拟合用 {bounds['local_fit_end']} 之前的行，检验期为 "
         f"{bounds['local_check'][0]} 至 {bounds['local_check'][1]}。",
@@ -116,6 +123,8 @@ def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict
 def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: int, deadline: float,
                limits: Limits) -> str:
     task = bench.task
+    known_now = ("`action` 角色的列（控制设定值等）在起点已知；其余输入列也只用到起点为止。"
+                 if "action" in task.exogenous_roles else "输入列只用到起点为止。")
     targets = "、".join(f"`{target}`（{bench.frame.specs[target].label}，"
                         f"{UNIT_LABELS.get(bench.frame.specs[target].unit, bench.frame.specs[target].unit)}）"
                         for target in task.target_names)
@@ -152,7 +161,7 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 ## 数据与信息集
 
 - 数据都在 `data/` 下，先读 `data/README.md`。
-- 预报只能使用起点及以前的观测。`action` 角色的列（控制设定值）在起点已知；其余输入列也只用到起点为止。
+- 预报只能使用起点及以前的观测。{known_now}
 - 工作区以外的文件和网络都不可访问；`web_search` 可以用来查资料。
 
 ## 提交
@@ -168,11 +177,12 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 - `evaluate_local`：按裁判协议在本地检验期上运行 `submission/`，返回总分和逐格技能。
 - `submit`：保存当前 `submission/` 的快照并在本地检验期上运行；以最后一次成功的提交为准。
 - `note`：记录发现、经验、无效方向（kind = finding / lesson / dead_end）。
-- `ask_expert`：给领域专家留言；不会立即回答，不要等待。
+- `ask_expert`：给领域专家留言；不会立即回答，不要等待。回答会出现在以后回合的 `data/expert.md` 里。
 
 ## 预算
 
-{minutes:.0f} 分钟，截止 {ends}；最多 {tokens:,} 个 token。到截止时间时，进程会被终止，以最后一次成功的提交为准。
+{minutes:.0f} 分钟，截止 {ends}；最多 {tokens:,} 个计费 token（命中缓存的输入 token 按 1/10 计）。
+到截止时间时，进程会被终止，以最后一次成功的提交为准。
 
 ## 最终回复
 

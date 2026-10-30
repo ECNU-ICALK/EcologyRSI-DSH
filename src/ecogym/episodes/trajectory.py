@@ -84,6 +84,47 @@ def _no_links(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
     return member if member.isfile() or member.isdir() else None
 
 
+PROGRAM_SKIP = ("tmp/", "_ecogym", "__pycache__/")
+
+
+def submission_files(trajectory: Path, scored: dict[str, Any] | None, *, max_bytes: int = 400_000) -> dict[str, bytes]:
+    """The files of the program an episode was scored with, read from its stored workspace."""
+
+    archive_path = trajectory / "workspace.tar.gz"
+    if not scored or not archive_path.is_file() or (scored.get("n") is None and not scored.get("auto")):
+        return {}
+    folder = "final-fallback" if scored.get("auto") else f"{int(scored['n']):03d}"
+    prefix = f"submissions/{folder}/program/"
+    files: dict[str, bytes] = {}
+    with tarfile.open(archive_path) as archive:
+        for member in archive.getmembers():
+            if not member.isfile() or not member.name.startswith(prefix) or member.size > max_bytes:
+                continue
+            relative = member.name[len(prefix):]
+            if relative.startswith(PROGRAM_SKIP) or relative in ("stderr.log",) or relative.endswith(".pyc"):
+                continue
+            stream = archive.extractfile(member)
+            if stream is not None:
+                files[relative] = stream.read()
+    return files
+
+
+def extract_submission(trajectory: Path, scored: dict[str, Any] | None, target: Path) -> Path:
+    """Write the scored program into ``target`` (a fresh directory) for re-judging."""
+
+    files = submission_files(trajectory, scored)
+    if "predictor.py" not in files:
+        raise FileNotFoundError(f"{trajectory}: the scored program is not in the stored workspace")
+    target.mkdir(parents=True, exist_ok=False)
+    for relative, data in files.items():
+        path = (target / relative).resolve()
+        if not path.is_relative_to(target.resolve()):
+            continue  # never write outside the target, whatever the archive says
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return target
+
+
 def store(root: Path, target: Path, node: Path | None) -> dict[str, Any]:
     """Write the trajectory files into ``target``; return per-file digests and a session summary."""
 
@@ -115,4 +156,4 @@ def store(root: Path, target: Path, node: Path | None) -> dict[str, Any]:
     return {"files": files, "summary": summary}
 
 
-__all__ = ["session_events", "sessions", "store", "summarize"]
+__all__ = ["extract_submission", "session_events", "sessions", "store", "submission_files", "summarize"]

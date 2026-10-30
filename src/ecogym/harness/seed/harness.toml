@@ -5,5 +5,7 @@ summary = "初始版本：研究流程指令、三个技能（实验、特征与
 
 [agent]
 model = "deepseek-v4-pro"
+reasoning_effort = "high"
 web_search = true
 subagent_depth = 1
+parallel_tool_calls = 10

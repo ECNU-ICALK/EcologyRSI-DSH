@@ -9,7 +9,7 @@ export NO_PROXY := 127.0.0.1,localhost
 help:
 	@echo "make test     run the unittest suite (tests needing AGC data skip when it is absent)"
 	@echo "make lint     run ruff"
-	@echo "make serve    start the web workbench on http://127.0.0.1:8850/"
+	@echo "make serve    start the JSON API alone on http://127.0.0.1:8850/ (the UI is the DSH plugin: ecogym dsh install)"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -t .

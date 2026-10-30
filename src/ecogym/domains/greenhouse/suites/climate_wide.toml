@@ -1,0 +1,39 @@
+# Evolve agent harnesses on eight greenhouse compartments, verify on two others.
+#
+# The compartments of greenhouse.climate@1 split differently: four training
+# compartments per crop instead of two. With three or more training tasks the
+# adoption interval is a t interval over the per-task gains, so four tasks
+# leave 3 degrees of freedom and only large, very consistent gains pass; for
+# the same spread of task gains, eight tasks make the interval about half as
+# wide (95%: t 2.36 / sqrt 8 against 3.18 / sqrt 4). Each generation runs
+# twice as many episodes. Holdout verification rests on two compartments; the
+# sealed periods (validation, final_test) still test transfer in time.
+#
+# Four of greenhouse.climate@1's holdout compartments are training tasks here:
+# verify a harness evolved on this suite with this suite, not with that one.
+id = "greenhouse.wide.climate@1"
+title = "温室气候（八个训练隔间）：两季作物、十个隔间"
+notes = """
+Training: cucumber 2018 AiCU, DeepGreens, Croperators and iGrow; tomato 2019 AICU, Automatoes, Digilog and TheAutomators.
+Holdout: cucumber 2018 Sonoma; tomato 2019 IUACAAS.
+"""
+train = [
+    "greenhouse.agc2018.cucumber.climate@1",
+    "greenhouse.agc2018.cucumber.climate@1:DeepGreens",
+    "greenhouse.agc2018.cucumber.climate@1:Croperators",
+    "greenhouse.agc2018.cucumber.climate@1:iGrow",
+    "greenhouse.agc2019.tomato.climate@1",
+    "greenhouse.agc2019.tomato.climate@1:Automatoes",
+    "greenhouse.agc2019.tomato.climate@1:Digilog",
+    "greenhouse.agc2019.tomato.climate@1:TheAutomators",
+]
+holdout = [
+    "greenhouse.agc2018.cucumber.climate@1:Sonoma",
+    "greenhouse.agc2019.tomato.climate@1:IUACAAS",
+]
+
+[gates]
+min_delta = 0.005   # mean skill gain over the training tasks
+confidence = 0.95   # the interval of the mean task gain must exclude zero
+resamples = 2000
+task_cap = 0.03     # no task may credibly lose more than 0.03 skill

@@ -121,7 +121,7 @@ class EpisodeTools:
                                  "sources": {"type": "array", "items": {"type": "string"},
                                              "description": "引用的来源（链接或文献）"}}},
                  self.note),
-            Tool("ask_expert", "给领域专家留言。不会立即回答，请继续工作；回答会进入以后的回合。",
+            Tool("ask_expert", "给领域专家留言。不会立即回答，请继续工作；回答会出现在以后回合的 data/expert.md 里。",
                  {"type": "object", "required": ["question"],
                   "properties": {"question": {"type": "string"}, "context": {"type": "string"}}},
                  self.ask_expert),
