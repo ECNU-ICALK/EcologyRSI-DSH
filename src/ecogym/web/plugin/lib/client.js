@@ -1035,7 +1035,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         const ok = await ask(kind === "holdout" && unfinished.length
           ? { title: `补跑 ${unfinished.length} 个留出任务？`, text: "只重跑上次没有成绩的回合（服务故障或被中断）；已有成绩的回合直接复用。", confirm: "开始补跑" }
           : kind === "holdout"
-            ? { title: `在 ${count} 个留出任务上验证？`, text: "起点版本和最终版本在每个留出任务上各运行一个回合（按这次运行的回合预算）。每个版本在每个留出任务上只运行一次，跨运行有效。", confirm: "开始验证" }
+            ? { title: `在 ${count} 个留出任务上验证？`, text: "起点版本和最终版本在每个留出任务上各运行一个回合（按这次运行的模型和回合预算）。同一版本在同样的模型和预算下，每个留出任务只运行一次，跨运行有效；模型或预算不同时重新运行。", confirm: "开始验证" }
             : { title: `在封存时期 ${stage} 上评测？`, text: "把两个版本提交过的预测程序在更晚的封存时期上重新拟合、逐时刻预报。每个版本每个任务只评一次，已评完的任务立刻写入账本；中途中断后再评只补没有结果的任务。", confirm: "开始评测" });
         if (ok) act("verify", { kind, stage }, "验证已开始，结果会显示在这里");
       };
@@ -1078,12 +1078,23 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         h(VersionsTable, { body: row.body, field: row.field, catalog }))));
     }
 
+    /** The host's template check of a candidate; with every training task's local score when it has them. */
+    function smokeText(catalog, smoke) {
+      const head = `模板试运行（本地检验期）：${smoke.status}，总分 ${signed(smoke.score)}，覆盖率 ${Math.round((smoke.coverage || 0) * 100)}%`;
+      const tasks = Object.entries(smoke.tasks || {});
+      if (!tasks.length) return head + (isNum(smoke.incumbent_score) ? `；在任版本的模板 ${signed(smoke.incumbent_score)}` : "");
+      return `${head}；各训练任务（括号里是在任版本的模板）：` + tasks.map(([task, item]) => `${taskShort(catalog, task)} `
+        + `${item.status === "ok" ? signed(item.score, 3) : item.status}${isNum(item.incumbent_score) ? `（${signed(item.incumbent_score, 3)}）` : ""}`).join("、");
+    }
+
     function CandidateCard({ view, round, candidate, catalog }) {
       const decision = candidate.decision;
       const changes = candidate.changes || [];
       return h("div", { className: "eg-cand", "data-adopted": String(candidate.status === "adopted") },
         h("div", { className: "eg-cand-head" }, h("b", null, `候选 ${candidate.name}`), h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }), h(Mono, { title: candidate.digest }, short(candidate.digest))),
         candidate.summary ? h("div", { className: "eg-cand-summary" }, candidate.summary) : null,
+        candidate.base?.label ? h("div", { className: "eg-line" }, `起点：存档中的 ${candidate.base.label} `,
+          h(Mono, { title: candidate.base.digest }, short(candidate.base.digest)), "（改动和比较仍相对在任版本）") : null,
         decision && isNum(decision.delta) ? h(Fragment, null,
           h("div", { className: "eg-line" }, "增益 ", h("b", { className: toneClass(decision.delta) }, signed(decision.delta)),
             `，${((decision.confidence || 0.95) * 100).toFixed(1)}% 区间 [${signed(decision.interval[0])}, ${signed(decision.interval[1])}] → ${reasonText(catalog, decision.reason)}`),
@@ -1093,11 +1104,13 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
             item.reason === "credible_regression" ? h("span", { className: "eg-bad" }, " · 否决") : null))))
           : decision ? h("div", { className: "eg-line" }, reasonText(catalog, decision.reason)) : null,
         (candidate.problems || []).length ? h(Alert, { tone: "warning" }, candidate.problems.map((item, index) => h("div", { key: index }, item))) : null,
+        (candidate.warnings || []).length ? h(Alert, { tone: "warning" }, h("b", null, "宿主检查的提醒（不阻止运行）："),
+          candidate.warnings.map((item, index) => h("div", { key: index }, item))) : null,
         changes.length ? h("div", { className: "eg-chips" }, changes.map((item) => h("span", { key: item.path, className: "eg-chip" }, item.path, " ",
           h("span", { className: "eg-good" }, `+${item.added ?? 0}`), h("span", { className: "eg-bad" }, `${MINUS}${item.removed ?? 0}`)))) : null,
         candidate.proposal || changes.length ? h(Details, { summary: `提案与改动（${changes.length} 个文件）` },
           h(Markdown, { text: candidate.proposal }),
-          candidate.smoke ? h("p", { className: "eg-hint" }, `模板试运行（本地检验期）：${candidate.smoke.status}，总分 ${signed(candidate.smoke.score)}，覆盖率 ${Math.round((candidate.smoke.coverage || 0) * 100)}%`) : null,
+          candidate.smoke ? h("p", { className: "eg-hint" }, smokeText(catalog, candidate.smoke)) : null,
           changes.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` }))) : null);
     }
 
@@ -1122,7 +1135,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
                 : !evolver ? h("p", { className: "eg-hint" }, view.active ? "评审智能体正在阅读证据、编写候选…" : "这一代没有评审记录。")
                   : evolver.status === "error" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话出错："), evolver.error || "")
                   : evolver.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话没有得到模型回复："), evolver.upstream_error || "服务故障")
-                    : h("p", { className: "eg-hint" }, `评审会话：${evolver.status}，${duration(evolver.seconds)}，${tokens(evolver.tokens)} token，${evolver.llm_calls ?? "–"} 次模型调用`),
+                    : h("p", { className: "eg-hint" }, `评审会话：${evolver.status}，${duration(evolver.seconds)}，${tokens(evolver.tokens)} token，${evolver.llm_calls ?? "–"} 次模型调用${evolver.continuations ? `，含 ${evolver.continuations} 段续跑（对照会话记录）` : ""}`),
               (round.notes || []).length ? h("div", null, round.notes.map((note, i) => h("div", { key: i, className: "eg-note" }, h("span", { className: "eg-chip" }, note.kind), " ", note.text))) : null,
               evolver?.final_text ? h(Details, { summary: "评审的总结" }, h(Markdown, { text: evolver.final_text })) : null,
               (round.candidates || []).map((candidate) => h(CandidateCard, { key: candidate.name, view, round, candidate, catalog })),
@@ -1395,18 +1408,22 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         h("div", { className: "eg-stats" },
           h(Stat, { label: "隐藏期总分", value: scored ? h("span", { className: toneClass(scored.score) }, signed(scored.score)) : "–",
             sub: scored ? `95% 区间 [${signed(scored.interval?.[0])}, ${signed(scored.interval?.[1])}] · ${scored.origins} 个起点` : "运行结束后计算" }),
-          h(Stat, { label: "最好的本地成绩", value: Number.isFinite(best) ? signed(best) : "–", sub: "本地检验期，已接受的提交" }),
-          h(Stat, { label: "提交 / 检验", value: `${(record.submissions || []).length} / ${(record.evaluations || []).length}`, sub: scored?.auto ? "没有被接受的提交：按当时的程序评分" : scored?.n ? `评分用第 ${scored.n} 次提交` : "" }),
+          h(Stat, { label: "最好的本地成绩", value: Number.isFinite(best) ? signed(best) : "–", sub: isNum(record.start?.local?.score)
+            ? `已接受的提交；起始程序 ${signed(record.start.local.score)}` : "本地检验期，已接受的提交" }),
+          h(Stat, { label: "提交 / 检验", value: `${(record.submissions || []).length} / ${(record.evaluations || []).length}`, sub: scored?.auto ? "没有被接受的提交：按当时的程序评分"
+            : scored?.start ? `评分用起始程序：没有提交在本地比它高 ${record.replace_margin ?? ""} 以上` : scored?.n ? `评分用第 ${scored.n} 次提交` : "" }),
           h(Stat, { label: "笔记 / 问题", value: `${(record.notes || []).length} / ${(record.questions || []).length}` }),
           h(Stat, { label: "Token", value: tokens(finished.tokens), sub: finished.llm_calls ? `${finished.llm_calls} 次模型调用` : "" }),
-          h(Stat, { label: "用时", value: duration(finished.seconds), sub: finished.status ? `状态 ${finished.status}` : "进行中" })),
+          h(Stat, { label: "用时", value: duration(finished.seconds), sub: finished.status
+            ? `状态 ${finished.status}${finished.asleep_seconds >= 60 ? `；其中休眠 ${duration(finished.asleep_seconds)}，不计入时限` : ""}` : "进行中" })),
         scored ? h(Card, { title: "隐藏期逐格技能", hint: `宿主用隐藏时期之前的全部数据拟合提交的程序，再逐个时间步送入新观测、在每个计分起点要求预报；技能相对朴素基线，大于 0 更好。同一批起点上的参考：${refs || "–"}` },
           h(CellMatrix, { task, cells: scored.cells })) : null,
         timeline.length ? h(Card, { title: "时间线", hint: "智能体在本地检验期上的检验和提交（隐藏期成绩只在结束后计算）。" }, h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
           h("thead", null, h("tr", null, h("th", { className: "num" }, "分钟"), h("th", null, "动作"), h("th", { className: "num" }, "本地总分"), h("th", null, "状态"), h("th", null, "说明"))),
           h("tbody", null, timeline.map(([action, item], index) => h("tr", { key: index },
             h("td", { className: "num" }, start !== null && timeOf(item.at) !== null ? ((timeOf(item.at) - start) / 60000).toFixed(1) : "–"),
-            h("td", null, action, action === "提交" ? h(Fragment, null, " ", item.accepted ? h(Tag, { tone: "success" }, "已接受") : h(Tag, { tone: "danger" }, "未接受")) : null),
+            h("td", null, action, action === "提交" ? h(Fragment, null, " ", !item.accepted ? h(Tag, { tone: "danger" }, "未接受")
+              : item.replaces_start === false ? h(Tag, { tone: "neutral" }, "已接受，不替换模板") : h(Tag, { tone: "success" }, "已接受")) : null),
             h("td", { className: `num ${toneClass(item.local?.score)}` }, signed(item.local?.score)),
             h("td", null, item.local?.status || ""),
             h("td", null, item.note || ""))))))) : null,
@@ -1576,8 +1593,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
     const FLOW = [
       ["任务与数据", "任务卡给定数据集、预测目标和时距。数据按时间切成几段（见下），智能体只拿到隐藏期之前的部分。"],
       ["回合", "一个 DSH 智能体按一版 Harness 独立解一个任务：看数据、查资料、写预测程序，用本地检验挑版本，然后提交。"],
-      ["裁判", "宿主在智能体看不到的隐藏期上逐时刻运行最后一次被接受的提交，算出每格相对朴素基线的技能。"],
-      ["评审", "评审智能体读所有回合的成绩、代码、笔记和以往的候选，写出下一代的候选 Harness，宿主逐个检查。"],
+      ["裁判", "宿主在智能体看不到的隐藏期上逐时刻运行被评分的程序，算出每格相对朴素基线的技能。被评分的是最后一次在本地明显好过起始程序（模板）的提交，没有就是模板本身。"],
+      ["评审", "评审智能体读所有回合的成绩、代码、笔记和会话记录，以往的候选和训练任务相同的以往运行，从在任版本或本次运行的任何以往版本出发写出下一代的候选 Harness，宿主逐个检查。"],
       ["比较与采纳", "候选和在任版本在每个训练任务上各跑几个回合，做多任务配对比较；通过门槛的候选成为新的在任版本。"],
       ["独立验证", "进化结束后，起点和最终版本在留出隔间和更晚的封存时期上各验证一次。"],
     ];
@@ -1590,7 +1607,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
     };
     const EPISODE_FACTS = [
       ["工作区", "TASK.md（目标、评分、接口、时限、预算），AGENTS.md（Harness 的说明和经验），data/（可见数据、列说明、领域背景、专家意见），submission/（Harness 的起始代码）"],
-      ["工具", "task_info（剩余时间和预算）、evaluate_local（本地检验）、submit（提交，以最后一次被接受的为准）、note（记下发现和教训）、ask_expert（给专家留言，不等回答）"],
+      ["起始程序", "智能体开始前，宿主先在本地检验期上运行 submission/ 里原有的程序（模板）；一次提交只有在本地总分比它高至少 0.02 时才替换它，否则评分用模板"],
+      ["工具", "task_info（剩余时间、预算、现在评分用哪个程序）、evaluate_local（本地检验）、submit（提交，告诉你是否替换了起始程序）、note（记下发现和教训）、ask_expert（给专家留言，不等回答）"],
       ["沙箱", "只能读写自己的回合目录，只能连本机的模型网关和工具服务"],
       ["模型网关", "真实密钥留在本机；按成本计 token，到预算或截止时间就拒绝调用；每次请求和回复都记进轨迹"],
       ["续跑", "智能体在剩余时间超过四分之一时就结束的，宿主开一段新会话请它继续（最多 3 段）；一段续跑既没有检验也没有提交就停"],
@@ -1674,7 +1692,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         h(Card, { title: "三层评测", hint: "智能体能看到的检验和决定版本去留的检验是分开的。" },
           h("div", { className: "eg-layers" },
             h("div", { className: "eg-panel" }, h("h3", null, "1. 本地检验"), h("p", { className: "eg-hint" }, "智能体自己调用：用本地检验期之前的行拟合，在本地检验期上按裁判的规则打分，用来在回合里挑版本。")),
-            h("div", { className: "eg-panel" }, h("h3", null, "2. 隐藏期"), h("p", { className: "eg-hint" }, "宿主打分，智能体看不到：最后一次被接受的提交用隐藏期之前的全部行拟合，再逐时刻预报隐藏期。比较 Harness 版本只用这个成绩。")),
+            h("div", { className: "eg-panel" }, h("h3", null, "2. 隐藏期"), h("p", { className: "eg-hint" }, "宿主打分，智能体看不到：被评分的程序（最后一次在本地明显好过模板的提交，没有就是模板）用隐藏期之前的全部行拟合，再逐时刻预报隐藏期。比较 Harness 版本只用这个成绩。")),
             h("div", { className: "eg-panel" }, h("h3", null, "3. 独立验证"), h("p", { className: "eg-hint" }, "进化结束后各一次：起点和最终版本在留出隔间上各跑一个回合，它们的程序在封存时期上重新评分。"))),
           suite ? h("div", { style: { marginTop: "12px" } },
             h("div", { className: "eg-actions" }, h("b", null, "采纳门槛"), suites.length > 1 ? h("select", { className: "eg-input", style: { width: "auto" }, value: suite.id,

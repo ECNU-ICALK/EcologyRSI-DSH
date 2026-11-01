@@ -148,6 +148,13 @@ def _normalize(value: Any, roots: Iterable[str], scratch: re.Pattern[str]) -> An
     return json.loads(text)
 
 
+def sanitize(value: Any, roots: Iterable[str] = ()) -> Any:
+    """What may leave a session: its scratch paths (``roots`` and every session directory) become
+    ``/workspace``, tokens and keys ``<redacted>``. Used for training data and for the evolver's transcripts."""
+
+    return _normalize(value, roots, scratch_pattern())
+
+
 def _sessions(ledger: Ledger) -> Iterator[dict[str, Any]]:
     """Episodes and evolver sessions that have a stored trajectory, with their metadata."""
 
@@ -191,8 +198,11 @@ def _episode_meta(record: dict[str, Any]) -> dict[str, Any]:
         "tokens": finished.get("tokens"), "seconds": finished.get("seconds"),
         "submissions": len(record["submissions"]),
         "accepted_submissions": sum(1 for item in record["submissions"] if item.get("accepted")),
-        "scored_submission": scored.get("n"),  # None: nothing accepted, the judge scored a snapshot (auto)
+        # None: no submission was scored; the judge scored the starting program (start) or, in records from
+        # before the starting program was judged, a snapshot of submission/ (auto)
+        "scored_submission": scored.get("n"),
         "auto": bool(scored.get("auto")),
+        "start": bool(scored.get("start")),
     }
 
 
@@ -234,7 +244,8 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
                     counts["notes"] += 1
                 good = meta["status"] in ("finished", "timeout")
                 scored = record.get("scored") or {}
-                if good and isinstance(meta["score"], float) and scored.get("predictions"):
+                # an episode scored on its starting program says nothing about the agent's own work: no pairs
+                if good and isinstance(meta["score"], float) and scored.get("predictions") and not meta["start"]:
                     scored_episodes.setdefault(record["task_id"], []).append(
                         {**meta, "predictions": str(session["trajectory"] / scored["predictions"]),
                          "predictions_digest": scored.get("predictions_digest")})
@@ -342,4 +353,4 @@ def _preferences(path: Path, scored: dict[str, list[dict[str, Any]]], main: dict
     return written
 
 
-__all__ = ["export", "threads"]
+__all__ = ["export", "sanitize", "threads"]

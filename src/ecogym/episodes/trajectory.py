@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -87,32 +88,68 @@ def _no_links(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
 PROGRAM_SKIP = ("tmp/", "_ecogym", "__pycache__/")
 
 
+def _members(archive: tarfile.TarFile, prefix: str, max_bytes: int) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    for member in archive.getmembers():
+        if not member.isfile() or not member.name.startswith(prefix) or member.size > max_bytes:
+            continue
+        relative = member.name[len(prefix):]
+        if relative.startswith(PROGRAM_SKIP) or relative in ("stderr.log",) or relative.endswith(".pyc"):
+            continue
+        stream = archive.extractfile(member)
+        if stream is not None:
+            files[relative] = stream.read()
+    return files
+
+
+def _stored_submission(archive: tarfile.TarFile, digest: str | None, max_bytes: int) -> dict[str, bytes]:
+    """The stored ``work/submission/`` as the host's snapshot takes it, if its digest is ``digest`` (else {}).
+
+    An episode with no accepted submission is scored on a snapshot of ``work/submission/`` taken right after its
+    session; the workspace is stored before that snapshot exists, so the program is read back from the stored
+    directory, and the digest proves it is the one that was scored.
+    """
+
+    from .tools import ToolError, snapshot  # the tools import the judge, which imports this module's users
+
+    with tempfile.TemporaryDirectory(prefix="ecogym-fallback-") as scratch:
+        source, copy = Path(scratch) / "submission", Path(scratch) / "snapshot"
+        for relative, data in _members(archive, "work/submission/", MAX_PROGRAM_BYTES).items():
+            path = (source / relative).resolve()
+            if path.is_relative_to(source.resolve()):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+        try:
+            if snapshot(source, copy) != digest:
+                return {}
+        except ToolError:
+            return {}
+        return {path.relative_to(copy).as_posix(): path.read_bytes() for path in sorted(copy.rglob("*"))
+                if path.is_file() and path.stat().st_size <= max_bytes}
+
+
+MAX_PROGRAM_BYTES = 20_000_000  # a submission's size limit (``ecogym.episodes.tools.MAX_BYTES``)
+
+
 def submission_files(trajectory: Path, scored: dict[str, Any] | None, *, max_bytes: int = 400_000) -> dict[str, bytes]:
     """The files of the program an episode was scored with, read from its stored workspace."""
 
     archive_path = trajectory / "workspace.tar.gz"
-    if not scored or not archive_path.is_file() or (scored.get("n") is None and not scored.get("auto")):
+    if not scored or not archive_path.is_file() or (scored.get("n") is None and not scored.get("auto")
+                                                    and not scored.get("start")):
         return {}
-    folder = "final-fallback" if scored.get("auto") else f"{int(scored['n']):03d}"
-    prefix = f"submissions/{folder}/program/"
-    files: dict[str, bytes] = {}
+    folder = "final-fallback" if scored.get("auto") else "start" if scored.get("start") else f"{int(scored['n']):03d}"
     with tarfile.open(archive_path) as archive:
-        for member in archive.getmembers():
-            if not member.isfile() or not member.name.startswith(prefix) or member.size > max_bytes:
-                continue
-            relative = member.name[len(prefix):]
-            if relative.startswith(PROGRAM_SKIP) or relative in ("stderr.log",) or relative.endswith(".pyc"):
-                continue
-            stream = archive.extractfile(member)
-            if stream is not None:
-                files[relative] = stream.read()
+        files = _members(archive, f"submissions/{folder}/program/", max_bytes)
+        if not files and scored.get("auto"):
+            files = _stored_submission(archive, scored.get("digest"), max_bytes)
     return files
 
 
 def extract_submission(trajectory: Path, scored: dict[str, Any] | None, target: Path) -> Path:
     """Write the scored program into ``target`` (a fresh directory) for re-judging."""
 
-    files = submission_files(trajectory, scored)
+    files = submission_files(trajectory, scored, max_bytes=MAX_PROGRAM_BYTES)
     if "predictor.py" not in files:
         raise FileNotFoundError(f"{trajectory}: the scored program is not in the stored workspace")
     target.mkdir(parents=True, exist_ok=False)

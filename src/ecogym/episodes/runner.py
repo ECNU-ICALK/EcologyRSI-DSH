@@ -1,11 +1,17 @@
 """Run one episode: a DSH agent solves a task in a sandbox, the judge scores its last submission.
 
 Steps: build the workspace (task contract, visible data, expert guidance, the
-harness), run one agent session (``ecogym.episodes.agent``) with the ecogym
-tools, judge the last accepted submission on the hidden scored stage, store
-its forecasts next to the trajectory, and log every step to the ledger.
+harness), judge the starting program on the local check, run one agent
+session (``ecogym.episodes.agent``) with the ecogym tools, judge the scored
+program on the hidden scored stage (the latest accepted submission that beats
+the starting program locally by ``REPLACE_MARGIN``, else the starting program;
+see ``ecogym.episodes.tools``), store its forecasts next to the trajectory,
+and log every step to the ledger.
 Nothing the agent writes is trusted: submissions are snapshotted without
 following links, and only the judge's numbers are recorded as scores.
+
+The time budget counts awake time (``ecogym.kernel.clock``): a machine that
+sleeps pauses the episode instead of spending its minutes.
 
 Agents tend to declare the task done long before their time is up. An agent
 that ends with more than a quarter of its time left gets a follow-up session
@@ -32,6 +38,7 @@ from typing import Any
 from .. import __version__
 from ..evaluation.harness import Bench
 from ..harness import resolve
+from ..kernel import clock
 from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger
 from ..task.spec import task_spec
@@ -40,7 +47,7 @@ from .agent import AgentSpec, make_gateway, run_agent
 from .judge import Limits, file_digest, judge_program, missing, reference_scores, report_of, save_predictions
 from .mcp import ToolError
 from .sandbox import discover_runtime, ecogym_home, scratch_root
-from .tools import EpisodeTools, snapshot
+from .tools import REPLACE_MARGIN, EpisodeTools, snapshot, starting_program
 from .workspace import LOCAL_STAGE, SCORED_STAGE, export_visible, task_brief
 
 EVENT_KINDS = frozenset({"episode_started", "episode_evaluated", "episode_submitted", "episode_note",
@@ -64,20 +71,20 @@ def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
     started_at = [-1]  # local evaluations + submissions when the latest follow-up started
 
     def ask(n: int, reply: str) -> str | None:
-        left = deadline - time.time()
+        left = deadline - clock.now()
         work = tools.evaluations + len(tools.submissions)
         if n > MAX_CONTINUATIONS or left < CONTINUE_SHARE * minutes * 60 or work == started_at[0]:
             return None
         started_at[0] = work
-        current, best = tools.final(), tools.best_local()
-        state = (f"现在以第 {current['n']} 次提交为准（本地 {current['local']['score']:+.4f}，"
-                 f"已接受的提交里本地最好 {best['local']['score']:+.4f}）。" if current and best
-                 else "还没有被接受的提交：先提交一个能正常运行的版本。")
+        best = tools.best_local()
+        state = (f"现在评分用{tools.scored_text()}；已接受的提交里本地最好 {best['local']['score']:+.4f}。"
+                 if best else f"还没有被接受的提交，现在评分用{tools.scored_text()}。")
         return "\n".join([
             f"这是同一个回合的第 {n + 1} 段会话。上一段会话已经结束，但这个回合还剩约 {left / 60:.0f} 分钟"
             f"（共 {minutes:g} 分钟）。工作区里的文件和提交都还在，用 task_info 查看。{state}",
             "请继续改进：先读 TASK.md 和 submission/ 回顾已经做过的事，再找在拟合期内部多个滚动窗口上都稳定的改进；"
-            "只有确实更好时才 submit（隐藏期只评最后一次被接受的提交）。截止前留出时间收尾，写最终回复。",
+            f"只有确实更好时才 submit（评分用最后一次被接受、且本地比起始程序高至少 {REPLACE_MARGIN} 的提交）。"
+            "截止前留出时间收尾，写最终回复。",
             "", "上一段会话的最终回复（节选）：", "", reply.strip()[-2500:] or "（没有）",
         ])
 
@@ -115,11 +122,14 @@ class Events:
 
 
 def _final_program(tools: EpisodeTools, root: Path) -> dict[str, Any] | None:
-    """The last accepted submission, else a snapshot of the current submission/ directory."""
+    """The latest accepted submission that replaces the starting program, else the starting program; with no
+    starting program (a harness without a template), a snapshot of the current submission/ directory."""
 
     final = tools.final()
     if final is not None:
         return final
+    if tools.start is not None:
+        return tools.start
     fallback = root / "submissions" / "final-fallback" / "program"
     fallback.mkdir(parents=True, exist_ok=True)
     try:
@@ -142,22 +152,26 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
     root = scratch_root() / name
     trajectory = ecogym_home() / "trajectories" / name
     started = time.time()
-    deadline = started + config.minutes * 60
+    deadline = clock.now() + config.minutes * 60  # awake time: a sleeping machine spends none of the budget
     gateway = make_gateway(trajectory, tokens=config.tokens, deadline=deadline,
                            model=agent.model)  # fails (unknown route, missing key) before anything is created
     for path in (root / "work" / "data", trajectory):
         path.mkdir(parents=True, exist_ok=True)
     events = Events(ledger_path, episode_id)
     harness.install(root)
+    start = starting_program(bench, root, runtime, config.limits)
+    deadline = clock.now() + config.minutes * 60  # the clock starts after the starting program was judged
+    gateway.deadline = deadline
     with Ledger(ledger_path) as ledger:
         advice = expert.guidance(ledger, bench.task, until=config.expert_until)
     visible = export_visible(bench, root / "work" / "data", expert=expert.render(advice) if advice else "")
     (root / "work" / "TASK.md").write_text(task_brief(bench, visible["boundaries"], minutes=config.minutes,
-                                                      tokens=config.tokens, deadline=deadline, limits=config.limits),
+                                                      tokens=config.tokens, deadline=deadline, limits=config.limits,
+                                                      start_local=start["local"]["score"] if start else None),
                                            encoding="utf-8")
     (root / "work" / "notes").mkdir(exist_ok=True)
     tools = EpisodeTools(bench=bench, root=root, runtime=runtime, limits=config.limits, deadline=deadline,
-                         usage=gateway.usage, event=events)
+                         usage=gateway.usage, event=events, start=start)
 
     logged = []
 
@@ -170,7 +184,8 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
             "limits": asdict(config.limits), "context": config.context, "root": str(root),
             "dsh": facts["dsh"], "sandbox": digest(facts["profile"].replace(str(root), "<episode>")),
             "visible_rows": visible["rows"], "boundaries": visible["boundaries"], "expert_entries": len(advice),
-            "expert_until": config.expert_until,
+            "expert_until": config.expert_until, "replace_margin": REPLACE_MARGIN,
+            "start": None if start is None else {"digest": start["digest"], "local": start["local"]},
         })
 
     try:
@@ -200,7 +215,8 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
     scored = {key: report[key] for key in ("stage", "status", "origins", "score", "interval", "coverage", "cells",
                                            "fit_seconds", "seconds", "errors", "references")}
     scored.update({"n": final.get("n") if final else None, "digest": final["digest"] if final else None,
-                   "auto": bool(final.get("auto")) if final else False, "predictions": PREDICTIONS,
+                   "auto": bool(final.get("auto")) if final else False,
+                   "start": bool(final.get("start")) if final else False, "predictions": PREDICTIONS,
                    "predictions_digest": file_digest(stored)})
     events("episode_scored", scored)
     finished = {

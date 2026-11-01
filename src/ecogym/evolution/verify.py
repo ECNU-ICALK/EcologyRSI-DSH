@@ -3,9 +3,10 @@
 * ``verify_holdout``: the starting and the final harness each run one episode
   on every holdout task of the suite (tasks no evolving agent ever saw), and
   the final version is compared with the starting one by the suite's gates.
-  Each (harness, task) exposure is registered in the ledger right before its
-  episode starts, so a version meets a holdout task once across all runs; a
-  later verification of the same version reuses the recorded episode. An
+  Each (harness, task, model and budget) exposure is registered in the ledger
+  right before its episode starts, so a version meets a holdout task once per
+  model and budget across all runs; a later verification of the same version
+  under the same conditions reuses the recorded episode. An
   exposure whose episode failed for service reasons, was interrupted or went
   stale may run again, and verifying a run again fills in exactly those.
 * ``verify_sealed``: the programs those versions submitted (their latest
@@ -36,6 +37,7 @@ import numpy as np
 from ..episodes.agent import Cancelled
 from ..episodes.history import fold_episode
 from ..episodes.judge import file_digest, judge_program, load_predictions, reference_scores, save_predictions
+from ..episodes.providers import split as split_model
 from ..episodes.runner import EpisodeConfig, run_episode
 from ..episodes.sandbox import discover_runtime, ecogym_home, scratch_root
 from ..episodes.trajectory import extract_submission
@@ -57,10 +59,25 @@ RETRYABLE = ("infra_failed", "interrupted")
 CLAIM_GRACE = 600.0  # seconds: a claim this young with no episode yet belongs to a verifier that is starting it
 
 
-def exposure_key(bench: Bench, harness: str, stage: str, kind: str) -> str:
-    return digest({"schema": "ecogym.harness-exposure/1", "kind": kind, "frame": bench.frame.digest,
-                   "task": bench.task.digest, "stage": stage, "interval": bench.partitions.intervals[stage],
-                   "harness": harness})
+def exposure_key(bench: Bench, harness: str, stage: str, kind: str, *,
+                 conditions: dict[str, Any] | None = None) -> str:
+    """One version's look at one task's stage; ``conditions`` adds what else defines the measurement."""
+
+    body = {"schema": "ecogym.harness-exposure/1", "kind": kind, "frame": bench.frame.digest,
+            "task": bench.task.digest, "stage": stage, "interval": bench.partitions.intervals[stage],
+            "harness": harness}
+    if conditions:
+        body["conditions"] = conditions
+    return digest(body)
+
+
+def holdout_conditions(config: EvolveConfig) -> dict[str, Any]:
+    """The model and budget of a run's holdout episodes: part of their exposure, so a version verified under
+    other conditions runs again instead of reusing an episode that measured something else (on 2026-11-01 the
+    seed's 4-minute deepseek-v4-flash episode on Sonoma, from the smoke run, stood in an 8-minute pjlab one)."""
+
+    model = "/".join(split_model(config.model)) if config.model else None
+    return {"model": model, "minutes": float(config.minutes), "tokens": int(config.tokens)}
 
 
 def _finished_view(ledger_path: Path, run_id: str) -> dict[str, Any]:
@@ -159,13 +176,14 @@ def verify_holdout(ledger_path: Path, run_id: str, *, concurrency: int | None = 
     for task in tasks:
         _open(task.id, benches)
     stale = config.minutes * 60 + 900
+    conditions = holdout_conditions(config)
     results: dict[str, dict[str, dict[str, Any]]] = {label: {} for label, _ in versions(view)}
     jobs = []
     with Ledger(ledger_path) as ledger:
         attempts = _attempts(ledger)
     for label, harness in versions(view):
         for task in tasks:
-            key = exposure_key(benches[task.id], harness, SCORED_STAGE, HOLDOUT)
+            key = exposure_key(benches[task.id], harness, SCORED_STAGE, HOLDOUT, conditions=conditions)
             done = [record for record in attempts.get(key, []) if record["status"] in SCORED_STATUSES]
             if done:
                 results[label][task.id] = _entry(done[-1], reused=True)

@@ -4,6 +4,17 @@
 the judge's protocol on the local check (calibration_uq). Snapshots are taken
 outside the sandbox, so they refuse symlinks, hard links and special files:
 a submission can only contain bytes the agent wrote inside its workspace.
+
+The starting program (the harness's template, as ``submission/`` holds it
+when the episode begins) is judged on the local check before the agent
+starts. A submission replaces it only if its local score is at least
+``REPLACE_MARGIN`` higher; the latest such submission is scored, else the
+starting program. Over 74 episodes that began from a modelling template,
+agents raised the local score by 0.028 on average and the hidden one by
+0.0005, and 36% ended below their template (down to −0.132); keeping the
+template unless a submission gains 0.02 locally would have kept 16% below
+it (worst −0.051) and cost nothing on episodes that began from the naive
+template, where agents gain far more than that.
 """
 
 from __future__ import annotations
@@ -18,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evaluation.harness import Bench
+from ..kernel import clock
 from .judge import Limits, judge
 from .mcp import Tool, ToolError
 from .sandbox import Runtime
@@ -27,6 +39,7 @@ MAX_FILES = 300
 MAX_BYTES = 20_000_000
 SKIP = {"__pycache__", ".git", "tmp", ".ipynb_checkpoints"}
 NOTE_KINDS = ("finding", "lesson", "dead_end")
+REPLACE_MARGIN = 0.02  # local-score gain a submission needs over the starting program to replace it
 
 
 def snapshot(source: Path, target: Path) -> str:
@@ -84,9 +97,26 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits) -> dict[str, Any] | None:
+    """Snapshot and judge ``submission/`` as the episode begins (``submissions/start``); None without a program."""
+
+    program = root / "submissions" / "start" / "program"
+    program.mkdir(parents=True)
+    try:
+        digest = snapshot(root / "work" / "submission", program)
+    except ToolError:
+        return None
+    report = judge(bench, program, LOCAL_STAGE, runtime, limits=limits, references=False)
+    return {"n": None, "digest": digest, "program": str(program), "start": True, "local": _summary(report)}
+
+
 class EpisodeTools:
     def __init__(self, *, bench: Bench, root: Path, runtime: Runtime, limits: Limits, deadline: float,
-                 usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None]) -> None:
+                 usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
+                 start: dict[str, Any] | None = None) -> None:
+        """``start``: the judged starting program (``starting_program``); None scores the latest accepted
+        submission whatever its local score."""
+
         self.bench = bench
         self.root = root
         self.runtime = runtime
@@ -94,6 +124,7 @@ class EpisodeTools:
         self.deadline = deadline
         self.usage = usage
         self.event = event
+        self.start = start
         self.submissions: list[dict[str, Any]] = []
         self.evaluations = 0
         self.notes: list[dict[str, Any]] = []
@@ -111,7 +142,8 @@ class EpisodeTools:
                  "用时和错误信息。不会提交。",
                  {"type": "object", "properties": {}}, self.evaluate_local),
             Tool("submit",
-                 "提交当前 submission/ 目录的快照：先在本地检验期上运行，成功则成为候选，以最后一次成功提交为准。",
+                 "提交当前 submission/ 目录的快照：先在本地检验期上运行，成功则被接受。评分用最后一次被接受、"
+                 f"且本地总分比起始程序高至少 {REPLACE_MARGIN} 的提交，没有时用起始程序（见 TASK.md）。",
                  {"type": "object", "properties": {"note": {"type": "string", "description": "这一版的方法与改动"}}},
                  self.submit),
             Tool("note", "记录发现、经验或无效方向，供后续回合使用。",
@@ -133,7 +165,7 @@ class EpisodeTools:
             return self._counter
 
     def _run_local(self, kind: str) -> tuple[int, str, Path, dict[str, Any]]:
-        if time.time() > self.deadline:
+        if clock.now() > self.deadline:
             raise ToolError("the episode deadline has passed")
         number = self._next()
         program = self.root / kind / f"{number:03d}" / "program"
@@ -147,15 +179,36 @@ class EpisodeTools:
         accepted = [item for item in self.submissions if item.get("accepted")]
         return max(accepted, key=lambda item: item["local"]["score"], default=None)
 
+    def replaces_start(self, item: dict[str, Any]) -> bool:
+        """An accepted submission whose local score beats the starting program's by ``REPLACE_MARGIN``."""
+
+        return bool(item["accepted"]) and (self.start is None or
+                                           item["local"]["score"] >= self.start["local"]["score"] + REPLACE_MARGIN)
+
+    def scored_text(self) -> str:
+        """Which program would be scored now, in words for the agent."""
+
+        final = self.final()
+        if final is not None:
+            score = final["local"]["score"]
+            gain = "" if self.start is None else f"，比起始程序高 {score - self.start['local']['score']:+.4f}"
+            return f"第 {final['n']} 次提交（本地 {score:+.4f}{gain}）"
+        if self.start is not None:
+            return f"起始程序（本地 {self.start['local']['score']:+.4f}）"
+        return "还没有被接受的提交"
+
     def task_info(self) -> dict[str, Any]:
-        best = self.best_local()
+        best, final = self.best_local(), self.final()
         return {
-            "minutes_left": round(max(0.0, self.deadline - time.time()) / 60, 1),
+            "minutes_left": round(max(0.0, self.deadline - clock.now()) / 60, 1),
             **self.usage(),
             "local_evaluations": self.evaluations,
+            "start_local_score": None if self.start is None else self.start["local"]["score"],
             "submissions": [{"n": item["n"], "digest": item["digest"][:12], "local_score": item["local"]["score"],
-                             "accepted": item["accepted"]} for item in self.submissions],
+                             "accepted": item["accepted"], "replaces_start": self.replaces_start(item)}
+                            for item in self.submissions],
             "latest_accepted": next((item["n"] for item in reversed(self.submissions) if item["accepted"]), None),
+            "scored_now": final["n"] if final is not None else "start" if self.start is not None else None,
             "best_local": None if best is None else {"n": best["n"], "score": best["local"]["score"]},
         }
 
@@ -173,12 +226,26 @@ class EpisodeTools:
                   "note": str(note)[:4000], "at": time.time(), "local": summary}
         with self._lock:
             self.submissions.append(record)
-        self.event("episode_submitted", {key: record[key] for key in ("n", "digest", "accepted", "note", "local")})
-        verdict = "已接受，成为当前提交" if accepted else "未接受：程序没有正常完成本地检验，仍以之前的提交为准"
-        return {"n": number, "digest": digest[:12], "accepted": accepted, "verdict": verdict, **summary}
+        replaces = self.replaces_start(record)
+        self.event("episode_submitted", {**{key: record[key] for key in ("n", "digest", "accepted", "note", "local")},
+                                         "replaces_start": replaces})
+        if not accepted:
+            verdict = f"未接受：程序没有正常完成本地检验。现在评分用{self.scored_text()}"
+        elif replaces:
+            verdict = f"已接受，现在评分用这次提交：{self.scored_text()}"
+        else:
+            gain = summary["score"] - self.start["local"]["score"]
+            verdict = ((f"已接受，但本地只比起始程序高 {gain:+.4f}" if gain > 0 else
+                        f"已接受，但本地没有超过起始程序（{gain:+.4f}）")
+                       + f"，替换它至少要高 {REPLACE_MARGIN}。现在评分用{self.scored_text()}。"
+                       + ("本地检验期比隐藏期短得多，这么小的提升常常不能在隐藏期上成立。" if gain > 0 else ""))
+        return {"n": number, "digest": digest[:12], "accepted": accepted, "replaces_start": replaces,
+                "verdict": verdict, **summary}
 
     def final(self) -> dict[str, Any] | None:
-        return next((item for item in reversed(self.submissions) if item["accepted"]), None)
+        """The latest accepted submission that replaces the starting program, or None (the start is scored)."""
+
+        return next((item for item in reversed(self.submissions) if self.replaces_start(item)), None)
 
     def note(self, kind: str, text: str, sources: list[str] | None = None) -> dict[str, Any]:
         if kind not in NOTE_KINDS:

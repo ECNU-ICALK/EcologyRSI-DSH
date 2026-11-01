@@ -51,6 +51,7 @@ from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench, Evaluation
 from ..evaluation.suite import TaskPair, adjusted_confidence, compare_suite
 from ..harness import Harness, behavior_digest, resolve
+from ..kernel import clock
 from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger
 from ..task.spec import TaskSpec
@@ -75,7 +76,7 @@ class EvolveConfig:
     harness: str = "seed"
     generations: int = 3
     candidates: int = 2
-    repeats: int = 1
+    repeats: int = 2  # one episode per version and task makes adoptions fragile (docs/evolution.md, section 16)
     minutes: float = 20.0
     tokens: int = 3_000_000
     model: str | None = None  # pin the inner agents' model (<provider>/<model>); None lets each harness choose
@@ -227,19 +228,10 @@ class Evolution:
 
         started = time.monotonic()
         try:
-            self._open_benches()
-            while True:
-                view = self.view(run_id)
-                if view["status"] == "finished":
-                    return view["result"]
-                if view["suite"]["digest"] != self.suite.digest:
-                    raise ValueError("the suite differs from the one this run started with")
-                state = self.state(view)
-                if state.generation > self.config.generations:
-                    break
-                if stop is not None and stop():
-                    raise RunStopped(f"stopped before round {state.generation}")
-                self._round(run_id, view, state)
+            with clock.awake():  # judging and the gaps between sessions too, not only the agents
+                result = self._rounds(run_id, stop)
+            if result is not None:
+                return result
         except (RunStopped, Cancelled) as error:  # asked to stop: resumable from the last finished round
             self.cancel.set()
             self._log(run_id, "evolve_failed", {"error": str(error), "stopped": True})
@@ -260,6 +252,23 @@ class Evolution:
         }
         self._log(run_id, "evolve_finished", result)
         return result
+
+    def _rounds(self, run_id: str, stop: Callable[[], bool] | None) -> dict[str, Any] | None:
+        """Every remaining round; the recorded result when the run had already finished, else None."""
+
+        self._open_benches()
+        while True:
+            view = self.view(run_id)
+            if view["status"] == "finished":
+                return view["result"]
+            if view["suite"]["digest"] != self.suite.digest:
+                raise ValueError("the suite differs from the one this run started with")
+            state = self.state(view)
+            if state.generation > self.config.generations:
+                return None
+            if stop is not None and stop():
+                raise RunStopped(f"stopped before round {state.generation}")
+            self._round(run_id, view, state)
 
     def state(self, view: dict[str, Any]) -> State:
         finished = [round_ for round_ in view["rounds"] if round_["finished"]]
@@ -396,9 +405,10 @@ class Evolution:
                 patches.append({**change, "patch": patch})
             body = {"generation": generation, "name": candidate["name"], "status": candidate["status"],
                     "digest": candidate.get("digest"), "behavior": behavior, "parent": incumbent.digest,
+                    "base": candidate.get("base"),  # the archived version it was reset to; None: the incumbent
                     "summary": candidate.get("summary", ""), "proposal": candidate.get("proposal", ""),
                     "agent": candidate.get("agent"), "changes": patches, "smoke": candidate.get("smoke"),
-                    "problems": candidate.get("problems", [])}
+                    "problems": candidate.get("problems", []), "warnings": candidate.get("warnings", [])}
             if candidate["status"] == "proposed":
                 self._log(run_id, "candidate_proposed", body)
                 found.append({"name": candidate["name"], "digest": candidate["digest"],
@@ -409,7 +419,7 @@ class Evolution:
             "generation": generation,
             **{key: session.get(key) for key in ("status", "seconds", "tokens", "metered_tokens", "llm_calls",
                                                  "answered_calls", "failed_calls", "trajectory", "activity",
-                                                 "upstream_error")},
+                                                 "upstream_error", "continuations")},
             "final_text": session["final_text"][-4000:],
             "candidates": [{"name": item["name"], "status": item["status"]} for item in outcome["candidates"]],
         })

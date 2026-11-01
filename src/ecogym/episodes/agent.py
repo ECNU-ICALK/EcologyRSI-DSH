@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ..harness import AgentOptions
+from ..kernel import clock
 from ..kernel.secrets import has_secret, resolve_secret
 from . import providers
 from .gateway import PREFIX, ROUTE_PREFIX, Gateway
@@ -76,6 +77,7 @@ class Session:
     activity: dict[str, Any]
     upstream_error: str = ""  # the provider's answer to the latest failed model call (why infra_failed)
     continuations: int = 0  # follow-up sessions after the agent ended early (see run_agent's follow_up)
+    asleep_seconds: float = 0.0  # of ``seconds`` (wall time), how long the machine slept; budgets skip it
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -99,6 +101,14 @@ def make_gateway(trajectory: Path, *, tokens: int, deadline: float, model: str) 
                    deadline=deadline, proxy=os.environ.get("ECOGYM_UPSTREAM_PROXY") or None, routes=extra, chat=chat)
 
 
+# DSH's default retries a failed model call 5 times over about 15 s, which gives up inside a provider's error
+# burst: on 2026-11-01 pjlab answered 503 to many calls for about a minute, and three of six holdout sessions
+# exited after 21 to 59 s of their 8 minutes, scored on the template alone. This waits about three minutes
+# (1, 2, 4 … 30 s between tries); the session deadline still bounds it, and the gateway's own refusals (deadline,
+# budget) are worded so DSH does not retry them.
+RETRY_POLICY = {"mode": "normal", "maxRetries": 10, "backoff": {"initialDelayMs": 1000, "maxDelayMs": 30000}}
+
+
 def _model_rows(agent: AgentSpec, gateway: Gateway) -> str:
     """The session's default model and, for a provider route, that route alone, through the gateway."""
 
@@ -107,7 +117,8 @@ def _model_rows(agent: AgentSpec, gateway: Gateway) -> str:
             f"    model: {json.dumps(model)}\n")
     if provider != providers.DEEPSEEK:
         route, model = providers.resolve(agent.model)
-        profile = route.session_profile(model, agent.reasoning_effort, gateway.route_url(provider), ROUTE_KEY)
+        profile = {**route.session_profile(model, agent.reasoning_effort, gateway.route_url(provider), ROUTE_KEY),
+                   "retryPolicy": RETRY_POLICY}
         rows += f"- id: llm-pi-ai\n  config: {json.dumps({'providers': {provider: profile}}, ensure_ascii=False)}\n"
     return rows
 
@@ -125,6 +136,7 @@ def dsh_patch(agent: AgentSpec, *, home: Path, skills: Path, gateway: Gateway, m
     apiKeyEnv: DEEPSEEK_API_KEY
     thinking: {thinking}
     reasoningEffort: {json.dumps(agent.reasoning_effort)}
+    retryPolicy: {json.dumps(RETRY_POLICY)}
 - id: web-search-deepseek
   config:
     baseURL: {json.dumps(gateway.base_url + '/anthropic/v1')}
@@ -221,6 +233,8 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
               follow_up: Callable[[int, str], str | None] | None = None) -> Session:
     """Run one session to completion or the deadline; ``on_start`` gets the DSH version and sandbox profile.
 
+    ``deadline`` is on the awake clock (``ecogym.kernel.clock.now()``), like the gateway's and the tools'.
+
     Setting ``cancel`` stops the agent within seconds and raises ``Cancelled`` (after the trajectory is stored).
     When the agent ends on its own, ``follow_up(n, last_reply)`` may return the prompt of continuation ``n``
     (a new DSH session in the same workspace, with the same gateway, tools and deadline), or None to stop.
@@ -230,7 +244,7 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
         raise FileNotFoundError("dsh not found; install DeepSeek Harness or set ECOGYM_DSH_BIN")
     for path in (root / "work", root / "home", root / "tmp", root / "harness" / "skills", trajectory):
         path.mkdir(parents=True, exist_ok=True)
-    started = time.time()
+    started, awake_started = time.time(), clock.now()
     mcp_log = (trajectory / "mcp_calls.jsonl").open("a", encoding="utf-8")
     log_lock = threading.Lock()
 
@@ -251,7 +265,7 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
         profile = agent_profile(root, [gateway.port, mcp.port], runtime)
         if on_start is not None:
             on_start({"dsh": dsh_version(runtime.dsh, env), "profile": profile})
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr, clock.awake():
             text: str | None = prompt
             while text is not None:
                 offset = stdout_path.stat().st_size  # this session's reply starts here
@@ -264,7 +278,7 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                     while exit_code is None:
                         if cancel is not None and cancel.is_set():
                             raise Cancelled("the session was cancelled")
-                        if time.time() > deadline + 30:
+                        if clock.now() > deadline + 30:  # awake time, like the gateway's and the tools'
                             killed = True
                             break
                         try:
@@ -298,7 +312,8 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                    answered_calls=gateway.answered,
                    failed_calls=gateway.failed, refused_calls=gateway.refused, final_text=final_text,
                    trajectory={"dir": str(trajectory), "files": stored["files"]}, activity=stored["summary"],
-                   upstream_error=gateway.last_failure, continuations=continuations)
+                   upstream_error=gateway.last_failure, continuations=continuations,
+                   asleep_seconds=round(clock.asleep_since(started, awake_started), 1))
 
 
 __all__ = ["AgentSpec", "Cancelled", "Session", "dsh_patch", "dsh_version", "make_gateway", "run_agent",

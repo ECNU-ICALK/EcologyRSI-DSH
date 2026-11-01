@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from ..evaluation.harness import Bench
+from ..kernel import clock
 from .judge import Limits, episode_of, iso, predictor_spec, reference_scores, visible_columns
 
 SCORED_STAGE = "model_selection"
@@ -121,7 +122,11 @@ def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict
 
 
 def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: int, deadline: float,
-               limits: Limits) -> str:
+               limits: Limits, start_local: float | None = None) -> str:
+    """``start_local``: the starting program's local score (None: the latest accepted submission is scored)."""
+
+    from .tools import REPLACE_MARGIN  # the tools import this module
+
     task = bench.task
     known_now = ("`action` 角色的列（控制设定值等）在起点已知；其余输入列也只用到起点为止。"
                  if "action" in task.exogenous_roles else "输入列只用到起点为止。")
@@ -134,7 +139,7 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
     reference_text = "；".join(f"{name} {value:+.3f}" for name, value in references.items())
     kinds = "，".join(f"{cell} 用{'季节值' if kind == 'seasonal' else '持续性'}"
                      for cell, kind in bench.baselines.kinds.items())
-    ends = time.strftime("%Y-%m-%d %H:%M", time.localtime(deadline))
+    ends = time.strftime("%Y-%m-%d %H:%M", time.localtime(clock.wall(deadline)))
     skill_line = (f"- 每个目标与时距组成一个格，格内技能 = (RMSE基线 − RMSE) / max(RMSE, RMSE基线)，"
                   f"大于 0 表示优于基线。基线是在拟合期上逐格选定的朴素预报：{kinds}。")
     scored_line = (f"- **正式成绩**来自可见数据之后的隐藏时期，约 {bounds['scored_days']} 天，你看不到这段数据。"
@@ -145,6 +150,15 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
     limit_line = (f"- 时限：`fit` ≤ {limits.fit_seconds:.0f} 秒；"
                   f"单次 `forecast` ≤ {limits.forecast_seconds:.0f} 秒；"
                   f"拟合加全部预报 ≤ {limits.total_seconds:.0f} 秒。结果要确定（固定随机种子）。")
+    if start_local is None:
+        rule = "以最后一次成功的提交为准"
+        rule_line = ""
+    else:
+        rule = "按上面的规则评分"
+        rule_line = (f"- **评分用哪个程序**：`submission/` 里原有的程序是起始程序，宿主已在本地检验期上运行过它，"
+                     f"本地总分 {start_local:+.4f}。评分用最后一次被接受、且本地总分比起始程序高至少 {REPLACE_MARGIN} "
+                     f"的提交；没有这样的提交时用起始程序。本地检验期比隐藏期短得多，本地只高一点的改动"
+                     f"常常不能在隐藏期上成立。\n")
     return f"""# 任务：{task.title}
 
 ## 目标
@@ -167,22 +181,23 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 ## 提交
 
 {submit_line}
-- 运行环境：Python 3.12，已装 numpy、pandas、scipy、scikit-learn、statsmodels；不能安装其他包，不能联网。
+{rule_line}- 运行环境：Python 3.12，已装 numpy、pandas、scipy、scikit-learn、statsmodels；不能安装其他包，不能联网。
 {limit_line}
 - `submission/` 最多 20 MB、300 个文件，不能有符号链接。
 
 ## ecogym 工具（MCP）
 
-- `task_info`：剩余时间与 token、已提交的版本、最好的本地成绩。
+- `task_info`：剩余时间与 token、已提交的版本、最好的本地成绩、现在评分用哪个程序。
 - `evaluate_local`：按裁判协议在本地检验期上运行 `submission/`，返回总分和逐格技能。
-- `submit`：保存当前 `submission/` 的快照并在本地检验期上运行；以最后一次成功的提交为准。
+- `submit`：保存当前 `submission/` 的快照并在本地检验期上运行；{rule}。
 - `note`：记录发现、经验、无效方向（kind = finding / lesson / dead_end）。
 - `ask_expert`：给领域专家留言；不会立即回答，不要等待。回答会出现在以后回合的 `data/expert.md` 里。
 
 ## 预算
 
-{minutes:.0f} 分钟，截止 {ends}；最多 {tokens:,} 个计费 token（命中缓存的输入 token 按 1/10 计）。
-到截止时间时，进程会被终止，以最后一次成功的提交为准。
+{minutes:.0f} 分钟，截止约 {ends}（机器休眠的时间不计，剩余时间以 `task_info` 为准）；
+最多 {tokens:,} 个计费 token（命中缓存的输入 token 按 1/10 计）。
+到截止时间时，进程会被终止，{rule}。
 
 ## 最终回复
 

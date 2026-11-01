@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ..kernel import clock
+
 PREFIX = "/deepseek"
 ROUTE_PREFIX = "/route/"
 SEARCH_PATH = "/anthropic/v1/"  # DeepSeek's web search, under PREFIX (DSH's web-search-deepseek)
@@ -245,7 +247,7 @@ class Gateway:
                 "tokens_total": self.tokens, "llm_calls": self.calls}
 
     def refusal(self) -> str | None:
-        if self.deadline is not None and time.time() > self.deadline:
+        if self.deadline is not None and clock.now() > self.deadline:  # awake time: a sleep spends no budget
             return "the session deadline has passed"
         if self.metered >= self.token_budget:
             return f"the session token budget ({self.token_budget} cost-weighted tokens) is spent"
@@ -325,7 +327,9 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             if reason:
                 with gateway._lock:
                     gateway.refused += 1
-                return self._json(429, reason)
+                # "quota exhausted" is what DSH classifies as QUOTA, which it does not retry: waiting changes
+                # nothing here, and the session's retry policy would otherwise keep it for minutes
+                return self._json(429, f"session quota exhausted: {reason}")
             prefix, (upstream, key, extra) = found
             path = upstream.path.rstrip("/") + self.path[len(prefix):]
             headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP}

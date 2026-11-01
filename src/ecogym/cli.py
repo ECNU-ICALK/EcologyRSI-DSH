@@ -428,7 +428,8 @@ def _print_episode(result: dict[str, Any]) -> None:
     if scored:
         low, high = scored["interval"]
         print(f"\nhidden {scored['stage']}: {scored['score']:+.4f}  95% day-block interval [{low:+.4f}, {high:+.4f}]  "
-              f"coverage {scored['coverage']:.0%}  ({scored['status']}{', auto-submitted' if scored['auto'] else ''})")
+              f"coverage {scored['coverage']:.0%}  ({scored['status']}{', auto-submitted' if scored['auto'] else ''}"
+              f"{', the starting program' if scored.get('start') else ''})")
         print("references on the same origins: "
               + ", ".join(f"{name} {value:+.4f}" for name, value in scored["references"].items()))
         print(_cells(scored["cells"]))
@@ -855,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_episode = episode_command("run", cmd_episode_run, "run one sandboxed agent episode on a task")
     run_episode.add_argument("task", help="task id, or <task id>:<episode> for another episode of its dataset")
     run_episode.add_argument("--harness", default="seed", help="seed, a harness directory, or a stored digest prefix")
-    run_episode.add_argument("--minutes", type=float, default=30.0, help="wall-clock budget")
+    run_episode.add_argument("--minutes", type=float, default=30.0, help="time budget (awake time)")
     run_episode.add_argument("--tokens", type=int, default=4_000_000,
                              help="token budget (cost-weighted: cached prompt tokens count a tenth)")
     run_episode.add_argument("--model", default=None,
@@ -885,8 +886,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--harness", default="seed", help="starting harness: seed, a directory or a stored digest")
     start.add_argument("--generations", type=int, default=3, help="proposal rounds after the baseline round")
     start.add_argument("--candidates", type=int, default=2, help="candidate harnesses per round (1-6)")
-    start.add_argument("--repeats", type=int, default=1, help="episodes per harness and training task per round")
-    start.add_argument("--minutes", type=float, default=20.0, help="wall-clock budget of one episode")
+    start.add_argument("--repeats", type=int, default=2, help="episodes per harness and training task per round")
+    start.add_argument("--minutes", type=float, default=20.0, help="time budget of one episode (awake time)")
     start.add_argument("--tokens", type=int, default=3_000_000, help="cost-weighted token budget of one episode")
     start.add_argument("--model", default=None,
                        help="pin the inner agents' model, <provider>/<model> (default: each harness's own)")
