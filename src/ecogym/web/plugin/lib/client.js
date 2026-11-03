@@ -124,6 +124,9 @@ window.__ModuleLoader__.load({
 .eg-diff .del{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
 .eg-diff .meta{color:var(--dsw-alias-label-tertiary)}
 .eg-md{font-size:13.5px;overflow-wrap:anywhere}
+.eg .eg-md h1,.eg .eg-md h2{font-size:15px;line-height:22px;margin:14px 0 6px}
+.eg .eg-md h3,.eg .eg-md h4,.eg .eg-md h5{font-size:14px;line-height:21px;margin:12px 0 4px}
+.eg .eg-md>div>:first-child{margin-top:0}
 .eg-details{margin-top:8px}
 .eg-details>summary{cursor:pointer;font-size:13px;color:var(--dsw-alias-label-secondary);list-style:none;display:inline-flex;align-items:center;gap:6px;padding:2px 0}
 .eg-details>summary::-webkit-details-marker{display:none}
@@ -196,6 +199,115 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 .eg-tier-head b{font-weight:600;font-size:13.5px}
 .eg-tier p{margin:4px 0 0;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
 .eg-tier-arrow{text-align:center;color:var(--dsw-alias-label-tertiary);line-height:20px}
+.eg-summary{font-size:13.5px;line-height:1.75}
+.eg-summary-head{font-size:16px;font-weight:600;line-height:24px;margin-bottom:8px}
+.eg-summary p{margin:6px 0 0;overflow-wrap:anywhere}
+.eg-summary p b{font-weight:600}
+.eg-summary .eg-read{color:var(--dsw-alias-label-secondary);font-size:12.5px}
+.eg-chart{overflow-x:auto}
+.eg-chart>svg{display:block;width:100%;min-width:720px;height:auto}
+.eg-legend.eg-chart svg{flex:none}
+.eg-chart text{fill:var(--dsw-alias-label-secondary);font-size:11.5px;font-family:inherit}
+.eg-chart text.strong{fill:var(--dsw-alias-label-primary);font-size:12px;font-weight:600}
+.eg-chart text.note{fill:var(--dsw-alias-state-success-primary);font-size:11.5px}
+.eg-chart text.ref-t{fill:var(--dsw-alias-label-tertiary)}
+.eg-chart .grid{stroke:var(--dsw-alias-border-l2);stroke-width:1}
+.eg-chart .zero{stroke:var(--dsw-alias-border-l3);stroke-width:1}
+.eg-chart .sep{stroke:var(--dsw-alias-border-l3);stroke-dasharray:2 4}
+.eg-chart .ref{stroke:var(--dsw-alias-label-tertiary);stroke-width:1.2;stroke-dasharray:2 4}
+.eg-chart .trunk{stroke:var(--dsw-alias-label-primary);stroke-width:3;stroke-linecap:round;cursor:pointer}
+.eg-chart .before{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2;stroke-dasharray:6 5}
+.eg-chart .before-dot{fill:var(--dsw-alias-state-success-primary)}
+.eg-chart .adopt{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2.5}
+.eg-chart .cand{cursor:pointer}
+.eg-chart .cand line{stroke:var(--dsw-alias-label-tertiary);stroke-width:1.6}
+.eg-chart .cand circle{fill:var(--dsw-alias-bg-base);stroke:var(--dsw-alias-label-secondary);stroke-width:2}
+.eg-chart .cand[data-side=above] line,.eg-chart .cand[data-side=above] circle{stroke:var(--dsw-alias-state-success-primary)}
+.eg-chart .cand[data-side=below] line,.eg-chart .cand[data-side=below] circle{stroke:var(--dsw-alias-state-error-primary)}
+.eg-chart .cand[data-adopted=true] circle{fill:var(--dsw-alias-state-success-primary)}
+.eg-chart .cand:hover circle{stroke-width:3}
+.eg-chart .cand text{fill:var(--dsw-alias-label-secondary);font-size:11px}
+.eg-graph{overflow-x:auto;padding-bottom:4px}
+.eg-graph svg{display:block}
+.eg-graph text{fill:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.eg-graph text.sub{fill:var(--dsw-alias-label-secondary);font-size:11.5px}
+.eg-graph text.head{fill:var(--dsw-alias-label-tertiary)}
+.eg-graph .good{fill:var(--dsw-alias-state-success-primary)}
+.eg-graph .bad{fill:var(--dsw-alias-state-error-primary)}
+.eg-graph .node rect{fill:var(--eg-fill);stroke:var(--dsw-alias-border-l3);stroke-width:1}
+.eg-graph .node[data-pick=true]{cursor:pointer}
+.eg-graph .node[data-pick=true]:hover rect,.eg-graph .node:focus-visible rect{stroke:var(--dsw-alias-label-secondary)}
+.eg-graph .node:focus{outline:none}
+.eg-graph .node[data-kind=trunk] rect{fill:var(--dsw-alias-bg-layer-2)}
+.eg-graph .node[data-kind=external] rect{fill:transparent;stroke-dasharray:3 3}
+.eg-graph .node[data-tone=adopted] rect{fill:color-mix(in srgb,var(--dsw-alias-state-success-primary) 16%,transparent);stroke:var(--dsw-alias-state-success-primary);stroke-width:1.5}
+.eg-graph .node[data-tone=success] rect{stroke:var(--dsw-alias-state-success-primary);stroke-width:1.5}
+.eg-graph .node[data-tone=info] rect{stroke:var(--dsw-alias-state-business-primary);stroke-width:1.5}
+.eg-graph .node[data-tone=danger] rect{stroke:var(--dsw-alias-state-error-primary);stroke-dasharray:4 3}
+.eg-graph .node[data-tone=warning] rect{stroke:var(--dsw-alias-state-warn-primary);stroke-dasharray:4 3}
+.eg-graph .edge{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:1.5}
+.eg-graph .edge[data-kind=trunk]{stroke:var(--dsw-alias-label-tertiary);stroke-width:2}
+.eg-graph .edge[data-kind=base]{stroke:var(--dsw-alias-state-business-primary);stroke-dasharray:5 4;opacity:.7}
+.eg-graph .edge[data-kind=external]{stroke:var(--dsw-alias-state-business-primary);stroke-dasharray:5 4;opacity:.7}
+.eg-graph .edge[data-kind=adopt]{stroke:var(--dsw-alias-state-success-primary);stroke-width:2.5}
+.eg-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.eg-legend span{display:inline-flex;align-items:center;gap:6px}
+.eg-legend svg{flex:none}
+.eg-steps{margin-top:6px}
+.eg-story{position:relative;padding:0 0 18px 36px}
+.eg-story::before{content:"";position:absolute;left:11px;top:26px;bottom:0;width:1px;background:var(--dsw-alias-border-l3)}
+.eg-story:last-child{padding-bottom:4px}
+.eg-story:last-child::before{display:none}
+.eg-story-no{position:absolute;left:0;top:0;width:23px;height:23px;border-radius:50%;background:var(--dsw-alias-state-business-primary);color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center}
+.eg-story h3{margin:0;font-size:14px;font-weight:600;line-height:23px}
+.eg-story-sub{margin-top:2px;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.eg-story-body{margin-top:8px}
+.eg-label{font-size:12px;color:var(--dsw-alias-label-tertiary);margin:10px 0 2px}
+.eg-reads{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 12px;align-items:baseline;font-size:12.5px;margin-top:6px}
+.eg-reads>dt{color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.eg-reads>dd{margin:0;display:flex;flex-wrap:wrap;gap:4px 6px}
+.eg-reads .eg-chip{margin:0}
+button.eg-chip{border:0;font:inherit;font-size:12px;cursor:pointer}
+button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var(--dsw-alias-border-l3)}
+.eg-clamp[data-open=false]{max-height:var(--eg-clamp,240px);overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 72%,transparent);mask-image:linear-gradient(to bottom,#000 72%,transparent)}
+.eg-more{border:0;background:transparent;color:var(--dsw-alias-link,var(--dsw-alias-state-business-primary));font:inherit;font-size:12.5px;cursor:pointer;padding:2px 0}
+.eg-more:hover{text-decoration:underline}
+.eg-cand[data-focus=true]{outline:1.5px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.eg-switch{display:inline-flex;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;overflow:hidden;vertical-align:middle}
+.eg-switch button{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;padding:2px 9px;cursor:pointer}
+.eg-switch button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
+.eg-cell-chips{display:flex;flex-wrap:wrap;gap:4px}
+.eg-score{height:22px;padding:0 7px;border:0;border-radius:6px;background:var(--eg-fill);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer}
+.eg-score:hover{outline:1px solid var(--dsw-alias-border-l3)}
+.eg-verdict{margin-top:8px;font-size:13px}
+.eg-act{display:grid;grid-template-columns:76px minmax(0,1fr);gap:4px 10px;padding:7px 0;border-top:.5px solid var(--dsw-alias-border-l2);font-size:13px}
+.eg-act:first-child{border-top:0}
+.eg-act-main{min-width:0;overflow-wrap:anywhere}
+.eg-where{border:0;background:transparent;padding:0;font:inherit;font-size:12px;color:var(--dsw-alias-link,var(--dsw-alias-state-business-primary));cursor:pointer;text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
+.eg-where:hover{text-decoration:underline}
+.eg-kind{display:inline-flex;align-items:center;height:19px;padding:0 6px;margin-right:6px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11.5px;white-space:nowrap;vertical-align:1px}
+.eg-kind[data-tool=ecogym]{color:var(--dsw-alias-state-business-primary)}
+.eg-kind[data-tool=write]{color:var(--dsw-alias-state-warn-primary)}
+.eg-thread-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:16px 0 4px;font-size:13.5px;font-weight:600}
+.eg-thread-head span{font-weight:400;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.eg-turn{display:grid;grid-template-columns:44px minmax(0,1fr);gap:0 8px;padding:8px 4px;border-top:.5px solid var(--dsw-alias-border-l2);border-radius:6px;transition:background .6s}
+.eg-turn[data-flash=true]{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
+.eg-turn-no{font-size:12px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;padding-top:3px;white-space:nowrap}
+.eg-turn-body{min-width:0}
+.eg-turn-body>.eg-details:first-child{margin-top:0}
+.eg-ctx{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:2px 0}
+.eg-prompt{border-radius:10px;background:var(--eg-fill);padding:8px 12px;margin:6px 0;font-size:12.5px}
+.eg-prompt pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;font-size:12.5px}
+.eg-think>summary{display:flex;align-items:baseline;min-width:0;max-width:100%}
+.eg-think>summary b{flex:none;font-weight:500;margin-right:6px;color:var(--dsw-alias-label-secondary)}
+.eg-think>summary em{font-style:normal;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}
+.eg-call{margin-top:3px}
+.eg-call>summary{display:flex;align-items:baseline;gap:6px;min-width:0;max-width:100%;color:var(--dsw-alias-label-primary)}
+.eg-call>summary code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px}
+.eg-call>summary small{flex:none;margin-left:auto;padding-left:8px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.eg-call>summary small.eg-bad{color:var(--dsw-alias-state-error-primary)}
+.eg-call .eg-pre{max-height:360px}
+.eg-call-result{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-top:6px}
 @media (max-width:900px){.eg-two{grid-template-columns:1fr}.eg-page{padding:20px 18px 64px}.eg-bar{padding:0 12px}}
 `;
     const styleId = "@ecogym/dsh-plugin/client";
@@ -218,7 +330,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       catalog: "catalog", routes: "routes", stages: (task) => `tasks/${enc(task)}/stages`,
       evolutions: "evolutions", evolution: (id) => `evolutions/${enc(id)}`,
       evolutionAction: (id, action) => `evolutions/${enc(id)}/${action}`,
-      episodes: "episodes", episode: (id) => `episodes/${enc(id)}`,
+      evolverSession: (id, generation, steps = true) => `evolutions/${enc(id)}/evolver/${enc(generation)}${steps ? "" : "?steps=0"}`,
+      episodes: "episodes", episode: (id) => `episodes/${enc(id)}`, episodeTranscript: (id) => `episodes/${enc(id)}/transcript`,
       runningEpisodes: (evolution) => `episodes?evolution=${enc(evolution)}&status=running`,
       harness: (ref) => `harnesses/${enc(ref)}`, harnessDiff: (before, after) => `harnesses/${enc(before)}/diff/${enc(after)}`,
       modelCheck: "models/check",
@@ -630,25 +743,24 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 
     /* ---- primitives (DSH's own when present) -------------------------------------------------------------- */
 
+    /** A component DSH exports: a function, or a memo / forwardRef object (MarkdownText is a memo). */
+    const isComponent = (value) => typeof value === "function" || (typeof value === "object" && value !== null && "$$typeof" in value);
     function Button({ variant = "outline", onClick, disabled, title, children, type = "button" }) {
-      if (typeof P.Button === "function") return h(P.Button, { variant, onClick, disabled, title, type }, children);
+      if (isComponent(P.Button)) return h(P.Button, { variant, onClick, disabled, title, type }, children);
       return h("button", { type, className: "eg-btn", "data-variant": variant, onClick, disabled, title }, children);
     }
     function Tag({ tone = "neutral", children, title }) {
-      if (typeof P.Tag === "function") return h(P.Tag, { tone, title }, children);
+      if (isComponent(P.Tag)) return h(P.Tag, { tone, title }, children);
       return h("span", { className: "eg-tag", "data-tone": tone, title }, children);
     }
     function Dot({ state }) {
-      if (typeof P.StateDot === "function") return h(P.StateDot, { state });
+      if (isComponent(P.StateDot)) return h(P.StateDot, { state });
       return h("span", { className: "eg-dot", "data-state": state });
     }
+    const MARKDOWN_LABELS = { code: { copyLabel: "复制", copiedLabel: "已复制" }, footnotes: "脚注" }; // one object: a new one re-parses the text
     function Markdown({ text }) {
       if (!text) return null;
-      if (typeof P.MarkdownText === "function") {
-        return h("div", { className: "eg-md" }, h(P.MarkdownText, {
-          text, labels: { code: { copyLabel: "复制", copiedLabel: "已复制" }, footnotes: "脚注" },
-        }));
-      }
+      if (isComponent(P.MarkdownText)) return h("div", { className: "eg-md" }, h(P.MarkdownText, { text, labels: MARKDOWN_LABELS }));
       return h("pre", { className: "eg-pre" }, text);
     }
     function StatusTag({ map, keyName }) {
@@ -675,10 +787,23 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
     function Empty({ title, text, action }) {
       return h("div", { className: "eg-empty" }, h(Leaf, { size: 40 }), h("h2", null, title), text ? h("p", null, text) : null, action || null);
     }
-    function Details({ summary, children, open = false }) {
+    function Details({ summary, children, open = false, className = "eg-details" }) {
       const [shown, setShown] = useState(open);
-      return h("details", { className: "eg-details", open: shown, onToggle: (event) => setShown(event.currentTarget.open) },
+      return h("details", { className, open: shown, onToggle: (event) => setShown(event.currentTarget.open) },
         h("summary", null, summary), shown ? children : null);
+    }
+    /** Long content cut to a few lines, with a button to show all of it (only when it is longer). */
+    function Clamp({ children, height = 240 }) {
+      const box = useRef(null);
+      const [open, setOpen] = useState(false);
+      const [long, setLong] = useState(false);
+      useEffect(() => {
+        const element = box.current;
+        if (element && !open) setLong(element.scrollHeight > element.clientHeight + 4);
+      });
+      return h(Fragment, null,
+        h("div", { ref: box, className: "eg-clamp", "data-open": String(open), style: { "--eg-clamp": `${height}px` } }, children),
+        long || open ? h("button", { type: "button", className: "eg-more", onClick: () => setOpen(!open) }, open ? "收起" : "展开全部") : null);
     }
     function Leaf({ size = 16 }) {
       return h("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
@@ -786,9 +911,11 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       return names;
     }
 
-    function EvolutionPage({ id, go, catalog }) {
+    function EvolutionPage({ id, go, catalog, focus: initialFocus }) {
       const [confirmEl, ask] = useConfirm();
       const [live, setLive] = useState(true);
+      const [focus, setFocus] = useState(initialFocus || null);
+      const pick = useCallback((target) => setFocus({ ...target, at: Date.now() }), []);
       const { data: view, error, reload } = useResource(Api.evolution(id), { interval: live ? 4000 : 30000 });
       const running = view ? view.active || view.verifying || view.status === "running" : true;
       useEffect(() => setLive(Boolean(running)), [running]);
@@ -850,10 +977,13 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         notice,
         h(RunStats, { view }),
         view.active ? h(LiveCard, { view, episodes, catalog, go }) : null,
+        h(RunSummary, { view, go, catalog }),
+        h(ScoreCard, { view, catalog, onPick: pick }),
+        h(LineageCard, { view, catalog, onPick: pick }),
         h(Scoreboard, { view, catalog, names }),
         h(GainChart, { view }),
         h(Verification, { view, catalog, ask, act }),
-        h(Rounds, { view, catalog, go }),
+        h(Process, { view, catalog, go, focus }),
         h(HarnessCard, { view, names }),
         h(AdviceCard, { view, catalog }),
         h(ConfigCard, { view, catalog }));
@@ -981,10 +1111,12 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       const { ticks, digits } = niceTicks(lo, hi);
       const tasks = (view.suite?.train || []).length;
       const bases = new Set(rows.map(({ decision }) => decision.basis).filter(Boolean)); // as each comparison ran
+      const ranked = bases.size ? bases.has("tasks_signed_rank") : tasks >= 3 && view.gates?.test === "signed_rank";
       const tInterval = bases.size ? bases.has("tasks_t") : tasks >= 3;
-      const basis = bases.size > 1 ? "各任务增益的 t 区间（可比的训练任务少于 3 个的那几代用分层自助区间）"
-        : tInterval ? "各任务增益的 t 区间" : "分层自助区间（依次重抽任务、回合和天；任务少于 3 个时只反映任务内的随机差异）";
-      return h(Card, { title: "各代候选的增益", hint: `候选 − 在任：训练任务上的平均总技能增益，与${basis}，多个候选时区间按 Bonferroni 加宽。采纳门槛：增益大于 ${signed(gate, 3)}、区间下限大于 0（单侧检验）、没有任务可信变差超过 ${signed(view.gates?.task_cap, 3)}。` },
+      const basis = ranked ? "各任务增益的符号秩区间（只看各任务变好还是变差、变化大小排第几，一个任务上特别大的增益不会把它拉宽）"
+        : bases.size > 1 ? "各任务增益的 t 区间（可比的训练任务少于 3 个的那几代用分层自助区间）"
+          : tInterval ? "各任务增益的 t 区间" : "分层自助区间（依次重抽任务、回合和天；任务少于 3 个时只反映任务内的随机差异）";
+      return h(Card, { title: "各代候选的增益", hint: `候选 − 在任：训练任务上的平均总技能增益（点），与${basis}，多个候选时区间按 Bonferroni 加宽。采纳门槛：增益大于 ${signed(gate, 3)}、区间下限大于 0（单侧检验）、没有任务可信变差超过 ${signed(view.gates?.task_cap, 3)}。` },
         h("div", { className: "eg-forest" },
           rows.flatMap(({ round, candidate, decision }) => {
             const [low, high] = decision.interval;
@@ -1050,7 +1182,10 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
           hint: sealed.validation ? "最后一道检验，每个版本每个任务只评一次" : "须在 validation 之后",
           button: h(Button, { variant: "primary", disabled: !finished || busy || !sealed.validation, onClick: () => run("sealed", "final_test") }, "评测 final_test") },
       ];
-      return h(Card, { title: "独立验证", hint: finished ? "最终版本相对起点版本的提升，还要在进化中没见过的任务和更晚的时期上各验证一次。区间的算法和采纳门槛相同（3 个及以上任务时是各任务增益的 t 区间）；每个版本在每个任务上只有一个结果，所以不做单任务否决。" : "运行完成后可以验证。",
+      const intervalKind = view.gates?.test === "signed_rank"
+        ? "任务多到符号秩检验能下结论时是各任务增益的符号秩区间，例如封存时期的全部任务；不够多时，3 个及以上任务用 t 区间，更少用分层自助区间"
+        : "3 个及以上任务时是各任务增益的 t 区间";
+      return h(Card, { title: "独立验证", hint: finished ? `最终版本相对起点版本的提升，还要在进化中没见过的任务和更晚的时期上各验证一次。区间的算法和采纳门槛相同（${intervalKind}）；每个版本在每个任务上只有一个结果，所以不做单任务否决。` : "运行完成后可以验证。",
         actions: busy ? h(Tag, { tone: "info" }, "验证进行中") : null },
       h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
         h("thead", null, h("tr", null, h("th", null, "检验"), h("th", { className: "num" }, "起点"), h("th", { className: "num" }, "最终"),
@@ -1078,77 +1213,1029 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         h(VersionsTable, { body: row.body, field: row.field, catalog }))));
     }
 
-    /** The host's template check of a candidate; with every training task's local score when it has them. */
-    function smokeText(catalog, smoke) {
-      const head = `模板试运行（本地检验期）：${smoke.status}，总分 ${signed(smoke.score)}，覆盖率 ${Math.round((smoke.coverage || 0) * 100)}%`;
-      const tasks = Object.entries(smoke.tasks || {});
-      if (!tasks.length) return head + (isNum(smoke.incumbent_score) ? `；在任版本的模板 ${signed(smoke.incumbent_score)}` : "");
-      return `${head}；各训练任务（括号里是在任版本的模板）：` + tasks.map(([task, item]) => `${taskShort(catalog, task)} `
-        + `${item.status === "ok" ? signed(item.score, 3) : item.status}${isNum(item.incumbent_score) ? `（${signed(item.incumbent_score, 3)}）` : ""}`).join("、");
+    /* ---- the evolution process: lineage graph, each generation's story ------------------------------------ */
+
+    const CAND_TONE = { adopted: "adopted", passed: "success", proposed: "info", invalid: "danger", rejected: "danger",
+      duplicate: "warning", unchanged: "warning" };
+    const NOTE_KIND = { finding: "发现", lesson: "经验", dead_end: "无效方向" };
+
+    /** The last attempt of each generation (a round cut short and run again appears twice in the record). */
+    function lastAttempts(view) {
+      const byGeneration = new Map();
+      for (const round of view.rounds || []) byGeneration.set(round.generation, round);
+      return [...byGeneration.values()].sort((a, b) => a.generation - b.generation);
     }
 
-    function CandidateCard({ view, round, candidate, catalog }) {
-      const decision = candidate.decision;
-      const changes = candidate.changes || [];
-      return h("div", { className: "eg-cand", "data-adopted": String(candidate.status === "adopted") },
-        h("div", { className: "eg-cand-head" }, h("b", null, `候选 ${candidate.name}`), h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }), h(Mono, { title: candidate.digest }, short(candidate.digest))),
-        candidate.summary ? h("div", { className: "eg-cand-summary" }, candidate.summary) : null,
-        candidate.base?.label ? h("div", { className: "eg-line" }, `起点：存档中的 ${candidate.base.label} `,
-          h(Mono, { title: candidate.base.digest }, short(candidate.base.digest)), "（改动和比较仍相对在任版本）") : null,
-        decision && isNum(decision.delta) ? h(Fragment, null,
-          h("div", { className: "eg-line" }, "增益 ", h("b", { className: toneClass(decision.delta) }, signed(decision.delta)),
-            `，${((decision.confidence || 0.95) * 100).toFixed(1)}% 区间 [${signed(decision.interval[0])}, ${signed(decision.interval[1])}] → ${reasonText(catalog, decision.reason)}`),
-          h("div", { className: "eg-chips" }, (decision.tasks || []).map((item) => h("span", { key: item.task, className: "eg-chip",
-            title: `区间 [${signed(item.interval?.[0])}, ${signed(item.interval?.[1])}]，回合数 候选 ${item.replicates?.[0] ?? "–"} / 在任 ${item.replicates?.[1] ?? "–"}，${reasonText(catalog, item.reason)}` },
-            taskShort(catalog, item.task), " ", h("span", { className: toneClass(item.delta) }, signed(item.delta, 3)),
-            item.reason === "credible_regression" ? h("span", { className: "eg-bad" }, " · 否决") : null))))
-          : decision ? h("div", { className: "eg-line" }, reasonText(catalog, decision.reason)) : null,
-        (candidate.problems || []).length ? h(Alert, { tone: "warning" }, candidate.problems.map((item, index) => h("div", { key: index }, item))) : null,
-        (candidate.warnings || []).length ? h(Alert, { tone: "warning" }, h("b", null, "宿主检查的提醒（不阻止运行）："),
-          candidate.warnings.map((item, index) => h("div", { key: index }, item))) : null,
-        changes.length ? h("div", { className: "eg-chips" }, changes.map((item) => h("span", { key: item.path, className: "eg-chip" }, item.path, " ",
-          h("span", { className: "eg-good" }, `+${item.added ?? 0}`), h("span", { className: "eg-bad" }, `${MINUS}${item.removed ?? 0}`)))) : null,
-        candidate.proposal || changes.length ? h(Details, { summary: `提案与改动（${changes.length} 个文件）` },
-          h(Markdown, { text: candidate.proposal }),
-          candidate.smoke ? h("p", { className: "eg-hint" }, smokeText(catalog, candidate.smoke)) : null,
-          changes.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` }))) : null);
+    /** A version's hidden-period score in one round: the mean over training tasks of its episodes' mean. */
+    function versionMean(round, digest) {
+      const byTask = new Map();
+      for (const entry of round?.episodes || []) {
+        if (entry.harness !== digest || !isNum(entry.score) || !SCORED.includes(entry.status)) continue;
+        if (!byTask.has(entry.task)) byTask.set(entry.task, []);
+        byTask.get(entry.task).push(entry.score);
+      }
+      return byTask.size ? mean([...byTask.values()].map(mean)) : null;
     }
 
-    function Rounds({ view, catalog, go }) {
-      const rounds = view.rounds || [];
+    function tasksBetter(decision) {
+      const tasks = decision?.tasks || [];
+      return { better: tasks.filter((item) => isNum(item.delta) && item.delta > 0).length, total: tasks.length };
+    }
+
+    /** Where a candidate's content came from, in words. */
+    function baseText(view, candidate) {
+      const base = candidate.base;
+      if (!base?.digest) return "从在任版本出发";
+      if (base.digest === view.seed?.digest) return `从起点版本出发（存档 ${base.label || "seed"}）`;
+      for (const round of view.rounds || []) {
+        const found = (round.candidates || []).find((item) => item.digest === base.digest);
+        if (found) return `从本次第 ${round.generation} 代的候选 ${found.name} 出发（存档 ${base.label}）`;
+      }
+      return `从其他运行的候选 ${base.label || short(base.digest)} 出发（存档）`;
+    }
+
+    /** Text cut to a width in px at the graph's font size (a CJK character is about twice as wide as a Latin one). */
+    function fit(text, width, size = 12) {
+      let used = 0;
+      let out = "";
+      for (const char of String(text || "")) {
+        used += /[\u2e80-\uffff]/.test(char) ? size : size * 0.6;
+        if (used > width) return `${out}…`;
+        out += char;
+      }
+      return out;
+    }
+
+    const G = { node: 164, height: 46, indent: 18, column: 212, row: 60, top: 30, left: 2 };
+
+    /**
+     * The run as a graph: a column per generation, its incumbent on top (the trunk) and its candidates below; an
+     * edge from where each candidate started (the incumbent, an archived version of this run, or another run's)
+     * and from an adopted candidate to the next generation's incumbent.
+     */
+    function Lineage({ view, catalog, onPick }) {
+      const rounds = lastAttempts(view);
       if (!rounds.length) return null;
-      return h(Card, { title: "各代详情", hint: "评审意见、候选的提案与改动、比较结果和每个回合。" },
-        rounds.map((round, index) => {
-          let outcome;
-          if (!round.finished) outcome = view.active ? h(Tag, { tone: "info" }, "进行中") : h(Tag, { tone: "warning" }, "未完成");
-          else if (round.generation === 0) outcome = h(Tag, null, "基线");
-          else if (round.adopted) outcome = h(Tag, { tone: "success" }, `采纳 ${round.adopted}`);
-          else if (round.outcome === "no_candidates") outcome = h(Tag, { tone: "warning" }, "没有可运行的候选");
-          else outcome = h(Tag, null, "保留在任");
-          const scores = (round.episodes || []).filter((item) => isNum(item.score)).map((item) => item.score);
-          const evolver = round.evolver;
-          return h("details", { key: `${round.generation}-${round.started_at}`, className: "eg-round", open: index === rounds.length - 1 },
-            h("summary", null, h("span", { className: "eg-round-no" }, `第 ${round.generation} 代`), outcome,
-              h("span", { className: "eg-round-sum" }, `在任 ${short(round.incumbent)} · ${(round.candidates || []).length} 个候选 · ${(round.episodes || []).length} 个回合${scores.length ? ` · 平均 ${signed(mean(scores), 3)}` : ""}`)),
-            h("div", { className: "eg-round-body" },
-              round.generation === 0 ? h("p", { className: "eg-hint" }, "基线：起点版本在每个训练任务上运行，作为第 1 代比较的在任成绩。")
-                : !evolver ? h("p", { className: "eg-hint" }, view.active ? "评审智能体正在阅读证据、编写候选…" : "这一代没有评审记录。")
-                  : evolver.status === "error" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话出错："), evolver.error || "")
-                  : evolver.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话没有得到模型回复："), evolver.upstream_error || "服务故障")
-                    : h("p", { className: "eg-hint" }, `评审会话：${evolver.status}，${duration(evolver.seconds)}，${tokens(evolver.tokens)} token，${evolver.llm_calls ?? "–"} 次模型调用${evolver.continuations ? `，含 ${evolver.continuations} 段续跑（对照会话记录）` : ""}`),
-              (round.notes || []).length ? h("div", null, round.notes.map((note, i) => h("div", { key: i, className: "eg-note" }, h("span", { className: "eg-chip" }, note.kind), " ", note.text))) : null,
-              evolver?.final_text ? h(Details, { summary: "评审的总结" }, h(Markdown, { text: evolver.final_text })) : null,
-              (round.candidates || []).map((candidate) => h(CandidateCard, { key: candidate.name, view, round, candidate, catalog })),
-              (round.episodes || []).length ? h("div", { className: "eg-table-wrap", style: { marginTop: "10px" } }, h("table", { className: "eg-table" },
-                h("thead", null, h("tr", null, h("th", null, "版本"), h("th", null, "任务"), h("th", null, "状态"), h("th", { className: "num" }, "隐藏期总分"), h("th", { className: "num" }, "Token"), h("th", null, "回合"))),
-                h("tbody", null, round.episodes.map((entry, i) => h("tr", { key: entry.episode || i, className: entry.episode ? "eg-click" : "", onClick: entry.episode ? () => go({ page: "episode", id: entry.episode }) : undefined },
-                  h("td", null, entry.role === "incumbent" ? "在任" : `候选 ${entry.candidate}`),
-                  h("td", null, h(TaskLabel, { catalog, id: entry.task })),
-                  h("td", null, h(StatusTag, { map: EP_STATUS, keyName: entry.status })),
-                  h("td", { className: `num ${toneClass(entry.score)}` }, signed(entry.score)),
-                  h("td", { className: "num" }, tokens(entry.tokens)),
-                  h("td", null, entry.episode ? h(Mono, null, entry.episode) : entry.error || "")))))) : null));
+      const own = new Map(); // a candidate's digest -> its node
+      rounds.forEach((round, index) => (round.candidates || []).forEach((candidate) => {
+        if (candidate.digest && !own.has(candidate.digest)) own.set(candidate.digest, `c${index}-${candidate.name}`);
+      }));
+      const externals = [];
+      for (const round of rounds) {
+        for (const candidate of round.candidates || []) {
+          const digest = candidate.base?.digest;
+          if (digest && !own.has(digest) && digest !== view.seed?.digest && !externals.some((item) => item.digest === digest)) {
+            externals.push({ digest, label: candidate.base.label });
+          }
+        }
+      }
+      const shift = externals.length ? 1 : 0;
+      const colX = (index) => G.left + (index + shift) * G.column;
+      const rowY = (row) => G.top + row * G.row;
+      const nodes = new Map();
+      const edges = [];
+      const add = (node) => nodes.set(node.id, node);
+      const alias = (digest) => { // which version the trunk holds: the seed, or the candidate adopted
+        if (digest === view.seed?.digest) return "起点";
+        for (const round of rounds) {
+          const found = (round.candidates || []).find((candidate) => candidate.digest === digest);
+          if (found) return `g${round.generation}${found.name}`;
+        }
+        return "";
+      };
+      const level = versionLevels(view);
+      const origin = seedOrigin(view);
+      rounds.forEach((round, index) => {
+        const score = versionMean(round, round.incumbent);
+        const seed = round.incumbent === view.seed?.digest;
+        add({ id: `t${index}`, kind: "trunk", x: colX(index), y: rowY(0), tone: "neutral",
+          title: round.generation === 0 ? `起点：${origin}` : `在任：${seed ? "起点" : alias(round.incumbent) || short(round.incumbent).slice(0, 6)}`,
+          sub: isNum(score) ? [{ text: `这一代回合均分 ${signed(score, 3)}` }] : [{ text: short(round.incumbent).slice(0, 6) }],
+          tip: `${round.generation === 0 ? "起点版本" : "这一代开始时的在任版本（当前在用的版本）"} ${short(round.incumbent)}`
+            + (round.generation === 0 && (view.ancestry || [])[0] ? `：${day(view.ancestry[0].started_at)} 那次运行（${view.ancestry[0].run_id}）采纳的候选` : "")
+            + (isNum(score) ? `\n这一代它的回合在各训练任务上的均分 ${signed(score, 3)}` : ""),
+          pick: () => onPick({ generation: round.generation }) });
+      });
+      const end = rounds.length;
+      const done = view.status === "finished";
+      const changed = view.incumbent !== view.seed?.digest;
+      const finalScore = level(view.incumbent);
+      add({ id: `t${end}`, kind: "trunk", x: colX(end), y: rowY(0), tone: done && changed ? "success" : "neutral",
+        title: `${done ? "最终" : "现在"}：${changed ? alias(view.incumbent) || short(view.incumbent).slice(0, 6) : "仍是起点"}`,
+        sub: [{ text: `${changed ? "换了新版本" : "没有换版本"}${isNum(finalScore) ? ` · ${signed(finalScore, 3)}` : ""}` }],
+        tip: `${done ? "进化结束时" : "现在"}的在任版本 ${short(view.incumbent)}${isNum(finalScore) ? `\n成绩 ${signed(finalScore, 3)}：它作为在任版本的全部回合在各训练任务上的平均` : ""}` });
+      for (let index = 0; index < end; index += 1) edges.push({ kind: "trunk", from: `t${index}`, to: `t${index + 1}` });
+      externals.forEach((item, index) => add({ id: `x${index}`, kind: "external", x: G.left, y: rowY(index + 1), tone: "neutral",
+        title: item.label || short(item.digest).slice(0, 6), sub: [{ text: "以前运行的候选（未采纳）" }],
+        tip: `另一次运行（训练任务都在本次之内）里的候选 ${item.label}（${short(item.digest)}）：本次有候选从它出发` }));
+      let rows = externals.length;
+      rounds.forEach((round, index) => {
+        (round.candidates || []).forEach((candidate, row) => {
+          const decision = candidate.decision;
+          const [status] = CAND_STATUS[candidate.status] || [candidate.status];
+          const measured = decision && isNum(decision.delta);
+          const { better, total } = tasksBetter(decision);
+          const id = `c${index}-${candidate.name}`;
+          const waiting = candidate.status === "proposed" ? (view.active && !round.finished ? "回合进行中" : "没有比较") : "没有运行";
+          const side = measured ? credibility(decision.interval) : null;
+          const gap = measured ? `${decision.delta >= 0 ? "高" : "低"} ${plain(Math.abs(decision.delta), 3)}` : "";
+          add({ id, kind: "candidate", x: colX(index) + G.indent, y: rowY(row + 1), tone: CAND_TONE[candidate.status] || "neutral",
+            title: `g${round.generation}${candidate.name} · ${status}`,
+            sub: measured ? [{ text: `比在任${gap}`, tone: side === "above" ? "eg-good" : side === "below" ? "eg-bad" : undefined },
+              { text: ` · ${CREDIBLE_TEXT[side]}` }] : [{ text: waiting }],
+            tip: [candidate.summary, baseText(view, candidate), measured ? `比在任版本${gap}（${total} 个训练任务里 ${better} 个更好），误差范围 `
+              + `[${signed(decision.interval?.[0], 3)}, ${signed(decision.interval?.[1], 3)}]：${reasonText(catalog, decision.reason)}` : ""].filter(Boolean).join("\n"),
+            pick: () => onPick({ generation: round.generation, name: candidate.name }) });
+          rows = Math.max(rows, row + 1);
+          const base = candidate.base?.digest;
+          if (!base) edges.push({ kind: "fork", from: `t${index}`, to: id });
+          else if (own.has(base)) edges.push({ kind: "base", from: own.get(base), to: id });
+          else if (base === view.seed?.digest) edges.push({ kind: "base", from: "t0", to: id });
+          else edges.push({ kind: "external", from: `x${externals.findIndex((item) => item.digest === base)}`, to: id });
+          if (round.finished && round.adopted === candidate.name) edges.push({ kind: "adopt", from: id, to: `t${index + 1}` });
+        });
+      });
+      const path = (edge) => {
+        const a = nodes.get(edge.from);
+        const b = nodes.get(edge.to);
+        if (!a || !b) return null;
+        if (edge.kind === "fork") return `M${a.x + G.indent / 2},${a.y + G.height} V${b.y + G.height / 2} H${b.x}`;
+        const [x1, y1, x2, y2] = [a.x + G.node, a.y + G.height / 2, b.x, b.y + G.height / 2];
+        if (edge.kind === "trunk") return `M${x1},${y1} H${x2}`;
+        const dx = Math.max(24, (x2 - x1) / 2);
+        return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+      };
+      const heads = [
+        ...(shift ? [{ x: G.left, text: "以前运行里的候选" }] : []),
+        ...rounds.map((round, index) => {
+          const [outcome] = roundOutcome(view, round);
+          return { x: colX(index), text: `第 ${round.generation} 代 · ${outcome}` };
+        }),
+        { x: colX(end), text: done ? "结果" : "现在" },
+      ];
+      const width = colX(end) + G.node + G.left;
+      const height = rowY(rows) + G.height + 6;
+      const order = { trunk: 0, fork: 1, external: 2, base: 3, adopt: 4 };
+      // scaled down to the card's width rather than cut off behind a scrollbar; never drawn larger than its size
+      return h("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "进化谱系图",
+        style: { width: "100%", maxWidth: `${width}px`, height: "auto" } },
+        heads.map((item) => h("text", { key: `h${item.x}`, x: item.x + 2, y: 14, className: "head" }, item.text)),
+        [...edges].sort((a, b) => order[a.kind] - order[b.kind]).map((edge, index) => {
+          const d = path(edge);
+          return d ? h("path", { key: `e${index}`, className: "edge", "data-kind": edge.kind, d }) : null;
+        }),
+        [...nodes.values()].map((node) => h("g", { key: node.id, className: "node", "data-kind": node.kind, "data-tone": node.tone,
+          "data-pick": String(Boolean(node.pick)), transform: `translate(${node.x},${node.y})`, tabIndex: node.pick ? 0 : undefined,
+          role: node.pick ? "button" : undefined, onClick: node.pick || undefined,
+          onKeyDown: node.pick ? (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              node.pick();
+            }
+          } : undefined },
+        h("title", null, node.tip || node.title),
+        h("rect", { width: G.node, height: G.height, rx: 9 }),
+        h("text", { x: 10, y: 18 }, fit(node.title, G.node - 18)),
+        h("text", { x: 10, y: 36, className: "sub" }, node.sub.map((part, index) => h("tspan", { key: index,
+          className: part.tone === "eg-good" ? "good" : part.tone === "eg-bad" ? "bad" : undefined }, part.text))))));
+    }
+
+    function Swatch({ tone, kind }) {
+      return h("svg", { width: 22, height: 14, "aria-hidden": "true" },
+        h("g", { className: "node", "data-tone": tone, "data-kind": kind }, h("rect", { x: 1, y: 1, width: 20, height: 12, rx: 3 })));
+    }
+    function Line({ kind }) {
+      return h("svg", { width: 28, height: 10, "aria-hidden": "true" }, h("path", { className: "edge", "data-kind": kind, d: "M1,5 H27" }));
+    }
+
+    function LineageCard({ view, catalog, onPick }) {
+      if (!(view.rounds || []).length) return null;
+      const item = (icon, text) => h("span", { key: text }, icon, text);
+      const kinds = new Set();
+      for (const round of view.rounds || []) {
+        for (const candidate of round.candidates || []) kinds.add(candidate.base?.digest ? "base" : "fork");
+      }
+      return h(Card, { title: "版本从哪里来", hint: "每一列是一代。最上面一行是在任版本（当前在用的版本）：一路平着连下去，表示一直没有换。下面是这一代评审改出的候选，连线指向它是在哪个版本上改的。候选被采纳时，有一条绿线连到下一代的在任版本。点一个版本，跳到下面那一代的过程。" },
+        h("div", { className: "eg-graph" }, h(Lineage, { view, catalog, onPick })),
+        h("div", { className: "eg-legend eg-graph" },
+          item(h(Line, { kind: "trunk" }), "在任版本延续到下一代"),
+          kinds.has("fork") ? item(h(Line, { kind: "fork" }), "从在任版本改出") : null,
+          kinds.has("base") ? item(h(Line, { kind: "external" }), "在以前没采纳的候选上接着改") : null,
+          item(h(Line, { kind: "adopt" }), "采纳：成为下一代的在任"),
+          item(h(Swatch, { tone: "adopted" }), "采纳"),
+          item(h(Swatch, { tone: "danger" }), "没通过检查，没运行")),
+        h("p", { className: "eg-hint" }, "“比在任高 0.016 · 在误差内”：候选的平均成绩比在任版本高 0.016，但这个差别比误差范围小，分不清是真的更好还是运气。"
+          + "只有“可信地更好”且高得足够多的候选才会被采纳。"));
+    }
+
+    function roundOutcome(view, round) {
+      if (!round.finished) return view.active ? ["进行中", "info"] : ["未完成", "warning"];
+      if (round.generation === 0) return ["基线", "neutral"];
+      if (round.adopted) return [`采纳 ${round.adopted}`, "success"];
+      if (round.outcome === "no_candidates") return ["没有可运行的候选", "warning"];
+      return ["保留在任", "neutral"];
+    }
+
+    function Process({ view, catalog, go, focus }) {
+      const rounds = view.rounds || [];
+      const [open, setOpen] = useState(() => new Set([rounds.length - 1]));
+      useEffect(() => setOpen((old) => (old.has(rounds.length - 1) ? old : new Set([...old, rounds.length - 1]))), [rounds.length]);
+      useEffect(() => {
+        if (!focus) return undefined;
+        let index = -1;
+        rounds.forEach((round, i) => {
+          if (round.generation === focus.generation) index = i;
+        });
+        if (index < 0) return undefined;
+        setOpen((old) => (old.has(index) ? old : new Set([...old, index])));
+        const timer = setTimeout(() => {
+          const target = (focus.name && document.getElementById(`eg-cand-${index}-${focus.name}`)) || document.getElementById(`eg-gen-${index}`);
+          target?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 120);
+        return () => clearTimeout(timer);
+      }, [focus]);
+      if (!rounds.length) return null;
+      const toggle = (index, value) => setOpen((old) => {
+        if (old.has(index) === value) return old;
+        const next = new Set(old);
+        if (value) next.add(index);
+        else next.delete(index);
+        return next;
+      });
+      return h(Card, { title: "每一代的过程", hint: "每一代按顺序：评审读了什么、找到什么问题；候选从哪里出发、改了什么、为什么；宿主的检查；候选和在任版本在各训练任务上的回合；比较和决定。" },
+        rounds.map((round, index) => h(GenerationStory, { key: `${round.generation}-${round.started_at}`, view, round, index, catalog, go,
+          open: open.has(index), onToggle: toggle, focus: focus?.generation === round.generation ? focus : null })));
+    }
+
+    function GenerationStory({ view, round, index, catalog, go, open, onToggle, focus }) {
+      const [text, tone] = roundOutcome(view, round);
+      const scores = (round.episodes || []).filter((item) => isNum(item.score)).map((item) => item.score);
+      const back = { page: "evolution", id: view.run_id, focus: { generation: round.generation } };
+      const steps = round.generation === 0 ? [
+        ["起点版本在每个训练任务上运行", h(EpisodeGrid, { view, round, catalog, go, back })],
+        ["结果", h(Outcome, { view, round })],
+      ] : [
+        ["评审：读证据，找问题", h(EvolverStep, { view, round, go, back })],
+        ["候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
+        ["回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back })],
+        ["比较：候选 − 在任", h(DecisionStep, { view, round, catalog })],
+        ["结果", h(Outcome, { view, round })],
+      ];
+      return h("details", { id: `eg-gen-${index}`, className: "eg-round", open, onToggle: (event) => onToggle(index, event.currentTarget.open) },
+        h("summary", null, h("span", { className: "eg-round-no" }, `第 ${round.generation} 代`), h(Tag, { tone }, text),
+          h("span", { className: "eg-round-sum" }, [`在任 ${short(round.incumbent)}`, round.generation ? `${(round.candidates || []).length} 个候选` : null,
+            `${(round.episodes || []).length} 个回合`, scores.length ? `回合平均 ${signed(mean(scores), 3)}` : null,
+            round.evolver ? `评审 ${duration(round.evolver.seconds)}` : null].filter(Boolean).join(" · "))),
+        open ? h("div", { className: "eg-round-body eg-steps" }, steps.map(([title, body], i) => h("div", { key: title, className: "eg-story" },
+          h("span", { className: "eg-story-no" }, i + 1), h("h3", null, title), h("div", { className: "eg-story-body" }, body)))) : null);
+    }
+
+    function EvolverStep({ view, round, go, back }) {
+      const evolver = round.evolver;
+      const recorded = Boolean(evolver?.trajectory?.dir);
+      const { data: session, error } = useResource(recorded ? Api.evolverSession(view.run_id, round.generation, false) : null);
+      if (!evolver) {
+        return h("p", { className: "eg-hint" }, view.active && !round.finished ? "评审智能体正在阅读证据、编写候选…" : "这一代没有评审记录。");
+      }
+      const page = () => go({ page: "evolver", id: `${view.run_id}|${round.generation}`, back });
+      const failed = evolver.status === "error" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话出错："), evolver.error || "")
+        : evolver.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话没有得到模型回复："), evolver.upstream_error || "服务故障") : null;
+      const steps = recorded && session?.recorded !== false; // a session whose model never answered leaves no steps
+      const final = String(evolver.final_text || "").trim();
+      return h(Fragment, null,
+        h("div", { className: "eg-story-sub" }, [evolver.status === "finished" ? null : SESSION_STATUS[evolver.status]?.[0] || evolver.status,
+          duration(evolver.seconds), evolver.tokens ? `${tokens(evolver.tokens)} token` : null, `${evolver.llm_calls ?? "–"} 次模型调用`,
+          session?.turns ? `${session.turns} 步` : null, evolver.continuations ? `含 ${evolver.continuations} 段续跑` : null].filter(Boolean).join(" · "),
+        steps ? h(Fragment, null, " · ", h("a", { href: "#", onClick: (event) => {
+          event.preventDefault();
+          page();
+        } }, "看评审的每一步 →")) : null),
+        failed,
+        error ? h(Alert, { tone: "warning" }, `读不到评审会话：${error.message}`) : null,
+        session?.recorded ? h(Reads, { reads: session.reads, go, back, label: "看过的材料（按第一次看的先后；悬停看是第几步）" })
+          : session ? h("p", { className: "eg-hint" }, "没有存下这次会话的模型调用，看不到它读了什么。")
+            : recorded && !error ? h("p", { className: "eg-hint" }, "正在读取评审会话…") : null,
+        final ? h(Fragment, null, h("div", { className: "eg-label" }, "评审的判断（会话最后的回复）"),
+          h(Clamp, { height: 280 }, h(Markdown, { text: final }))) : null,
+        (round.notes || []).length ? h(Fragment, null, h("div", { className: "eg-label" }, "评审记下的笔记（以后各代的证据里会出现）"),
+          round.notes.map((note, i) => h("div", { key: i, className: "eg-note" }, h("span", { className: "eg-chip" }, NOTE_KIND[note.kind] || note.kind), " ", note.text))) : null);
+    }
+
+    const READ_GROUPS = { brief: "说明", guide: "说明", evidence: "证据", summary: "回合摘要", transcript: "回合会话记录", program: "回合的程序",
+      episode: "回合", archive: "存档版本", incumbent: "在任版本", candidate: "候选", proposal: "提案", other: "其他" };
+    const EVIDENCE_FILES = { "overview.md": "证据总览", "archive.md": "以往候选", "lessons.md": "内循环笔记", "contrasts.md": "回合对照",
+      "prior_runs.md": "以往运行", "expert.md": "专家意见" };
+    const whereText = (where) => (where[0] ? `线程 ${where[0] + 1} 第 ${where[1]} 步` : `第 ${where[1]} 步`);
+
+    function readText(item) {
+      if (item.kind === "brief") return "任务说明 EVOLVE.md";
+      if (item.kind === "guide") return "评审指南 AGENTS.md";
+      if (item.kind === "evidence") return EVIDENCE_FILES[item.key] ? `${EVIDENCE_FILES[item.key]} ${item.key}` : item.key;
+      if (["summary", "transcript", "program", "episode"].includes(item.kind)) return item.key === "*" ? "全部回合" : short(item.key.replace(/^ep:/, ""));
+      if (item.kind === "archive" && item.key === "README.md") return "存档说明 README.md";
+      if (item.kind === "candidate") return `候选 ${item.key}`;
+      if (item.kind === "proposal") return `${item.key}.md`;
+      return item.key;
+    }
+
+    /** What a session looked at in its workspace, grouped by kind; a chip opens the episode or jumps to the step. */
+    function Reads({ reads, go, back, onStep, label }) {
+      const items = reads || [];
+      const groups = new Map();
+      for (const item of items) {
+        const name = READ_GROUPS[item.kind] || item.kind;
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name).push(item);
+      }
+      const chip = (item) => {
+        const key = `${item.kind}:${item.key}`;
+        const title = `${item.paths.join("\n")}\n${item.steps.map(whereText).join("、")}`;
+        if (onStep) return h("button", { key, type: "button", className: "eg-chip", title, onClick: () => onStep(item.steps[0]) }, readText(item));
+        if (go && /^ep:/.test(item.key)) {
+          return h("button", { key, type: "button", className: "eg-chip", title: `${title}\n点开这个回合`, onClick: () => go({ page: "episode", id: item.key, back }) }, readText(item));
+        }
+        return h("span", { key, className: "eg-chip", title }, readText(item));
+      };
+      const transcripts = items.filter((item) => item.kind === "transcript").length;
+      return h(Fragment, null,
+        label ? h("div", { className: "eg-label" }, label) : null,
+        items.length ? h("dl", { className: "eg-reads" }, [...groups.entries()].flatMap(([name, list]) => [
+          h("dt", { key: `t${name}` }, name), h("dd", { key: `d${name}` }, list.map(chip))]))
+          : h("p", { className: "eg-hint" }, "会话里没有读工作区文件的记录。"),
+        items.length && !transcripts ? h("p", { className: "eg-hint eg-warn" }, "没有打开任何回合的会话记录（evidence/episodes/…/transcript.md）。") : null);
+    }
+
+    function CandidatesStep({ view, round, index, catalog, focus }) {
+      const candidates = round.candidates || [];
+      if (!candidates.length) {
+        return h("p", { className: "eg-hint" }, round.evolver ? "评审没有留下候选。" : "评审会话结束后出现。");
+      }
+      return candidates.map((candidate) => h(CandidateStory, { key: candidate.name, view, round, index, candidate, catalog,
+        focused: focus?.name === candidate.name }));
+    }
+
+    function CandidateStory({ view, index, candidate, catalog, focused }) {
+      const base = candidate.base?.digest ? candidate.base : null;
+      const [against, setAgainst] = useState(base ? "base" : "incumbent");
+      const fromBase = against === "base" && base && candidate.digest;
+      const { data: baseDiff, error } = useResource(fromBase ? Api.harnessDiff(base.digest, candidate.digest) : null);
+      const changes = fromBase ? baseDiff : candidate.changes || [];
+      return h("div", { id: `eg-cand-${index}-${candidate.name}`, className: "eg-cand", "data-adopted": String(candidate.status === "adopted"),
+        "data-focus": String(Boolean(focused)) },
+      h("div", { className: "eg-cand-head" }, h("b", null, `候选 ${candidate.name}`), h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }),
+        h(Mono, { title: candidate.digest }, short(candidate.digest)), h("span", { className: "eg-faint" }, baseText(view, candidate))),
+      candidate.summary ? h("div", { className: "eg-cand-summary" }, candidate.summary) : null,
+      h("div", { className: "eg-label" }, base ? h(Fragment, null, "改了什么　",
+        h("span", { className: "eg-switch" }, [["base", `相对出发的版本 ${base.label || short(base.digest)}`], ["incumbent", "相对在任版本（比较的对象）"]]
+          .map(([key, text]) => h("button", { key, type: "button", "aria-pressed": String(against === key), onClick: () => setAgainst(key) }, text))))
+        : "改了什么（相对在任版本）"),
+      error ? h(Alert, { tone: "warning" }, `读不到两个版本的差异：${error.message}`)
+        : !changes ? h("p", { className: "eg-hint" }, "正在读取…")
+          : changes.length ? h(Fragment, null,
+            h("div", { className: "eg-chips" }, changes.map((item) => h("span", { key: item.path, className: "eg-chip" }, item.path, " ",
+              h("span", { className: "eg-good" }, `+${item.added ?? 0}`), h("span", { className: "eg-bad" }, `${MINUS}${item.removed ?? 0}`)))),
+            h(Details, { key: against, summary: `看改动（${changes.length} 个文件）` },
+              changes.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` }))))
+            : h("p", { className: "eg-hint" }, fromBase ? "和出发的版本相同。" : "没有改动。"),
+      h("div", { className: "eg-label" }, "提案：为什么这样改（评审写的）"),
+      written(candidate.proposal) ? h(Clamp, { height: 200 }, h(Markdown, { text: candidate.proposal }))
+        : h("p", { className: "eg-hint" }, "没有写提案（只有宿主给的空模板）。"),
+      h(CheckView, { candidate, catalog }));
+    }
+
+    /** A proposal with content, not only the headings of the skeleton the host puts in proposals/. */
+    const written = (text) => String(text || "").split("\n").some((line) => line.trim() && !line.trim().startsWith("#"));
+
+    /** The host's own check of a candidate after the session: problems, warnings, the template's local scores. */
+    function CheckView({ candidate, catalog }) {
+      const smoke = candidate.smoke;
+      const tasks = Object.entries(smoke?.tasks || {});
+      const problems = candidate.problems || [];
+      const warnings = candidate.warnings || [];
+      let body;
+      if (tasks.length) {
+        body = h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
+          h("thead", null, h("tr", null, h("th", null, "训练任务"), h("th", { className: "num" }, "候选的模板"), h("th", { className: "num" }, "在任的模板"),
+            h("th", { className: "num" }, "差"))),
+          h("tbody", null, tasks.map(([task, item]) => {
+            const change = item.status === "ok" && isNum(item.score) && isNum(item.incumbent_score) ? item.score - item.incumbent_score : null;
+            return h("tr", { key: task }, h("td", null, h(TaskLabel, { catalog, id: task })),
+              h("td", { className: "num" }, item.status === "ok" ? signed(item.score, 3) : h("span", { className: "eg-bad" }, item.status)),
+              h("td", { className: "num" }, signed(item.incumbent_score, 3)),
+              h("td", { className: `num ${toneClass(change)}` }, signed(change, 3)));
+          }))));
+      } else if (smoke) {
+        body = h("p", { className: "eg-hint" }, `模板试运行：${smoke.status}，本地 ${signed(smoke.score, 3)}`
+          + `${isNum(smoke.incumbent_score) ? `（在任的模板 ${signed(smoke.incumbent_score, 3)}）` : ""}，覆盖率 ${Math.round((smoke.coverage || 0) * 100)}%`);
+      } else if (candidate.status !== "invalid") {
+        body = h("p", { className: "eg-hint" }, "模板代码没有改动，不需要试运行。");
+      }
+      return h(Fragment, null,
+        h("div", { className: "eg-label" }, "宿主的检查：能否加载、是否超限、有没有任务的专有名称；模板改了就在本地检验期上实际运行（不是隐藏期）"),
+        body || null,
+        problems.length ? h(Alert, { tone: "warning" }, h("b", null, "没有通过的检查："), problems.map((item, i) => h("div", { key: i }, item))) : null,
+        warnings.length ? h(Alert, { tone: "warning" }, h("b", null, "提醒（不阻止运行）："), warnings.map((item, i) => h("div", { key: i }, item))) : null);
+    }
+
+    /** The incumbent's episodes from earlier rounds that a round's comparison also used (``evolution.loop``'s pool):
+     * finished rounds after the incumbent was adopted, under the same expert guidance. */
+    function earlierIncumbent(view, round) {
+      if (round.generation === 0) return [];
+      const adoptedAt = Math.max(-1, ...(view.adoptions || []).filter((item) => item.digest === round.incumbent).map((item) => item.generation));
+      return (view.rounds || []).filter((other) => other !== round && other.finished && other.generation > adoptedAt && other.generation < round.generation)
+        .flatMap((other) => (other.episodes || []).filter((entry) => entry.role === "incumbent" && entry.harness === round.incumbent
+          && SCORED.includes(entry.status) && (entry.guidance ?? null) === (round.guidance?.[entry.task] ?? null))
+          .map((entry) => ({ ...entry, generation: other.generation })));
+    }
+
+    /** A round's episodes: a row per version, a column per training task, one chip per episode (click opens it). */
+    function EpisodeGrid({ view, round, catalog, go, back }) {
+      const tasks = view.suite?.train || [];
+      const entries = round.episodes || [];
+      if (!entries.length) {
+        return h("p", { className: "eg-hint" }, !round.finished && view.active ? "回合正在运行（见上面的「正在进行」），全部结束后出现在这里。" : "这一代没有回合记录。");
+      }
+      const earlier = earlierIncumbent(view, round);
+      const rows = [{ key: "incumbent", label: round.generation === 0 ? "起点版本" : "在任", match: (entry) => entry.role === "incumbent" }];
+      for (const candidate of round.candidates || []) {
+        if (entries.some((entry) => entry.role === "candidate" && entry.candidate === candidate.name)) {
+          rows.push({ key: candidate.name, label: `候选 ${candidate.name}`, match: (entry) => entry.role === "candidate" && entry.candidate === candidate.name });
+        }
+      }
+      const chip = (entry, faded) => {
+        const ok = SCORED.includes(entry.status) && isNum(entry.score);
+        return h("button", { key: entry.episode || `${entry.task}-${entry.replicate}-${entry.generation ?? ""}`, type: "button", className: "eg-score",
+          disabled: !entry.episode, style: { background: ok ? mix(entry.score, 0.3) : undefined, opacity: faded ? 0.5 : undefined },
+          title: `${entry.episode || ""}${faded ? `：第 ${entry.generation} 代的在任回合，比较时一并计入` : ""}\n`
+            + `${EP_STATUS[entry.status]?.[0] || entry.status} · ${tokens(entry.tokens)} token · ${duration(entry.seconds)}`,
+          onClick: () => go({ page: "episode", id: entry.episode, back }) },
+        ok ? signed(entry.score, 3) : h("span", { className: "eg-bad" }, EP_STATUS[entry.status]?.[0] || entry.status));
+      };
+      const pooled = earlier.length ? Math.round((earlier.length + entries.filter((entry) => entry.role === "incumbent").length) / Math.max(1, tasks.length)) : 0;
+      return h(Fragment, null,
+        h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
+          h("thead", null, h("tr", null, h("th", null, "版本"), tasks.map((task) => h("th", { key: task, title: task }, taskShort(catalog, task))),
+            h("th", { className: "num", title: "各任务回合均值的平均（在任一行含淡色的早先回合）" }, "平均"))),
+          h("tbody", null, rows.map((row) => {
+            const means = [];
+            return h("tr", { key: row.key }, h("td", { style: { whiteSpace: "nowrap" } }, row.label),
+              tasks.map((task) => {
+                const own = entries.filter((entry) => row.match(entry) && entry.task === task);
+                const before = row.key === "incumbent" ? earlier.filter((entry) => entry.task === task) : [];
+                const values = [...own, ...before].filter((entry) => SCORED.includes(entry.status) && isNum(entry.score)).map((entry) => entry.score);
+                if (values.length) means.push(mean(values));
+                return h("td", { key: task }, h("div", { className: "eg-cell-chips" }, own.map((entry) => chip(entry, false)), before.map((entry) => chip(entry, true))));
+              }),
+              h("td", { className: "num" }, h("b", null, means.length === tasks.length ? signed(mean(means), 3) : "–")));
+          })))),
+        h("p", { className: "eg-hint" }, "每个格子是一个回合的隐藏期总技能（相对朴素基线，大于 0 更好），点开看那个回合。"
+          + (earlier.length ? `淡色是在任版本在之前各代跑过的回合（专家意见相同），比较时和本代的一起算，每个任务约 ${pooled} 个。` : "")
+          + (round.generation ? "同一个版本的几个回合之间差别很大，所以要多跑几次、在多个任务上比较。" : "")),
+        h(Details, { summary: `逐个回合（${entries.length} 个）` }, h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
+          h("thead", null, h("tr", null, h("th", null, "版本"), h("th", null, "任务"), h("th", null, "状态"), h("th", { className: "num" }, "隐藏期总分"),
+            h("th", { className: "num" }, "Token"), h("th", null, "回合"))),
+          h("tbody", null, entries.map((entry, i) => h("tr", { key: entry.episode || i, className: entry.episode ? "eg-click" : "",
+            onClick: entry.episode ? () => go({ page: "episode", id: entry.episode, back }) : undefined },
+          h("td", null, entry.role === "incumbent" ? (round.generation === 0 ? "起点版本" : "在任") : `候选 ${entry.candidate}`),
+          h("td", null, h(TaskLabel, { catalog, id: entry.task })),
+          h("td", null, h(StatusTag, { map: EP_STATUS, keyName: entry.status })),
+          h("td", { className: `num ${toneClass(entry.score)}` }, signed(entry.score)),
+          h("td", { className: "num" }, tokens(entry.tokens)),
+          h("td", null, entry.episode ? h(Mono, null, entry.episode) : entry.error || ""))))))));
+    }
+
+    /** Why a comparison came out as it did, in words. */
+    function verdict(decision, gates, catalog) {
+      const range = `[${signed(decision.interval?.[0], 3)}, ${signed(decision.interval?.[1], 3)}]`;
+      const { better, total } = tasksBetter(decision);
+      const head = `平均增益 ${signed(decision.delta, 4)}，${total} 个训练任务里 ${better} 个更好。`;
+      const reason = String(decision.reason || "");
+      if (reason === "improved") {
+        return h(Fragment, null, head, h("b", { className: "eg-good" }, " 通过全部门槛："),
+          `增益超过实用门槛 ${signed(gates?.min_delta, 3)}，区间 ${range} 整个在 0 以上，没有任务可信变差。`);
+      }
+      if (reason === "interval_crosses_zero") {
+        return h(Fragment, null, head, h("b", null, " 不采纳："),
+          `区间 ${range} 包含 0。按回合之间的随机差异，这个增益还可能来自运气；要分清，需要更多回合或更多训练任务。`);
+      }
+      if (reason === "below_practical_delta") {
+        return h(Fragment, null, head, h("b", null, " 不采纳："), `增益没有超过实用门槛 ${signed(gates?.min_delta, 3)}，差别太小，不值得换版本。`);
+      }
+      if (reason.startsWith("task_regression:")) {
+        return h(Fragment, null, head, h("b", { className: "eg-bad" }, " 不采纳："), `${reasonText(catalog, reason)}：有任务可信变差时一票否决。`);
+      }
+      if (reason.startsWith("missing_tasks:")) return h(Fragment, null, h("b", null, "没有比较："), `${reasonText(catalog, reason)}。`);
+      return h(Fragment, null, head, " ", reasonText(catalog, reason));
+    }
+
+    function DecisionStep({ view, round, catalog }) {
+      const compared = (round.candidates || []).filter((candidate) => candidate.decision);
+      if (!compared.length) {
+        return h("p", { className: "eg-hint" }, round.finished ? "没有候选进入比较。" : view.active ? "回合全部结束后比较。" : "这一代没有完成比较。");
+      }
+      const gate = view.gates?.min_delta;
+      const values = [0, ...(isNum(gate) ? [gate] : [])];
+      for (const { decision } of compared) {
+        values.push(...[decision.delta, ...(decision.interval || [])].filter(isNum));
+        for (const item of decision.tasks || []) values.push(...[item.delta, ...(item.interval || [])].filter(isNum));
+      }
+      let lo = Math.min(...values);
+      let hi = Math.max(...values);
+      const span = Math.max(hi - lo, 0.004);
+      lo -= span * 0.06;
+      hi += span * 0.06;
+      const x = (value) => ((value - lo) / (hi - lo)) * 100;
+      const { ticks, digits } = niceTicks(lo, hi);
+      const track = (delta, interval, strong) => h("div", { className: "eg-track", "data-adopted": String(Boolean(strong)) },
+        h("i", { className: "zero", style: { left: `${x(0)}%` } }),
+        isNum(gate) ? h("i", { className: "gate", style: { left: `${x(gate)}%` } }) : null,
+        isNum(interval?.[0]) && isNum(interval?.[1]) ? h("i", { className: "ci", style: { left: `${x(interval[0])}%`, width: `${Math.max(0.5, x(interval[1]) - x(interval[0]))}%` } }) : null,
+        isNum(delta) ? h("i", { className: "dot", style: { left: `${x(delta)}%` } }) : null);
+      const range = (interval) => `[${signed(interval?.[0], 3)}, ${signed(interval?.[1], 3)}]`;
+      const first = compared[0].decision;
+      const level = ((first.confidence || 0.95) * 100).toFixed(1).replace(/\.0$/, "");
+      const taskLevel = ((first.task_confidence || 0.95) * 100).toFixed(0);
+      const blocks = compared.map((candidate) => {
+        const decision = candidate.decision;
+        return h("div", { key: candidate.name, className: "eg-cand" },
+          h("div", { className: "eg-cand-head" }, h("b", null, `候选 ${candidate.name}`), h(StatusTag, { map: CAND_STATUS, keyName: candidate.status })),
+          h("div", { className: "eg-forest", style: { marginTop: "8px" } },
+            (decision.tasks || []).flatMap((item) => [
+              h("div", { key: `l${item.task}` }, h(TaskLabel, { catalog, id: item.task })),
+              h("div", { key: `t${item.task}` }, track(item.delta, item.interval, false)),
+              h("div", { key: `v${item.task}`, title: `候选 ${signed(item.candidate, 3)}（${item.replicates?.[0] ?? "–"} 个回合）− 在任 ${signed(item.incumbent, 3)}（${item.replicates?.[1] ?? "–"} 个回合）` },
+                h("span", { className: toneClass(item.delta) }, signed(item.delta, 3)), ` ${range(item.interval)} `,
+                h("span", { className: item.reason === "credible_regression" ? "eg-bad" : "eg-faint" }, reasonText(catalog, item.reason))),
+            ]),
+            ...(isNum(decision.delta) ? [
+              h("div", { key: "lm" }, h("b", null, "平均")),
+              h("div", { key: "tm" }, track(decision.delta, decision.interval, decision.adopted)),
+              h("div", { key: "vm" }, h("b", { className: toneClass(decision.delta) }, signed(decision.delta, 3)), ` ${range(decision.interval)}`),
+            ] : []),
+            h("div", { key: "axis-l" }),
+            h("div", { key: "axis", className: "eg-axis" }, ticks.map((tick) => h("span", { key: tick, style: { left: `${x(tick)}%` } }, signed(tick, digits)))),
+            h("div", { key: "axis-r" })),
+          h("div", { className: "eg-verdict" }, verdict(decision, view.gates, catalog)));
+      });
+      return h(Fragment, null, blocks,
+        h("p", { className: "eg-hint" }, `每个任务一行：候选回合的均值 − 在任回合的均值，点是增益，横条是 ${taskLevel}% 区间（悬停看两边的均值和回合数）。`
+          + `“平均”一行是 ${level}% 区间${compared.length > 1 ? "（按这一代的候选数加宽）" : ""}。竖线是 0，虚线是实用门槛 ${signed(gate, 3)}。`
+          + "采纳要同时满足：平均增益超过门槛、区间下限大于 0、没有任务可信变差。"));
+    }
+
+    function Outcome({ view, round }) {
+      if (!round.finished) return h("p", { className: "eg-hint" }, view.active ? "这一代还在进行。" : "这一代没有完成；继续运行时会重跑这一代。");
+      if (round.generation === 0) {
+        return h("p", null, `起点版本 ${short(round.incumbent)} 在各训练任务上的均分 ${signed(versionMean(round, round.incumbent), 3)}。`
+          + "这些回合是第 1 代比较时在任版本的成绩；之后每一代，在任版本还会和候选同时再跑。");
+      }
+      if (round.adopted) {
+        return h("p", null, h("b", { className: "eg-good" }, `采纳候选 ${round.adopted}：`),
+          `从下一代起，在任版本由 ${short(round.incumbent)} 换成 ${short(round.incumbent_after)}。`);
+      }
+      if (round.outcome === "no_candidates") return h("p", null, `没有可以运行的候选，在任版本仍是 ${short(round.incumbent)}。`);
+      return h("p", null, `没有候选被采纳，在任版本仍是 ${short(round.incumbent)}。`
+        + "比较过的候选留在存档里：以后各代的评审能看到它们的改动和结果，也可以从它们出发再改。");
+    }
+
+    /* ---- the run at a glance: what it did, in words; its score over the generations --------------------- */
+
+    /** Where a difference stands against zero: credibly above, credibly below, or within the noise. */
+    function credibility(interval) {
+      const [low, high] = interval || [];
+      if (isNum(low) && low > 0) return "above";
+      if (isNum(high) && high < 0) return "below";
+      return "noise";
+    }
+    const CREDIBLE_TEXT = { above: "可信地更好", below: "可信地更差", noise: "在误差内" };
+    const runShort = (id) => String(id || "").replace(/^evo:/, "").slice(0, 6);
+    const day = (value) => when(value).slice(0, 5);
+
+    /** A version's short name in this run: 起点, or the candidate that became it (g2b). */
+    function versionAlias(view, digest) {
+      if (digest === view.seed?.digest) return "起点";
+      for (const round of lastAttempts(view)) {
+        const found = (round.candidates || []).find((candidate) => candidate.digest === digest);
+        if (found) return `g${round.generation}${found.name}`;
+      }
+      return short(digest).slice(0, 6);
+    }
+
+    /** The starting version's own name: the earlier run's candidate it is (9eca52-g2b), or the shipped seed. */
+    function seedOrigin(view) {
+      const step = (view.ancestry || [])[0];
+      if (step) return `${runShort(step.run_id)}-g${step.generation}${step.name}`;
+      return view.seed?.name === "seed" ? "初始版本" : view.seed?.name || "";
+    }
+
+    /** digest -> score: an incumbent's mean over training tasks of its means in its last comparison (all its
+     * episodes as the incumbent), else of its own episodes; an adopted candidate's own mean when it never ran as
+     * the incumbent. */
+    function versionLevels(view) {
+      const levels = new Map();
+      const adopted = new Map();
+      for (const round of lastAttempts(view)) {
+        const compared = (round.candidates || []).find((candidate) => (candidate.decision?.tasks || []).length);
+        const pooled = compared ? mean(compared.decision.tasks.map((item) => item.incumbent).filter(isNum)) : null;
+        const own = versionMean(round, round.incumbent);
+        if (isNum(pooled)) levels.set(round.incumbent, pooled);
+        else if (!levels.has(round.incumbent) && isNum(own)) levels.set(round.incumbent, own);
+        const chosen = (round.candidates || []).find((candidate) => candidate.status === "adopted");
+        const score = chosen ? mean((chosen.decision?.tasks || []).map((item) => item.candidate).filter(isNum)) : null;
+        if (isNum(score)) adopted.set(chosen.digest, score);
+      }
+      return (digest) => (levels.has(digest) ? levels.get(digest) : adopted.get(digest));
+    }
+
+    /** The comparisons of a run (a candidate with a measured gain), with the means the gate compared. */
+    function comparisons(view) {
+      return lastAttempts(view).filter((round) => round.generation > 0).flatMap((round) => (round.candidates || [])
+        .filter((candidate) => isNum(candidate.decision?.delta) && (candidate.decision.interval || []).every(isNum))
+        .map((candidate) => {
+          const tasks = candidate.decision.tasks || [];
+          return { round, candidate, decision: candidate.decision, side: credibility(candidate.decision.interval),
+            before: mean(tasks.map((item) => item.incumbent).filter(isNum)), after: mean(tasks.map((item) => item.candidate).filter(isNum)) };
         }));
+    }
+
+    /** "从 a 提到 b", "从 a 降到 b", or "从 a 到 b（差别在误差内）", by the interval of the change. */
+    function move(from, to, interval) {
+      const side = credibility(interval);
+      if (side === "above") return `从 ${signed(from, 3)} 提到 ${signed(to, 3)}`;
+      if (side === "below") return `从 ${signed(from, 3)} 降到 ${signed(to, 3)}`;
+      return `从 ${signed(from, 3)} 到 ${signed(to, 3)}（差别在误差内）`;
+    }
+
+    function spread(values, sign) {
+      const lo = Math.min(...values);
+      const hi = Math.max(...values);
+      const text = (a, b) => (Math.abs(a - b) < 5e-4 ? `${sign}${plain(a, 3)}` : `${sign}${plain(a, 3)}～${sign}${plain(b, 3)}`);
+      return text(lo, hi);
+    }
+
+    /** Whether every comparison listed was decided by the signed-rank gate. */
+    function rankedOnly(items) {
+      return items.length > 0 && items.every((item) => item.decision.basis === "tasks_signed_rank" && (item.decision.tasks || []).length);
+    }
+
+    /** Why signed-rank comparisons within the uncertainty were not adopted: how many tasks were better, the tasks
+     * worse for every candidate, and a mean gain carried by one task. Starts with "。" like the other tails. */
+    function rankTail(items, catalog) {
+      const better = items.map((item) => item.decision.tasks.filter((task) => task.delta > 0).length);
+      const lo = Math.min(...better);
+      const hi = Math.max(...better);
+      const n = items[0].decision.tasks.length;
+      let text = `。按符号秩检验，候选要在几乎每个训练任务上都更好才算可信；${items.length > 1 ? "它们" : "它"}在 ${n} 个任务里只有 ${lo === hi ? lo : `${lo}～${hi}`} 个更好`;
+      const names = items[0].decision.tasks.map((task) => task.task);
+      const worse = names.filter((name) => items.every((item) => item.decision.tasks.some((task) => task.task === name && task.delta < 0)));
+      if (worse.length) {
+        const values = items.flatMap((item) => item.decision.tasks.filter((task) => worse.includes(task.task)).map((task) => task.delta));
+        text += `，${worse.map((name) => taskShort(catalog, name)).join("、")} 上${items.length > 1 ? "每个候选" : ""}都更差（${signed(Math.min(...values), 3)}${values.length > 1 ? `～${signed(Math.max(...values), 3)}` : ""}）`;
+      }
+      const tops = items.map((item) => item.decision.tasks.reduce((best, task) => (task.delta > best.delta ? task : best)));
+      const carried = tops.every((top, index) => top.task === tops[0].task && top.delta > 0
+        && top.delta > items[index].decision.tasks.reduce((sum, task) => sum + task.delta, 0) / 2);
+      if (carried) text += `。平均增益主要来自 ${taskShort(catalog, tops[0].task)} 一个任务（${spread(tops.map((top) => top.delta), "+")}）`;
+      return `${text}。`;
+    }
+
+    /** The run in plain words: what it does, where it started, what came out, what that means, how to read a score. */
+    function RunSummary({ view, go, catalog }) {
+      const rounds = lastAttempts(view);
+      const tasks = view.suite?.train || [];
+      const config = view.config || {};
+      const level = versionLevels(view);
+      const compared = comparisons(view);
+      const adopted = compared.filter((item) => item.candidate.status === "adopted");
+      const rest = compared.filter((item) => item.candidate.status !== "adopted");
+      const origin = (view.ancestry || [])[0];
+      const key = evoKey(view);
+      const finished = view.status === "finished";
+      const live = key === "running" || key === "elsewhere";
+      const finalScore = level(view.incumbent);
+      const done = rounds.filter((round) => round.generation > 0 && round.finished).length;
+      const link = (step) => h("a", { href: "#", onClick: (event) => {
+        event.preventDefault();
+        go({ page: "evolution", id: step.run_id });
+      } }, step.run_id);
+
+      let headline;
+      if (live) headline = `正在进行：${phaseOf(view)}。`;
+      else if (adopted.length) {
+        headline = `进化了 ${adopted.length} 次：训练任务上的成绩从 ${signed(adopted[0].before, 3)} 提到 ${signed(adopted[adopted.length - 1].after, 3)}。`;
+      } else if (compared.length) headline = "这次没有找到可信的提升，最终仍用起点版本。";
+      else headline = "这次没有产出能比较的候选，最终仍用起点版本。";
+      if (!finished && !live) headline = `运行${EVO_STATUS[key][0]}（完成了 ${done} / ${config.generations ?? "?"} 代）。${adopted.length ? headline : ""}`;
+      if (origin && !adopted.length) headline += `起点本身是 ${day(origin.started_at)} 那次运行进化出来的版本。`;
+
+      const what = `研究智能体按一份工作说明（Harness：指令、技能、代码模板和经验），独立去做「${view.suite?.title || view.suite?.id}」里的 `
+        + `${tasks.length} 个训练任务，每个任务是一个预报问题。每一代，评审智能体读完各回合的成绩和过程，改出 ${config.candidates ?? "几"} 个新版本（候选）；`
+        + `候选和当前在用的版本（在任版本）在每个训练任务上各跑 ${config.repeats ?? "几"} 次，只有比在任版本可信地更好，才换上。共 ${config.generations ?? "?"} 代。`;
+
+      let start;
+      if (origin) {
+        start = [`它不是从零开始：它是 ${day(origin.started_at)} 那次运行（`, link(origin), `）第 ${origin.generation} 代采纳的候选 ${origin.name}。`];
+        if (origin.suite === view.suite?.id && isNum(origin.before) && isNum(origin.after)) {
+          start.push(`那次把训练任务上的成绩${move(origin.before, origin.after, origin.interval)}`);
+        } else start.push("那次的训练任务和这次不同，成绩不能直接比");
+        const holdout = origin.holdout;
+        if (holdout && isNum(holdout.seed) && isNum(holdout.final)) {
+          start.push(`；在 ${holdout.tasks} 个没参与进化的任务上${move(holdout.seed, holdout.final, holdout.interval)}`);
+        }
+        const sealed = origin.sealed?.final_test || origin.sealed?.validation;
+        if (sealed && isNum(sealed.seed) && isNum(sealed.final)) start.push(`；在更晚、谁都没见过的时期上${move(sealed.seed, sealed.final, sealed.interval)}`);
+        start.push("。这次是在这个已经改进过、验证过的版本上继续找提升。");
+        if ((view.ancestry || []).length > 1) start.push(`再往前还有 ${view.ancestry.length - 1} 次运行进化过它。`);
+      } else {
+        start = [view.seed?.name === "seed" ? "起点是项目自带的初始版本。" : `起点是版本 ${view.seed?.name || short(view.seed?.digest)}。`];
+      }
+
+      const endWord = finished ? "最终版本" : "现在在任的版本";
+      let result;
+      if (!compared.length) {
+        const failed = rounds.filter((round) => round.generation > 0 && round.evolver && !SCORED.includes(round.evolver.status));
+        const counts = {};
+        for (const round of rounds) {
+          for (const candidate of round.candidates || []) {
+            if (!isNum(candidate.decision?.delta)) counts[candidate.status] = (counts[candidate.status] || 0) + 1;
+          }
+        }
+        const listed = Object.entries(counts).map(([status, count]) => `${count} 个${(CAND_STATUS[status] || [status])[0]}`).join("、");
+        const why = [...new Set(failed.map((round) => (SESSION_STATUS[round.evolver.status] || [round.evolver.status])[0]))].join("、");
+        const details = [failed.length ? `${failed.length} 代的评审会话没有正常结束（${why}）` : "", listed ? `候选里 ${listed}` : ""].filter(Boolean).join("；");
+        result = live && !done ? `第 1 代的比较还没有完成${details ? `（${details}）` : ""}。`
+          : `没有候选进入比较${details ? `：${details}` : ""}。${endWord}仍是起点。`;
+      } else {
+        const parts = adopted.map(({ round, candidate, before, after, decision }) => `第 ${round.generation} 代采纳了候选 ${candidate.name}：`
+          + `训练任务上的成绩${move(before, after, decision.interval)}，提升了 ${plain(decision.delta, 3)}（这个提升的误差范围 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]，整段在 0 以上）。`);
+        if (rest.length) {
+          const deltas = rest.map((item) => item.decision.delta);
+          const halves = rest.map((item) => (item.decision.interval[1] - item.decision.interval[0]) / 2);
+          const kinds = { worse: 0, noise: 0, small: 0, veto: 0, passed: 0 };
+          for (const item of rest) {
+            if (item.candidate.status === "passed") kinds.passed += 1; // passed every gate; one candidate a generation is adopted
+            else if (item.side === "below") kinds.worse += 1;
+            else if (String(item.decision.reason || "").startsWith("task_regression")) kinds.veto += 1;
+            else if (item.side === "above") kinds.small += 1;
+            else kinds.noise += 1;
+          }
+          const gain = deltas.every((value) => value > 0) ? `它们比在任版本平均高 ${spread(deltas, "")}`
+            : deltas.every((value) => value < 0) ? `它们比在任版本平均低 ${spread(deltas.map((value) => -value), "")}`
+              : `它们减去在任版本的平均成绩，在 ${signed(Math.min(...deltas), 3)} 到 ${signed(Math.max(...deltas), 3)} 之间`;
+          const head = adopted.length ? `另外 ${rest.length} 个候选没有被采纳` : `${new Set(rest.map((item) => item.round.generation)).size} 代共 ${rest.length} 个候选进入比较，${rest.length > 1 ? "都" : ""}没有被采纳`;
+          let tail;
+          if (kinds.noise === rest.length && rankedOnly(rest)) tail = rankTail(rest, catalog);
+          else if (kinds.noise === rest.length) tail = `。但比较的误差范围约 ${spread(halves, "±")}，比这个差别还大，分不清是真的更好还是运气。`;
+          else {
+            tail = `。其中 ${[kinds.worse ? `${kinds.worse} 个可信地更差` : "", kinds.noise ? `${kinds.noise} 个在误差内（分不清好坏）` : "",
+              kinds.small ? `${kinds.small} 个可信地更好，但高得不够多（没超过门槛 ${signed(view.gates?.min_delta, 3)}）` : "",
+              kinds.veto ? `${kinds.veto} 个有训练任务可信地变差（一票否决）` : "",
+              kinds.passed ? `${kinds.passed} 个也通过了门槛，但同一代只采纳增益最大的一个` : ""].filter(Boolean).join("，")}。`;
+          }
+          parts.push(`${head}。${gain}${tail}`);
+        }
+        parts.push(`${endWord}${adopted.length ? `是 ${versionAlias(view, view.incumbent)}` : "仍是起点"}。`);
+        result = parts.join("");
+      }
+
+      let next = "";
+      const noise = rest.filter((item) => item.side === "noise");
+      if (finished && !adopted.length && compared.length && noise.length === compared.length && rankedOnly(noise)) {
+        next = "这些候选在一部分训练任务上更好、在另一部分更差，还不是一致的改进。符号秩检验只看是否几乎每个任务都更好，不看平均高多少，"
+          + "所以一个任务上的大增益不会让它们通过；要被采纳，候选需要在现在变差的任务上至少不变差。";
+      } else if (finished && !adopted.length && compared.length && noise.length === compared.length && noise.filter((item) => item.decision.delta > 0).length * 2 >= noise.length) {
+        const suites = catalog?.suites || [];
+        const k = config.candidates;
+        const here = suites.find((item) => item.id === view.suite?.id);
+        const sameTasks = (item) => item.train.length === tasks.length && tasks.every((task) => item.train.includes(task));
+        const ranked = suites.filter((item) => item.id !== here?.id && sameTasks(item) && rankRule(item, k))
+          .sort((a, b) => Number(b.recommended) - Number(a.recommended))[0];
+        // better on every training task and above that suite's practical gate: only the t interval's width held it back
+        const unanimous = !ranked ? [] : noise.filter((item) => item.decision.basis === "tasks_t" && (item.decision.tasks || []).length >= 3
+          && item.decision.tasks.every((task) => task.delta > 0) && item.decision.delta > (ranked.gates?.min_delta ?? 0));
+        const wider = suites.filter((item) => item.train.length > tasks.length && (gateWidth(item, k) || rankRule(item, k)))
+          .sort((a, b) => Number(b.recommended) - Number(a.recommended))[0];
+        if (unanimous.length && ranked) {
+          const first = unanimous[0].decision.tasks;
+          const top = first.reduce((best, task) => (task.delta > best.delta ? task : best), first[0]);
+          next = `${unanimous.map((item) => `第 ${item.round.generation} 代的候选 ${item.candidate.name}`).join("、")} 在全部 ${tasks.length} 个训练任务上都比在任版本好，`
+            + `没过门槛是因为 t 区间按各任务增益之间的差别来算：一个任务上特别大的增益（${taskShort(catalog, top.task)} 上 ${signed(top.delta, 3)}）把区间拉宽了。`
+            + `「${ranked.title}」的训练任务和这次相同，改用符号秩检验，只看各任务是变好还是变差、变化大小排第几。${k} 个候选时，要 ${rankRule(ranked, k)}，平均增益又超过门槛，才采纳；`
+            + "这样的结果在那里会通过。这几个候选在相同的训练任务上比较过，在那里不会原样再跑，但评审员可以从它们出发改出新候选。";
+        } else {
+          next = `这些候选也许确实好一点，但差别小到 ${tasks.length} 个训练任务、每个版本各跑 ${config.repeats ?? "几"} 次还分辨不出来。`;
+          if (wider) {
+            next += `要分清，需要更多训练任务：「${wider.title}」有 ${wider.train.length} 个训练任务，每个版本每个任务 ${wider.repeats} 个回合时`
+              + `每代回合数${wider.train.length * wider.repeats === tasks.length * (config.repeats || 1) ? "和这次相同" : "不同"}，`
+              + (gateWidth(wider, k) && gateWidth(here, k)
+                ? `采纳区间约为这次的 ${Math.round((gateWidth(wider, k) / gateWidth(here, k)) * 100)}%。`
+                : `按符号秩检验采纳：${k} 个候选时，要 ${rankRule(wider, k)}，平均增益又超过门槛，才算可信。`)
+              + "在这样的任务组上开始的运行可以把这里没过门槛的候选原样再比较一次。";
+          } else next += "要分清，需要更多训练任务；同一任务多跑几次只减小回合间的随机差异。";
+        }
+      } else if (adopted.length && finished) {
+        const holdout = view.verification?.holdout;
+        const sealed = view.verification?.sealed?.final_test || view.verification?.sealed?.validation;
+        const checks = [];
+        if (holdout && isNum(holdout.means?.seed) && isNum(holdout.means?.final)) {
+          checks.push(`在 ${(holdout.tasks || []).length} 个没参与进化的任务上${move(holdout.means.seed, holdout.means.final, holdout.decision?.interval)}`);
+        }
+        if (sealed && isNum(sealed.means?.seed) && isNum(sealed.means?.final)) {
+          checks.push(`在更晚、谁都没见过的时期上${move(sealed.means.seed, sealed.means.final, sealed.decision?.interval)}`);
+        }
+        next = checks.length ? `提升不只出现在训练任务上。最终版本和起点版本又各比了一次：${checks.join("；")}。`
+          : "采纳是在训练任务上决定的；最终版本还要在没参与进化的任务和更晚的时期上各验证一次（见下面的「独立验证」）。";
+      }
+
+      const read = "成绩是预报误差比朴素预报低多少：" + (isNum(finalScore) && Math.abs(finalScore) >= 0.005
+        ? `比如${finished ? "最终" : "在任"}版本的 ${signed(finalScore, 3)}，大约是误差比朴素预报${finalScore > 0 ? "低" : "高"} ${Math.round(Math.abs(finalScore) * 100)}%；` : "")
+        + "0 是和朴素预报一样好，负数是更差。朴素预报是照搬现在的值，或上一个周期同一时刻的值（取更准的一个）。所有成绩都在研究智能体看不到的“隐藏期”上计算。";
+
+      return h(Card, { title: "这次进化在做什么、结果如何" }, h("div", { className: "eg-summary" },
+        h("div", { className: "eg-summary-head" }, headline),
+        h("p", null, h("b", null, "在做什么　"), what),
+        h("p", null, h("b", null, "从哪里开始　"), ...start),
+        h("p", null, h("b", null, live ? "到目前为止　" : "结果　"), result),
+        next ? h("p", null, h("b", null, "这说明什么　"), next) : null,
+        h("p", { className: "eg-read" }, h("b", null, "怎么读成绩　"), read)));
+    }
+
+    const S = { width: 960, height: 290, left: 54, right: 184, top: 26, bottom: 46 };
+    const REFERENCE_NAMES = { expert: "专家模型", recipe_seed: "recipe 种子" };
+
+    /**
+     * The run's score over its generations: a flat line for the incumbent (a step up is an adoption), a dot per
+     * candidate with the interval of its gain drawn around the line, the earlier runs that evolved the starting
+     * version (dashed) and the host's best built-in method (dotted).
+     */
+    function ScoreChart({ view, catalog, onPick }) {
+      const rounds = lastAttempts(view);
+      const tasks = view.suite?.train || [];
+      const level = versionLevels(view);
+      const before = [];
+      for (const step of view.ancestry || []) {
+        if (step.suite !== view.suite?.id || !isNum(step.before) || !isNum(step.after)) break;
+        before.unshift(step);
+      }
+      const columns = [...before.map((step) => ({ kind: "before", step, weight: 0.8 })),
+        ...rounds.map((round) => ({ kind: "round", round, weight: 1 })), { kind: "end", weight: 0.5 }];
+      let carried = null;
+      for (const column of columns) {
+        if (column.kind === "before") continue;
+        column.digest = column.kind === "end" ? view.incumbent : column.round.incumbent;
+        const value = level(column.digest);
+        column.level = isNum(value) ? value : carried;
+        if (isNum(column.level)) carried = column.level;
+      }
+      const placed = columns.filter((column) => column.kind !== "before" && isNum(column.level));
+      if (!placed.length) return null;
+      const byCandidate = new Map(comparisons(view).map((item) => [item.candidate, item]));
+      for (const column of columns) {
+        if (column.kind !== "round" || !isNum(column.level)) continue;
+        column.points = (column.round.candidates || []).filter((candidate) => byCandidate.has(candidate)).map((candidate) => byCandidate.get(candidate));
+      }
+      let reference = null;
+      const names = new Set(tasks.flatMap((task) => Object.keys(view.task_references?.[task] || {})));
+      for (const name of names) {
+        if (name === "naive") continue;
+        const values = tasks.map((task) => view.task_references?.[task]?.[name]);
+        if (values.length && values.every(isNum) && (!reference || mean(values) > reference.value)) reference = { name, value: mean(values) };
+      }
+      const values = [...placed.map((column) => column.level), ...before.map((step) => step.before), ...(reference ? [reference.value] : [])];
+      for (const column of columns) {
+        for (const point of column.points || []) values.push(column.level + point.decision.interval[0], column.level + point.decision.interval[1]);
+      }
+      let lo = Math.min(...values);
+      let hi = Math.max(...values);
+      const pad = Math.max((hi - lo) * 0.08, 0.004);
+      lo -= pad;
+      hi += pad;
+      const { ticks, digits } = niceTicks(lo, hi, 4);
+      const plotH = S.height - S.top - S.bottom;
+      const y = (value) => S.top + (1 - (value - lo) / (hi - lo)) * plotH;
+      const plotW = S.width - S.left - S.right;
+      const total = columns.reduce((sum, column) => sum + column.weight, 0);
+      let cursor = S.left;
+      for (const column of columns) {
+        column.x0 = cursor;
+        column.x1 = cursor + (column.weight / total) * plotW;
+        column.cx = (column.x0 + column.x1) / 2;
+        cursor = column.x1;
+      }
+      const end = columns[columns.length - 1];
+      const first = columns.find((column) => column.kind !== "before" && isNum(column.level));
+      for (const column of columns) { // a candidate's dot: its gain above or below the incumbent's line
+        const points = column.points || [];
+        const room = Math.min(30, (column.x1 - column.x0 - 40) / Math.max(1, points.length));
+        points.forEach((point, i) => {
+          point.x = column.cx + 10 + (i - (points.length - 1) / 2) * room;
+          point.y = y(column.level + point.decision.delta);
+        });
+      }
+      const parts = [];
+      ticks.forEach((tick) => parts.push(h("line", { key: `g${tick}`, className: "grid", x1: S.left, x2: end.x1, y1: y(tick), y2: y(tick) }),
+        h("text", { key: `t${tick}`, x: S.left - 8, y: y(tick) + 4, textAnchor: "end" }, signed(tick, digits))));
+      parts.push(h("text", { key: "axis", x: 4, y: 12 }, "成绩（训练任务平均）"));
+      if (lo < 0 && hi > 0) {
+        parts.push(h("line", { key: "zero", className: "zero", x1: S.left, x2: end.x1, y1: y(0), y2: y(0) }),
+          h("text", { key: "zero-t", x: S.left + 4, y: y(0) - 4 }, "0 = 朴素预报"));
+      }
+      const labels = [];
+      if (reference) {
+        parts.push(h("line", { key: "ref", className: "ref", x1: S.left, x2: end.x1, y1: y(reference.value), y2: y(reference.value) },
+          h("title", null, `宿主内置方法 ${reference.name}${reference.name === "expert" ? "（2026-10 研究中人工设计的专家模型）" : ""}在同一批起点上的成绩（各训练任务平均），只作对照`)));
+        labels.push({ key: "ref", y: y(reference.value), text: `${REFERENCE_NAMES[reference.name] || reference.name} ${signed(reference.value, 3)}`, className: "ref-t" });
+      }
+      // what came before this run: the earlier runs' starting scores, rising to this run's start
+      before.forEach((step, index) => {
+        const column = columns[index];
+        const next = index + 1 < before.length ? { x: columns[index + 1].cx, y: y(before[index + 1].before) } : { x: first.x0, y: y(first.level) };
+        parts.push(h("path", { key: `b${index}`, className: "before", d: `M${column.cx},${y(step.before)} L${next.x},${next.y}` },
+          h("title", null, `${day(step.started_at)} 那次运行（${step.run_id}）第 ${step.generation} 代采纳候选 ${step.name}：训练任务上的成绩 ${signed(step.before, 3)} → ${signed(step.after, 3)}`)),
+        h("circle", { key: `bc${index}`, className: "before-dot", cx: column.cx, cy: y(step.before), r: 4 }),
+        h("text", { key: `bt${index}`, x: column.cx, y: y(step.before) + 17, textAnchor: "middle" }, signed(step.before, 3)),
+        h("text", { key: `bl${index}`, x: (column.cx + next.x) / 2 - 8, y: (y(step.before) + next.y) / 2 + 4, textAnchor: "end", className: "note" },
+          `采纳 g${step.generation}${step.name}`));
+      });
+      // the incumbent: one flat segment per generation; an adoption steps up to the next segment
+      let previous = null;
+      columns.forEach((column, index) => {
+        if (column.kind === "before" || !isNum(column.level)) return;
+        const alias = versionAlias(view, column.digest);
+        const changed = !previous || previous.digest !== column.digest;
+        parts.push(h("line", { key: `s${index}`, className: "trunk", x1: column.x0, x2: column.x1, y1: y(column.level), y2: y(column.level),
+          onClick: column.kind === "round" ? () => onPick({ generation: column.round.generation }) : undefined },
+        h("title", null, `${column.kind === "end" ? (view.status === "finished" ? "最终版本" : "现在在任的版本") : `第 ${column.round.generation} 代的在任版本`}：`
+          + `${alias === "起点" ? `起点（${seedOrigin(view)}）` : alias} ${short(column.digest)}\n成绩 ${signed(column.level, 3)}：它作为在任版本的全部回合在各训练任务上的平均`)));
+        if (changed && column.kind === "round") {
+          parts.push(h("text", { key: `sl${index}`, x: column.x0 + 4, y: y(column.level) - 7, className: "strong" }, `${alias} ${signed(column.level, 3)}`));
+        }
+        if (previous && previous.digest !== column.digest) {
+          const chosen = (previous.points || []).find((point) => point.candidate.digest === column.digest);
+          if (chosen) {
+            parts.push(h("path", { key: `a${index}`, className: "adopt", d: `M${chosen.x},${chosen.y} L${column.x0},${y(column.level)}` },
+              h("title", null, `采纳 g${previous.round.generation}${chosen.candidate.name}：从下一代起由它做在任版本`)));
+          }
+        }
+        previous = column;
+      });
+      labels.push({ key: "end", y: y(end.level), className: "strong",
+        text: `${view.status === "finished" ? "最终" : "现在"}：${end.digest === view.seed?.digest ? "仍是起点" : versionAlias(view, end.digest)} ${signed(end.level, 3)}` });
+      // candidates: a dot at incumbent + gain, the interval of the gain around the incumbent's line
+      columns.forEach((column, index) => {
+        (column.points || []).forEach((point) => {
+          const { candidate, decision, side, before: was, after: now } = point;
+          const top = y(column.level + decision.interval[1]);
+          const bottom = y(column.level + decision.interval[0]);
+          const name = `g${column.round.generation}${candidate.name}`;
+          parts.push(h("g", { key: `c${index}-${candidate.name}`, className: "cand", "data-side": side, "data-adopted": String(candidate.status === "adopted"),
+            onClick: () => onPick({ generation: column.round.generation, name: candidate.name }) },
+          h("title", null, `${name} · ${(CAND_STATUS[candidate.status] || [candidate.status])[0]}\n成绩 ${signed(now, 3)}，这一代的在任版本 ${signed(was, 3)}`
+            + `\n差 ${signed(decision.delta, 4)}，误差范围 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]：${CREDIBLE_TEXT[side]}`
+            + `\n${reasonText(catalog, decision.reason)}${candidate.summary ? `\n${candidate.summary}` : ""}`),
+          h("line", { x1: point.x, x2: point.x, y1: top, y2: bottom }),
+          h("line", { className: "cap", x1: point.x - 4, x2: point.x + 4, y1: top, y2: top }),
+          h("line", { className: "cap", x1: point.x - 4, x2: point.x + 4, y1: bottom, y2: bottom }),
+          h("circle", { cx: point.x, cy: point.y, r: candidate.status === "adopted" ? 6 : 4.5 }),
+          // the name above the bar, or below it when the bar's top would sit on the incumbent's line
+          h("text", { x: point.x, y: Math.abs(top - y(column.level)) < 14 ? bottom + 14 : top - 6, textAnchor: "middle" }, name)));
+        });
+      });
+      // the right margin: the final score and the reference, kept apart
+      labels.sort((a, b) => a.y - b.y);
+      for (let i = 1; i < labels.length; i += 1) labels[i].y = Math.max(labels[i].y, labels[i - 1].y + 16);
+      labels.forEach((label) => parts.push(h("text", { key: `m${label.key}`, x: end.x1 + 8, y: label.y + 4, className: label.className }, label.text)));
+      columns.forEach((column, index) => {
+        const head = column.kind === "before" ? `此前 ${day(column.step.started_at)}` : column.kind === "end" ? "结果" : `第 ${column.round.generation} 代`;
+        const sub = column.kind === "before" ? `运行 ${runShort(column.step.run_id)}` : column.kind === "end" ? "" : roundOutcome(view, column.round)[0];
+        parts.push(h("text", { key: `x${index}`, x: column.cx, y: S.height - S.bottom + 20, textAnchor: "middle", className: "strong" }, head));
+        if (sub) parts.push(h("text", { key: `xs${index}`, x: column.cx, y: S.height - S.bottom + 36, textAnchor: "middle" }, sub));
+        if (index && column.kind !== columns[index - 1].kind && columns[index - 1].kind === "before") {
+          parts.push(h("line", { key: `sep${index}`, className: "sep", x1: column.x0, x2: column.x0, y1: S.top - 10, y2: S.height - S.bottom + 4 }));
+        }
+      });
+      return h("svg", { viewBox: `0 0 ${S.width} ${S.height}`, role: "img", "aria-label": "各代成绩的变化" }, parts);
+    }
+
+    function ScoreCard({ view, catalog, onPick }) {
+      const chart = h(ScoreChart, { view, catalog, onPick });
+      const level = versionLevels(view);
+      if (!lastAttempts(view).some((round) => isNum(level(round.incumbent)))) return null; // nothing scored yet
+      const icon = (body) => h("svg", { width: 28, height: 14, "aria-hidden": "true" }, body);
+      return h(Card, { title: "成绩怎样变化", hint: "横线是在任版本（当前在用的版本）的成绩：平着表示没有换版本，往上跳一次就是换上了更好的版本。每个圆点是一个候选，竖线是它和在任版本之差的误差范围。点一个候选，跳到下面那一代的过程。" },
+        h("div", { className: "eg-chart" }, chart),
+        h("div", { className: "eg-legend eg-chart" },
+          h("span", null, icon(h("line", { className: "trunk", x1: 1, x2: 27, y1: 7, y2: 7 })), "在任版本的成绩"),
+          h("span", null, icon(h("g", { className: "cand", "data-side": "above" }, h("line", { x1: 14, x2: 14, y1: 1, y2: 13 }), h("circle", { cx: 14, cy: 7, r: 4 }))),
+            "候选：整段竖线在横线上方，才算可信地更好"),
+          h("span", null, icon(h("g", { className: "cand", "data-side": "noise" }, h("line", { x1: 14, x2: 14, y1: 1, y2: 13 }), h("circle", { cx: 14, cy: 7, r: 4 }))),
+            "竖线跨过横线：差别在误差内，分不清好坏"),
+          h("span", null, icon(h("g", { className: "cand", "data-side": "below" }, h("line", { x1: 14, x2: 14, y1: 1, y2: 13 }), h("circle", { cx: 14, cy: 7, r: 4 }))),
+            "整段在下方：可信地更差"),
+          h("span", null, icon(h("line", { className: "adopt", x1: 1, x2: 27, y1: 12, y2: 2 })), "采纳"),
+          (view.ancestry || []).length ? h("span", null, icon(h("line", { className: "before", x1: 1, x2: 27, y1: 12, y2: 2 })), "此前的运行（起点是怎么来的）") : null,
+          h("span", null, icon(h("line", { className: "ref", x1: 1, x2: 27, y1: 7, y2: 7 })), "对照：宿主内置的预报方法（不参与进化）")),
+        h("p", { className: "eg-hint" }, "在任版本每一代都会和候选一起重新跑，回合越积越多，横线的高度就是它全部回合的平均。下面「版本从哪里来」里的“这一代回合均分”只算那一代的回合，所以同一个版本在各代会略有不同。"));
     }
 
     function HarnessCard({ view, names }) {
@@ -1223,6 +2310,58 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
     /* ---- new evolution -------------------------------------------------------------------------------------- */
 
     const SAVED = "ecogym.new-evolution";
+
+    /** Half-width of a suite's adoption interval per unit spread of the task gains, for k candidates a round. */
+    function gateWidth(suite, k) {
+      return suite?.interval_per_sd?.[String(Math.min(6, Math.max(1, Number(k) || 1)))] ?? null;
+    }
+
+    /** The critical count of a signed-rank suite for k candidates a round (−1: the test cannot pass); null otherwise. */
+    function rankCritical(suite, k) {
+      const value = suite?.signed_rank_critical?.[String(Math.min(6, Math.max(1, Number(k) || 1)))];
+      return Number.isInteger(value) ? value : null;
+    }
+
+    /** A signed-rank suite's gate in words for k candidates a round; "" for a t-interval suite or one that cannot pass. */
+    function rankRule(suite, k) {
+      const c = rankCritical(suite, k);
+      if (c === null || c < 0) return "";
+      const n = suite.train.length;
+      return c === 0 ? `${n} 个训练任务全部更好`
+        : `${n} 个训练任务全部更好，或者变差的只是变化最小的一两个（把各任务的变化按大小从小到大排名，变差任务的名次加起来不超过 ${c}）`;
+    }
+
+    /** What a suite's design means for the adoption gate (with r episodes per version and task), and what the
+     * recommended suite would change. */
+    function designText(suite, recommended, k, r) {
+      const width = gateWidth(suite, k);
+      const rule = rankRule(suite, k);
+      const repeats = Number(r) || suite.repeats || 2;
+      let text = `按每个版本每个训练任务 ${suite.repeats ?? 2} 个回合设计。`;
+      if (rule) {
+        text += `采纳看各训练任务是否一致地变好（符号秩检验）：${k || 1} 个候选时，${rule}，平均增益也超过门槛，才算可信。`
+          + "它只看各任务是变好还是变差、变化大小排第几，所以一个任务上特别大的增益（比如在任版本在那里出错、候选修好了）不会像 t 区间那样把区间拉宽；"
+          + "反过来，一个任务的变差比别处的增益还明显时就通不过。";
+        text += repeats >= 2 ? `每个版本每个任务有 ${repeats} 个回合，所以还要没有任务可信地变差超过 ${plain(suite.gates?.task_cap ?? 0.03, 2)}（单任务否决）。`
+          : "每个版本每个任务只有 1 个回合时，单任务否决不起作用。";
+      } else if (rankCritical(suite, k) !== null) {
+        text += `${k || 1} 个候选时，这个任务组的训练任务太少，符号秩检验通不过；请减少每代的候选数。`;
+      } else if (width) {
+        text += `${k || 1} 个候选时，采纳区间的半宽约是各训练任务增益之间标准差的 ${width.toFixed(2)} 倍。`
+          + "在一个已经不错的版本附近，各任务增益的差别主要来自任务本身（同一版本的回合差别很小），"
+          + "所以训练任务越多，越小的增益也能确认；同一任务多跑几次帮助不大。";
+      } else text += "训练任务少于 3 个时，区间只反映任务内的随机差异，算不上真正的检验。";
+      if (recommended && recommended.id !== suite.id) {
+        const here = suite.train.length * (suite.repeats ?? 2);
+        const there = recommended.train.length * (recommended.repeats ?? 2);
+        const cost = there === here ? "和这里相同" : there > here ? `是这里的 ${(there / here).toFixed(1)} 倍` : `是这里的 ${Math.round((there / here) * 100)}%`;
+        const other = gateWidth(recommended, k);
+        const head = ` 推荐「${recommended.title}」：${recommended.train.length} 个训练任务、每个 ${recommended.repeats ?? 2} 个回合，每代的回合数${cost}，`;
+        if (rankRule(recommended, k)) text += `${head}按符号秩检验采纳，一个任务上特别大的增益不会让一致变好的候选通不过。`;
+        else if (width && other) text += `${head}区间约为这里的 ${Math.round((other / width) * 100)}%。`;
+      }
+      return text;
+    }
     function NewEvolution({ go, catalog, catalogError }) {
       if (!catalog) return h(CatalogPending, { error: catalogError, text: "正在读取任务组…" });
       return h(NewEvolutionForm, { go, catalog });
@@ -1232,6 +2371,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       const suites = catalog?.suites || [];
       const defaults = catalog?.evolve_defaults || {};
       const routes = useModelRoutes(catalog);
+      const recommended = suites.find((item) => item.recommended) || suites[0];
       const [values, setValues] = useState(() => {
         let saved = {};
         try {
@@ -1239,15 +2379,23 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         } catch {
           saved = {};
         }
-        const start = { suite: suites.some((item) => item.id === saved.suite) ? saved.suite : suites[0]?.id || "", label: "",
+        const chosen = suites.find((item) => item.id === saved.suite) || recommended;
+        const start = { suite: chosen?.id || "", label: "",
           ...Object.fromEntries(Object.keys(defaults).map((key) => [key, saved[key] ?? defaults[key] ?? ""])) };
+        // the episodes per task the suite is designed for, unless the saved form was for this suite
+        if (chosen?.repeats && !(saved.suite === chosen.id && saved.repeats)) start.repeats = chosen.repeats;
         return { ...start, model: modelRef(start.model), evolver_model: modelRef(start.evolver_model) };
       });
       const [busy, setBusy] = useState(false);
       const [problem, setProblem] = useState("");
       const set = (key) => (event) => {
         const value = event.target.value;
-        setValues((old) => ({ ...old, [key]: value }));
+        setValues((old) => {
+          const next = { ...old, [key]: value };
+          const picked = key === "suite" ? suites.find((item) => item.id === value) : null;
+          if (picked?.repeats) next.repeats = picked.repeats; // another suite: its own design
+          return next;
+        });
       };
       const suite = suites.find((item) => item.id === values.suite);
       const runnable = routes.filter((item) => item.runnable).length;
@@ -1294,7 +2442,9 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
           h("p", null, "第 0 代先让起点 Harness 在每个训练任务上运行。之后每一代，评审智能体阅读各回合的成绩、轨迹、笔记和以往候选，提出若干候选 Harness；候选与在任版本在每个训练任务上同时运行，只有在多任务配对比较中可信地变好才会被采纳。"))),
         h(Card, { title: "任务组", hint: suite ? `训练任务 ${n} 个：${suite.train.map((task) => taskShort(catalog, task)).join("、")}；留出任务 ${suite.holdout_tasks} 个，只在验证时运行。` : "没有可用的任务组。" },
           h("div", { className: "eg-form", style: { gridTemplateColumns: "minmax(0, 560px)" } }, h("label", { className: "eg-field" }, h("span", null, "任务组"),
-            h("select", { className: "eg-input", value: values.suite, onChange: set("suite") }, suites.map((item) => h("option", { key: item.id, value: item.id }, `${item.title}（${item.id}）`))))),
+            h("select", { className: "eg-input", value: values.suite, onChange: set("suite") }, suites.map((item) => h("option", { key: item.id, value: item.id },
+              `${item.title}（${item.id}）${item.recommended ? " · 推荐" : ""}`))))),
+          suite ? h("p", { className: "eg-hint" }, designText(suite, recommended, k, r)) : null,
           suite?.notes ? h("p", { className: "eg-hint", style: { whiteSpace: "pre-wrap" } }, suite.notes) : null),
         h(Card, { title: "起点与预算" }, h("div", { className: "eg-form" },
           field("harness", "起点 Harness", { autoComplete: "off" }, "seed，或已保存版本的摘要前缀"),
@@ -1369,7 +2519,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         ]));
     }
 
-    function EpisodePage({ id, go, catalog }) {
+    function EpisodePage({ id, go, catalog, back }) {
       const [running, setRunning] = useState(true);
       const { data: record, error } = useResource(Api.episode(id), { interval: running ? 5000 : 0 });
       useEffect(() => {
@@ -1389,7 +2539,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       const activity = finished.activity || {};
       const refs = scored?.references ? Object.entries(scored.references).filter(([name]) => name !== "naive").map(([name, value]) => `${name} ${signed(value, 3)}`).join("，") : "";
       return h(Fragment, null,
-        h("button", { className: "eg-back", onClick: () => go({ page: null }) }, "← 返回"),
+        h("button", { className: "eg-back", onClick: () => go(back || { page: null }) },
+          back?.focus ? `← 返回运行的第 ${back.focus.generation} 代` : "← 返回"),
         h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" },
           h("div", { className: "eg-title-line" }, h("h1", null, record.label || record.episode), h(StatusTag, { map: EP_STATUS, keyName: epKey(record) })),
           h("div", { className: "eg-meta" },
@@ -1402,8 +2553,12 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
               go({ tab: "evolutions", page: "evolution", id: context.evolution });
             } }, context.evolution), ` ${ROLE[context.role] || context.role || ""}${context.candidate ? ` ${context.candidate}` : ""}`) : null)),
         h("div", { className: "eg-actions" }, h(Button, { onClick: () => copy(record.episode) }, "复制 ID"))),
-        record.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "模型服务没有回复："),
-          finished.upstream_error || "没有一次模型调用得到回复（服务故障，不计为 Harness 的成绩）") : null,
+        record.status === "infra_failed" && finished.stalled ? h(Alert, { tone: "danger" }, h("b", null, "模型服务故障拖住了智能体："),
+          `失败的模型调用让智能体有 ${isNum(finished.stalled_seconds) ? `${Math.round(finished.stalled_seconds)} 秒` : "大半时间"}没法工作（本回合共 ${isNum(record.minutes) ? `${record.minutes * 60} 秒` : "几分钟"}；`
+          + "包括调用一直失败、会话提前结束后剩下的时间），超过一半，所以记为服务故障：成绩照常给出，但不计为 Harness 的成绩；"
+          + `进化运行还有重试次数时会重跑这个回合。${finished.upstream_error ? `最后一次失败：${finished.upstream_error}` : ""}`)
+          : record.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "模型服务没有回复："),
+            finished.upstream_error || "没有一次模型调用得到回复（服务故障，不计为 Harness 的成绩）") : null,
         scored?.errors?.length ? h(Alert, { tone: "warning" }, h("b", null, "程序在隐藏期上的错误："), scored.errors.slice(0, 3).join("；")) : null,
         h("div", { className: "eg-stats" },
           h(Stat, { label: "隐藏期总分", value: scored ? h("span", { className: toneClass(scored.score) }, signed(scored.score)) : "–",
@@ -1435,7 +2590,250 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
         Object.keys(activity.tool_calls || {}).length ? h(Card, { title: "工具使用" },
           h("div", { className: "eg-chips" }, Object.entries(activity.tool_calls).map(([name, count]) => h("span", { key: name, className: "eg-chip" }, `${name.replace(/^mcp__ecogym__/, "ecogym.")} ${count}`))),
           (activity.web_queries || []).length ? h("p", { className: "eg-hint" }, `网页搜索：${activity.web_queries.slice(0, 20).join("；")}`) : null,
-          h("p", { className: "eg-hint" }, `子智能体 ${activity.subagents || 0} 个 · 轨迹 `, h(Mono, null, finished.trajectory?.dir || "–"))) : null);
+          h("p", { className: "eg-hint" }, `子智能体 ${activity.subagents || 0} 个 · 轨迹 `, h(Mono, null, finished.trajectory?.dir || "–"))) : null,
+        h(TranscriptCard, { record }));
+    }
+
+    /* ---- sessions: an agent's steps; the evolver's page ------------------------------------------------------ */
+
+    const TOOL_NAMES = { read: "读文件", bash: "命令行", edit: "编辑", multi_edit: "编辑", write: "写文件", grep: "搜索", glob: "找文件",
+      ls: "列目录", skill: "技能", todo_write: "待办", job_output: "后台输出", job_kill: "停后台任务", task: "子智能体",
+      web_search: "网页搜索", web_fetch: "读网页" };
+    const ECOGYM_TOOLS = { check_candidate: "检查候选", reset_candidate: "重置候选", task_info: "剩余预算", note: "记笔记",
+      ask_expert: "问专家", evaluate_local: "本地检验", submit: "提交" };
+    const ECOGYM_PREFIX = "mcp__ecogym__";
+    const WRITE_TOOLS = ["edit", "multi_edit", "write"];
+
+    function toolName(name) {
+      const text = String(name || "");
+      if (text.startsWith(ECOGYM_PREFIX)) {
+        const tool = text.slice(ECOGYM_PREFIX.length);
+        return { group: "ecogym", tool, label: ECOGYM_TOOLS[tool] || tool };
+      }
+      return { group: WRITE_TOOLS.includes(text) ? "write" : "dsh", tool: text, label: TOOL_NAMES[text] || text || "工具" };
+    }
+
+    const workspace = (text) => String(text || "").split("/workspace/work/").join("");
+
+    /** What a call works on, for its one-line summary. */
+    function callTarget(call, tool) {
+      if (!call.name.startsWith(ECOGYM_PREFIX)) return workspace(call.target);
+      let args = null;
+      try {
+        args = JSON.parse(call.target || "{}");
+      } catch {
+        return call.target;
+      }
+      if (tool === "reset_candidate") return `候选 ${args.name} ← ${args.base === "incumbent" ? "在任版本" : `存档 ${args.base}`}`;
+      if (tool === "note") return `[${NOTE_KIND[args.kind] || args.kind}] ${args.text || ""}`;
+      if (tool === "ask_expert") return args.question || "";
+      if (args.name) return `候选 ${args.name}`;
+      return Object.keys(args).length ? call.target : "";
+    }
+
+    /** One line on what an ecogym tool answered. */
+    function resultBrief(tool, data) {
+      if (!data || typeof data !== "object") return "";
+      if (tool === "check_candidate") {
+        const smoke = data.smoke || {};
+        const local = isNum(smoke.score) ? ` · 模板本地 ${signed(smoke.score, 3)}${isNum(smoke.incumbent_score) ? `（在任 ${signed(smoke.incumbent_score, 3)}）` : ""}` : "";
+        const warned = (data.warnings || []).length ? ` · ${data.warnings.length} 条提醒` : "";
+        return `${data.ok ? "通过" : `没通过：${(CAND_STATUS[data.status] || [data.status])[0]}`}${local}${warned}`;
+      }
+      if (tool === "reset_candidate") return data.reset ? "已重置" : "";
+      if (tool === "task_info") return isNum(data.minutes_left) ? `剩 ${data.minutes_left} 分钟` : "";
+      if (tool === "evaluate_local") return `本地 ${signed(data.score, 3)} · ${data.status}`;
+      if (tool === "submit") return `${data.accepted ? "已接受" : "未接受"} · 本地 ${signed(data.score, 3)}`;
+      if (tool === "note" || tool === "ask_expert") return data.recorded ? "已记下" : "";
+      return "";
+    }
+
+    function oneLine(text, limit = 160) {
+      const line = String(text || "").replace(/\s+/g, " ").trim();
+      return line.length > limit ? `${line.slice(0, limit)}…` : line;
+    }
+
+    function CallView({ call, result }) {
+      const { group, tool, label } = toolName(call.name);
+      const brief = group === "ecogym" ? resultBrief(tool, result?.data) : "";
+      const failed = group === "ecogym" && result && !result.data && result.text.trim();
+      return h(Details, { className: "eg-details eg-call", summary: h(Fragment, null,
+        h("span", { className: "eg-kind", "data-tool": group === "dsh" ? undefined : group }, group === "ecogym" ? `ecogym · ${label}` : label),
+        h("code", { title: workspace(call.target) }, callTarget(call, tool)),
+        brief ? h("small", null, brief) : failed ? h("small", { className: "eg-bad" }, "出错") : !result ? h("small", null, "没有结果") : null) },
+      h("div", { className: "eg-call-result" }, "调用的参数"), h("pre", { className: "eg-pre" }, workspace(call.text) || "（没有参数）"),
+      result ? h(Fragment, null, h("div", { className: "eg-call-result" }, `结果（${result.text.length.toLocaleString()} 字）`),
+        h("pre", { className: "eg-pre" }, workspace(result.text) || "（空）")) : null);
+    }
+
+    function Turn({ id, turn, items, results, flash }) {
+      return h("div", { id, className: "eg-turn", "data-flash": String(Boolean(flash)) },
+        h("div", { className: "eg-turn-no" }, turn === null ? "" : `第 ${turn} 步`),
+        h("div", { className: "eg-turn-body" }, items.map((item, index) => {
+          if (item.kind === "system") return h("div", { key: index, className: "eg-ctx" }, `系统提示，${item.chars.toLocaleString()} 字（不显示）`);
+          if (item.kind === "context") return h("div", { key: index, className: "eg-ctx" }, `DSH 注入的上下文，${item.chars.toLocaleString()} 字：${item.text}`);
+          if (item.kind === "prompt") {
+            return h("div", { key: index, className: "eg-prompt" }, h("div", { className: "eg-faint" }, "宿主（或上级智能体）的消息"),
+              h(Clamp, { height: 150 }, h("pre", null, workspace(item.text))));
+          }
+          if (item.kind === "reasoning") {
+            return h(Details, { key: index, className: "eg-details eg-think", summary: h(Fragment, null, h("b", null, "思考"), h("em", null, oneLine(item.text))) },
+              h("pre", { className: "eg-pre" }, item.text));
+          }
+          if (item.kind === "reply") return h("div", { key: index, style: { marginTop: "4px" } }, h(Markdown, { text: workspace(item.text) }));
+          if (item.kind === "call") return h(CallView, { key: index, call: item, result: results.get(item.id) });
+          return null;
+        })));
+    }
+
+    /** A recorded session (``episodes.transcripts``) step by step; ``flash`` marks the step jumped to. */
+    function SessionSteps({ threads, flash }) {
+      if (!(threads || []).length) return h("p", { className: "eg-hint" }, "没有存下这个会话的模型调用记录。");
+      return threads.map((thread, index) => {
+        const results = new Map();
+        const blocks = [];
+        for (const item of thread.steps || []) {
+          if (item.kind === "result") {
+            results.set(item.id, item);
+            continue;
+          }
+          const turn = item.step ?? null;
+          const last = blocks[blocks.length - 1];
+          if (last && last.turn === turn) last.items.push(item);
+          else blocks.push({ turn, items: [item] });
+        }
+        const turns = blocks.filter((block) => block.turn !== null).length;
+        return h("div", { key: index },
+          h("div", { className: "eg-thread-head" }, threads.length > 1 ? `线程 ${index + 1}：${thread.label}` : thread.label,
+            h("span", null, `${thread.calls} 次模型调用 · ${turns} 步`)),
+          blocks.map((block, i) => h(Turn, { key: i, id: block.turn === null ? undefined : `eg-turn-${index}-${block.turn}`, turn: block.turn,
+            items: block.items, results, flash: block.turn !== null && flash === `${index}-${block.turn}` })));
+      });
+    }
+
+    function smokeLine(smoke, catalog) {
+      const tasks = Object.entries(smoke?.tasks || {});
+      if (!tasks.length) {
+        return ` · 模板本地 ${signed(smoke?.score, 3)}${isNum(smoke?.incumbent_score) ? `（在任 ${signed(smoke.incumbent_score, 3)}）` : ""}`;
+      }
+      return ` · 模板本地：${tasks.map(([task, item]) => `${taskShort(catalog, task)} ${item.status === "ok" ? signed(item.score, 3) : item.status}`
+        + `${isNum(item.incumbent_score) ? `（在任 ${signed(item.incumbent_score, 3)}）` : ""}`).join("、")}`;
+    }
+
+    function ToolAction({ item, catalog }) {
+      const args = item.arguments || {};
+      const result = item.result || {};
+      const head = h("span", { className: "eg-kind", "data-tool": "ecogym" }, toolName(ECOGYM_PREFIX + item.tool).label);
+      if (result.error) return h(Fragment, null, head, h("span", { className: "eg-bad" }, `出错：${result.error}`));
+      if (item.tool === "check_candidate") {
+        return h(Fragment, null, head, `候选 ${args.name ?? result.name}：`,
+          h("b", { className: result.ok ? "eg-good" : "eg-bad" }, result.ok ? "通过" : `没有通过（${(CAND_STATUS[result.status] || [result.status])[0]}）`),
+          result.smoke ? smokeLine(result.smoke, catalog) : " · 模板没有改动，不试运行",
+          (result.problems || []).length ? h("div", { className: "eg-bad" }, result.problems.join("；")) : null,
+          (result.warnings || []).length ? h("div", { className: "eg-warn" }, `提醒：${result.warnings.join("；")}`) : null,
+          (result.changes || []).length ? h("div", { className: "eg-faint" }, `相对在任版本改了：${result.changes.map((change) => `${change.path} +${change.added ?? 0}/${MINUS}${change.removed ?? 0}`).join("，")}`) : null);
+      }
+      if (item.tool === "reset_candidate") {
+        return h(Fragment, null, head, `候选 ${args.name} 重置为${args.base === "incumbent" ? "在任版本" : `存档里的 ${args.base}`}`,
+          result.summary ? h("div", { className: "eg-faint" }, `它的摘要：${result.summary}`) : null);
+      }
+      if (item.tool === "task_info") {
+        const states = Object.entries(result.candidates || {}).map(([name, state]) => `${name} ${typeof state === "string" ? "未检查" : state.ok ? "通过" : "没通过"}`);
+        return h(Fragment, null, head, `剩 ${result.minutes_left ?? "–"} 分钟，已用 ${tokens(result.tokens_used)} token`, states.length ? `；候选 ${states.join("、")}` : "");
+      }
+      if (item.tool === "note") return h(Fragment, null, head, h("span", { className: "eg-chip" }, NOTE_KIND[args.kind] || args.kind), " ", args.text);
+      if (item.tool === "ask_expert") return h(Fragment, null, head, args.question);
+      return h(Fragment, null, head, h(Mono, null, JSON.stringify(args)));
+    }
+
+    function WriteAction({ item }) {
+      return h(Fragment, null,
+        h("span", { className: "eg-kind", "data-tool": "write" }, item.certain ? toolName(item.tool).label : "命令行（推断）"),
+        item.paths.map((path, index) => h(Fragment, { key: path }, index ? "、" : "", h(Mono, null, path))),
+        item.count > 1 ? h("span", { className: "eg-faint" }, ` ×${item.count}`) : null,
+        item.description ? h("span", { className: "eg-faint" }, ` · ${item.description}`) : null);
+    }
+
+    function Actions({ items, onStep, catalog }) {
+      if (!(items || []).length) return h("p", { className: "eg-hint" }, "没有记录到宿主工具的调用或候选文件的改动。");
+      return h("div", null, items.map((item, index) => h("div", { key: index, className: "eg-act" },
+        h("button", { type: "button", className: "eg-where", onClick: () => onStep(item.where) }, whereText(item.where)),
+        h("div", { className: "eg-act-main" }, item.kind === "tool" ? h(ToolAction, { item, catalog }) : h(WriteAction, { item })))));
+    }
+
+    const SESSION_STATUS = { ...EP_STATUS, error: ["出错", "danger", "error"] };
+
+    function EvolverPage({ id, go, catalog, back }) {
+      const text = String(id || "");
+      const run = text.slice(0, text.lastIndexOf("|"));
+      const generation = text.slice(text.lastIndexOf("|") + 1);
+      const { data, error } = useResource(Api.evolverSession(run, generation, true));
+      const [flash, setFlash] = useState(null);
+      useEffect(() => {
+        if (!flash) return undefined;
+        const timer = setTimeout(() => setFlash(null), 1800);
+        return () => clearTimeout(timer);
+      }, [flash]);
+      const jump = useCallback((where) => {
+        document.getElementById(`eg-turn-${where[0]}-${where[1]}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        setFlash(`${where[0]}-${where[1]}`);
+      }, []);
+      const toRun = back || { page: "evolution", id: run, focus: { generation: Number(generation) } };
+      const returning = h("button", { className: "eg-back", onClick: () => go(toRun) }, `← 返回运行的第 ${generation} 代`);
+      if (error && !data) return h(Fragment, null, returning, h(Alert, { tone: "danger" }, `读不到评审会话：${error.message}`));
+      if (!data) return h(Fragment, null, returning, h("p", { className: "eg-hint" }, "正在读取评审会话…"));
+      const session = data.session || {};
+      const calls = session.activity?.tool_calls || {};
+      const used = Object.values(calls).reduce((sum, count) => sum + count, 0);
+      return h(Fragment, null, returning,
+        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" },
+          h("div", { className: "eg-title-line" }, h("h1", null, `第 ${data.generation} 代的评审会话`), h(StatusTag, { map: SESSION_STATUS, keyName: session.status })),
+          h("p", null, "评审智能体在自己的工作区里读证据、在候选目录里改 Harness，用宿主的工具检查。下面依次是它看过的材料、关键动作、产出的候选、最后的总结和完整的每一步。"),
+          h("div", { className: "eg-meta" },
+            h("span", null, h("b", null, "运行"), h("a", { href: "#", onClick: (event) => {
+              event.preventDefault();
+              go(toRun);
+            } }, data.run_id)),
+            h("span", null, h("b", null, "这一代的在任"), h(Mono, null, short(data.incumbent))),
+            h("span", null, h("b", null, "开始"), when(data.started_at, true))))),
+        session.status === "error" || session.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "会话没有正常结束："),
+          session.error || session.upstream_error || session.status) : null,
+        h("div", { className: "eg-stats" },
+          h(Stat, { label: "用时", value: duration(session.seconds) }),
+          h(Stat, { label: "Token", value: tokens(session.tokens), sub: session.metered_tokens ? `计费 ${tokens(session.metered_tokens)}` : "" }),
+          h(Stat, { label: "步数", value: String(data.turns ?? "–"), sub: `${session.llm_calls ?? "–"} 次模型调用${session.failed_calls ? `，失败 ${session.failed_calls} 次` : ""}`
+            + `${session.continuations ? `；含 ${session.continuations} 段续跑` : ""}` }),
+          h(Stat, { label: "工具调用", value: `${used} 次`, sub: Object.entries(calls).map(([name, count]) => `${toolName(name).label} ${count}`).join("、") })),
+        h(Card, { title: "看过的材料", hint: "按第一次看的先后排列；点一项跳到那一步。来自读文件的调用和命令行里出现的路径（命令行部分是推断）。" },
+          h(Reads, { reads: data.reads, onStep: jump })),
+        h(Card, { title: "关键动作", hint: "调用宿主工具（检查、重置候选、记笔记、看剩余预算）和改动候选或提案文件的步骤。命令行改了哪些文件是从命令里推断的。" },
+          h(Actions, { items: data.timeline, onStep: jump, catalog })),
+        h(Card, { title: "产出的候选", hint: "会话结束后宿主再检查一遍；回合、比较和结果在运行页这一代的过程里。",
+          actions: h(Button, { onClick: () => go(toRun) }, "看这一代的比较和结果") },
+        (data.candidates || []).length ? data.candidates.map((candidate) => h("div", { key: candidate.name, className: "eg-note" },
+          h("b", null, `候选 ${candidate.name}`), " ", h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }), " ", h(Mono, null, short(candidate.digest)),
+          h("span", { className: "eg-faint" }, candidate.base?.label ? ` · 从存档 ${candidate.base.label} 出发` : " · 从在任版本出发"),
+          candidate.summary ? h("div", null, candidate.summary) : null)) : h("p", { className: "eg-hint" }, "没有候选。")),
+        data.final_text ? h(Card, { title: "评审的总结（会话最后的回复）" }, h(Markdown, { text: data.final_text })) : null,
+        (data.notes || []).length ? h(Card, { title: "记下的笔记", hint: "以后各代的评审在证据里会读到。" },
+          data.notes.map((note, index) => h("div", { key: index, className: "eg-note" }, h("span", { className: "eg-chip" }, NOTE_KIND[note.kind] || note.kind), " ", note.text))) : null,
+        h(Card, { title: "每一步", hint: "每一步的思考、工具调用和结果；点开一行看完整的参数和结果（过长处保留首尾）。系统提示和 DSH 注入的上下文只列出名字，工作区写作 /workspace。" },
+          h(SessionSteps, { threads: data.threads, flash })));
+    }
+
+    /** An episode's sessions step by step, read when asked for (the log can be long). */
+    function TranscriptCard({ record }) {
+      const [shown, setShown] = useState(false);
+      const running = epKey(record) === "running";
+      const { data, error } = useResource(shown ? Api.episodeTranscript(record.episode) : null);
+      let body = null;
+      if (shown) {
+        body = error ? h(Alert, { tone: "warning" }, `读不到会话记录：${error.message}`) : !data ? h("p", { className: "eg-hint" }, "正在读取会话记录…")
+          : h(SessionSteps, { threads: data.threads });
+      }
+      return h(Card, { title: "会话记录", hint: running ? "回合结束后可以看到智能体每一步的思考、工具调用和结果。"
+        : "智能体每一步的思考、调用的工具和得到的结果。系统提示和 DSH 注入的上下文只列出名字，工作区写作 /workspace。",
+      actions: h(Button, { disabled: running, onClick: () => setShown(!shown) }, shown ? "收起" : "显示每一步") }, body);
     }
 
     /* ---- experts ------------------------------------------------------------------------------------------- */
@@ -1594,7 +2992,7 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       ["任务与数据", "任务卡给定数据集、预测目标和时距。数据按时间切成几段（见下），智能体只拿到隐藏期之前的部分。"],
       ["回合", "一个 DSH 智能体按一版 Harness 独立解一个任务：看数据、查资料、写预测程序，用本地检验挑版本，然后提交。"],
       ["裁判", "宿主在智能体看不到的隐藏期上逐时刻运行被评分的程序，算出每格相对朴素基线的技能。被评分的是最后一次在本地明显好过起始程序（模板）的提交，没有就是模板本身。"],
-      ["评审", "评审智能体读所有回合的成绩、代码、笔记和会话记录，以往的候选和训练任务相同的以往运行，从在任版本或本次运行的任何以往版本出发写出下一代的候选 Harness，宿主逐个检查。"],
+      ["评审", "评审智能体读所有回合的成绩、代码、笔记和会话记录，以往的候选和训练任务都在本次之内的以往运行，从在任版本或任何存档的以往版本出发写出下一代的候选 Harness，宿主逐个检查。"],
       ["比较与采纳", "候选和在任版本在每个训练任务上各跑几个回合，做多任务配对比较；通过门槛的候选成为新的在任版本。"],
       ["独立验证", "进化结束后，起点和最终版本在留出隔间和更晚的封存时期上各验证一次。"],
     ];
@@ -1643,7 +3041,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 
     function gateText(gates) {
       if (!gates) return "";
-      return `平均增益大于 ${gates.min_delta}；区间下限大于 0（3 个及以上训练任务时是各任务增益的 t 区间，置信度 ${Math.round((gates.confidence || 0) * 100)}%，多个候选时按 Bonferroni 调整）；没有任务的损失超过 ${gates.task_cap} 且它自己的区间整体低于 0（两个版本在这个任务上都至少有 2 个回合时才判断）。`;
+      const interval = gates.test === "signed_rank" ? "各任务增益的符号秩区间（Wilcoxon 符号秩检验的 Hodges–Lehmann 区间）" : "各任务增益的 t 区间";
+      return `平均增益大于 ${gates.min_delta}；区间下限大于 0（3 个及以上训练任务时是${interval}，置信度 ${Math.round((gates.confidence || 0) * 100)}%，多个候选时按 Bonferroni 调整）；没有任务的损失超过 ${gates.task_cap} 且它自己的区间整体低于 0（两个版本在这个任务上都至少有 2 个回合时才判断）。`;
     }
 
     function Timeline({ task }) {
@@ -1753,7 +3152,8 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       const scroller = useRef(null);
       const go = useCallback((next) => {
         setNav((old) => {
-          const value = { tab: next.tab || old.tab, page: next.page ?? null, id: next.id ?? null };
+          // back: where the page's back button leads (a run page opened at one generation: focus)
+          const value = { tab: next.tab || old.tab, page: next.page ?? null, id: next.id ?? null, back: next.back ?? null, focus: next.focus ?? null };
           remembered = value;
           return value;
         });
@@ -1771,8 +3171,9 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
       let page;
       if (!ready) page = h(BackendCard, { status: status.data, error: status.data ? null : status.error, onRestart: restart });
       else if (nav.page === "new") page = h(NewEvolution, { go, catalog, catalogError });
-      else if (nav.page === "evolution") page = h(EvolutionPage, { key: nav.id, id: nav.id, go, catalog });
-      else if (nav.page === "episode") page = h(EpisodePage, { key: nav.id, id: nav.id, go, catalog });
+      else if (nav.page === "evolution") page = h(EvolutionPage, { key: nav.id, id: nav.id, go, catalog, focus: nav.focus });
+      else if (nav.page === "evolver") page = h(EvolverPage, { key: nav.id, id: nav.id, go, catalog, back: nav.back });
+      else if (nav.page === "episode") page = h(EpisodePage, { key: nav.id, id: nav.id, go, catalog, back: nav.back });
       else if (nav.tab === "episodes") page = h(EpisodeList, { go, catalog });
       else if (nav.tab === "expert") page = h(ExpertPage, { go, catalog });
       else if (nav.tab === "data") page = h(DataPage, null);

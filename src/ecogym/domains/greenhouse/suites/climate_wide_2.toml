@@ -1,0 +1,58 @@
+# Evolve agent harnesses on eight greenhouse compartments, verify on two others:
+# greenhouse.wide.climate@1 with a signed-rank gate instead of a t interval.
+#
+# Same tasks and split as @1 (eight training compartments), designed for two
+# episodes per version and compartment where @1 has one: with a single
+# candidate episode a compartment's gain carries that episode's whole
+# run-to-run spread (about 0.015 skill on DeepGreens) and the per-task veto
+# cannot apply; two episodes cost twice as much per generation, raise the
+# chance that a consistent small gain passes (simulated, two candidates:
+# +0.015 everywhere 32 % -> 46 %), keep false adoptions near 1 % and bring
+# the veto back (docs/evolution.md, section 19). The t interval grows with the spread
+# of the per-task gains, and near a good template that spread is often one
+# compartment where the incumbent's template breaks and a candidate repairs
+# it: in the first run on @1 a candidate better on all eight compartments
+# (+0.003 to +0.110) failed the t gate because the +0.110 widened the
+# interval (docs/evolution.md, section 19). The signed-rank test (Demšar 2006)
+# uses the signs and the size ranks of the gains: with two candidates it
+# passes a candidate better on all eight compartments, or worse on only one
+# whose change is among the two smallest, if the mean gain also exceeds
+# min_delta.
+# The same order statistics give the interval (Hodges-Lehmann, over the Walsh
+# averages). A run with one episode per side (repeats = 1) has no per-task
+# veto; the signed-rank gate then partly stands in for it, since a compartment
+# that loses more than the smallest gains elsewhere blocks adoption. Verification uses the same
+# test where it can reject (the ten compartments of the sealed periods) and
+# the bootstrap interval on the two holdout compartments.
+#
+# Four of greenhouse.climate@1's holdout compartments are training tasks here:
+# verify a harness evolved on this suite with this suite, not with that one.
+id = "greenhouse.wide.climate@2"
+title = "温室气候（八个训练隔间、符号秩检验）：两季作物、十个隔间"
+repeats = 2
+recommended = true
+notes = """
+Training: cucumber 2018 AiCU, DeepGreens, Croperators and iGrow; tomato 2019 AICU, Automatoes, Digilog and TheAutomators.
+Holdout: cucumber 2018 Sonoma; tomato 2019 IUACAAS.
+"""
+train = [
+    "greenhouse.agc2018.cucumber.climate@1",
+    "greenhouse.agc2018.cucumber.climate@1:DeepGreens",
+    "greenhouse.agc2018.cucumber.climate@1:Croperators",
+    "greenhouse.agc2018.cucumber.climate@1:iGrow",
+    "greenhouse.agc2019.tomato.climate@1",
+    "greenhouse.agc2019.tomato.climate@1:Automatoes",
+    "greenhouse.agc2019.tomato.climate@1:Digilog",
+    "greenhouse.agc2019.tomato.climate@1:TheAutomators",
+]
+holdout = [
+    "greenhouse.agc2018.cucumber.climate@1:Sonoma",
+    "greenhouse.agc2019.tomato.climate@1:IUACAAS",
+]
+
+[gates]
+test = "signed_rank" # interval of the signed-rank test over the task gains, not the t interval
+min_delta = 0.005    # mean skill gain over the training tasks
+confidence = 0.95    # the interval must exclude zero (one-sided 2.5 %, shared by a round's candidates)
+resamples = 2000
+task_cap = 0.03      # no task may credibly lose more than 0.03 skill (needs two episodes of each version)

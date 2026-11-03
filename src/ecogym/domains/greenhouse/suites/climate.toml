@@ -8,6 +8,7 @@
 # independence in time. Only `ecogym evolve verify` runs the holdout tasks.
 id = "greenhouse.climate@1"
 title = "温室气候：两季作物、十个隔间"
+repeats = 2  # one episode per version and task makes adoptions fragile here (docs/evolution.md, section 16)
 notes = """
 Training: cucumber 2018 AiCU and DeepGreens, tomato 2019 AICU and Automatoes.
 Holdout: cucumber 2018 Croperators, Sonoma and iGrow; tomato 2019 Digilog, IUACAAS and TheAutomators.

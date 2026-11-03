@@ -62,7 +62,7 @@ class AgentSpec:
 
 @dataclass(slots=True)
 class Session:
-    status: str  # finished | timeout | infra_failed (no model call was answered)
+    status: str  # finished | timeout | infra_failed (no model call was answered; episodes add a stall rule)
     exit_code: int | None
     killed: bool
     seconds: float
@@ -78,6 +78,9 @@ class Session:
     upstream_error: str = ""  # the provider's answer to the latest failed model call (why infra_failed)
     continuations: int = 0  # follow-up sessions after the agent ended early (see run_agent's follow_up)
     asleep_seconds: float = 0.0  # of ``seconds`` (wall time), how long the machine slept; budgets skip it
+    # awake seconds failed model calls kept the agent from working (Gateway.stalled_seconds), up to the deadline
+    # when the session ended in the middle of a run of failed calls
+    stalled_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -298,6 +301,7 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                     stdout.write(f"\n\n---- 续跑 {continuations} ----\n\n".encode())
                     stdout.flush()
     finally:
+        ended = clock.now()
         mcp.stop()
         gateway.stop()
         mcp_log.close()
@@ -313,7 +317,11 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                    failed_calls=gateway.failed, refused_calls=gateway.refused, final_text=final_text,
                    trajectory={"dir": str(trajectory), "files": stored["files"]}, activity=stored["summary"],
                    upstream_error=gateway.last_failure, continuations=continuations,
-                   asleep_seconds=round(clock.asleep_since(started, awake_started), 1))
+                   asleep_seconds=round(clock.asleep_since(started, awake_started), 1),
+                   # a session that ended while its calls kept failing (DSH gives up after a few minutes of
+                   # errors) could not use the rest of its time either
+                   stalled_seconds=round(gateway.stalled_seconds(max(ended, deadline) if gateway.failing
+                                                                 else ended), 1))
 
 
 __all__ = ["AgentSpec", "Cancelled", "Session", "dsh_patch", "dsh_version", "make_gateway", "run_agent",

@@ -204,6 +204,10 @@ def check(ref: str) -> str:
 
 
 PROBE_REFUSED = (401, 403, 404)  # bad key, no access to the model, unknown model: no session could get a reply
+PROBE_TOOL = {"type": "function", "function": {"name": "echo", "description": "Repeat a word.",
+                                               "parameters": {"type": "object",
+                                                              "properties": {"word": {"type": "string"}},
+                                                              "required": ["word"]}}}
 
 
 def _message(text: str) -> str:
@@ -223,7 +227,10 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
 
     Settings can list a model the key may not use (the provider answers 403 to every call), which only a
     real request reveals. Refusals (401, 403, 404) raise with the provider's message; anything else (rate
-    limits, outages, parameters a provider dislikes) passes with a note, since sessions retry those.
+    limits, outages, parameters a provider dislikes) passes with a note, since sessions retry those. The
+    request carries one tool, as every agent call does: a provider whose tool calling is misconfigured (on
+    2026-11-02 one answered 400 "auto tool choice requires --enable-auto-tool-choice" for an hour) shows it
+    only then.
     """
 
     route, model = resolve(ref)
@@ -231,7 +238,7 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
         raise ModelError(f"{route.provider}: no {route.key_env} in the environment or DSH's credential store")
     # streamed: the status arrives before any (possibly slow) reasoning, and the status is all this asks for
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16,
-                       "stream": True}).encode()
+                       "stream": True, "tools": [PROBE_TOOL]}).encode()
     request = urllib.request.Request(route.base_url.rstrip("/") + "/chat/completions", data=body, method="POST",
                                      headers={"Content-Type": "application/json", **route.headers,
                                               "Authorization": f"Bearer {resolve_secret(route.key_env)}"})

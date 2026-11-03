@@ -496,7 +496,9 @@ def cmd_suites(args: argparse.Namespace) -> int:
         print(f"  train   ({len(suite['train'])}): " + ", ".join(suite["train"]))
         print(f"  holdout ({len(suite['holdout'])}): " + ", ".join(suite["holdout"]))
         gates = suite["gates"]
-        basis = "t interval of the task gains" if len(suite["train"]) >= 3 else "tasks x replicates x days interval"
+        basis = ("tasks x replicates x days interval" if len(suite["train"]) < 3
+                 else "signed-rank (Hodges-Lehmann) interval of the task gains" if gates["test"] == "signed_rank"
+                 else "t interval of the task gains")
         print(f"  gates: mean gain > {gates['min_delta']}; {gates['confidence']:.0%} {basis} above 0 (Bonferroni "
               f"across a round's candidates); no task credibly losing more than {gates['task_cap']} (judged once "
               "both versions have 2+ episodes on it)\n")
@@ -575,8 +577,11 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
     else:
         if not args.suite:
             raise SystemExit("evolve run needs --suite (or --resume RUN)")
+        from .task.suite import suite_spec
+
+        repeats = args.repeats if args.repeats is not None else suite_spec(args.suite).repeats
         config = EvolveConfig(suite=args.suite, harness=args.harness, generations=args.generations,
-                              candidates=args.candidates, repeats=args.repeats, minutes=args.minutes,
+                              candidates=args.candidates, repeats=repeats, minutes=args.minutes,
                               tokens=args.tokens, model=args.model, evolver_minutes=args.evolver_minutes,
                               evolver_tokens=args.evolver_tokens, evolver_model=args.evolver_model,
                               concurrency=args.concurrency, retries=args.retries)
@@ -886,7 +891,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--harness", default="seed", help="starting harness: seed, a directory or a stored digest")
     start.add_argument("--generations", type=int, default=3, help="proposal rounds after the baseline round")
     start.add_argument("--candidates", type=int, default=2, help="candidate harnesses per round (1-6)")
-    start.add_argument("--repeats", type=int, default=2, help="episodes per harness and training task per round")
+    start.add_argument("--repeats", type=int, default=None,
+                       help="episodes per harness and training task per round (default: what the suite is designed "
+                            "for, 2 unless it says otherwise)")
     start.add_argument("--minutes", type=float, default=20.0, help="time budget of one episode (awake time)")
     start.add_argument("--tokens", type=int, default=3_000_000, help="cost-weighted token budget of one episode")
     start.add_argument("--model", default=None,

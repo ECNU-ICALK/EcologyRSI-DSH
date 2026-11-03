@@ -4,12 +4,12 @@
 
 ## 1. 结论
 
-- **项目已经具备文献里最牢靠的几条共识。** 2026 年的 RSI 综述（1,250 篇论文）把评分信号按可信程度排序，发现自我改进的实际效果和信号强弱一致；一篇对 ICLR 2026 RSI 研讨会（110 篇论文）的会后综述把“在评测上变好、在任务上没变好”概括为最主要的未解决问题；PACE 指出“分数高了就留下”的验收规则会在噪声里累积大量假改进。ecogym 的确定性宿主评分、隐藏期、留出任务、封存时期、曝光登记，以及配对比较加任务间 t 区间、Bonferroni 和单任务否决，正是这些工作建议的做法。这部分不需要改。
+- **项目已经具备文献里最牢靠的几条共识。** 2026 年的 RSI 综述（1,250 篇论文）把评分信号按可信程度排序，发现自我改进的实际效果和信号强弱一致；一篇对 ICLR 2026 RSI 研讨会（110 篇论文）的会后综述把“在评测上变好、在任务上没变好”概括为最主要的未解决问题；PACE 指出“分数高了就留下”的验收规则会在噪声里累积大量假改进。ecogym 的确定性宿主评分、隐藏期、留出任务、封存时期、曝光登记，以及配对比较加任务间 t 区间、Bonferroni 和单任务否决，正是这些工作建议的做法。这部分不需要改。（2026-11-02 补充：门槛的方法不改，但 4 个训练任务时它几乎确认不了已经不错的版本附近的小增益，进化因此停住；改为默认 8 个训练任务、每个 1 个回合，成本相同。分析和对照的文献见 [evolution.md](evolution.md) 第 19 节。）
 - **缺口集中在评审会话一侧：它看到什么、从哪里出发。** 这次接入四个模块，都只改变评审员的工作区、证据和工具，门槛的统计方法、裁判和内循环都不变：
   1. 每个回合的**会话记录** `transcript.md`（Meta-Harness 的消融：原始轨迹是 Harness 搜索起作用的关键，只给分数或摘要差得多），以及评审员提早结束时请它对照会话记录的一段续跑（实测里评审员不会主动打开会话记录）；
   2. **同版本回合对照** `contrasts.md`（Training-Free GRPO、ReasoningBank：从同一提示下好坏不同的几次尝试中提炼经验）；
-  3. **存档起点**：以往比较过的版本（本次运行的，以及训练任务完全相同的其他运行的）的完整副本 `archive/` 和工具 `reset_candidate`，候选可以从没被采纳的版本出发；检查时就指出与比较过的版本重复的候选，两个候选改动大部分相同时给出提醒（Darwin Gödel Machine、Huxley-Gödel Machine、GEPA、AIRA₂、DarwinX、ShinkaEvolve）；实测里评审员第一代就从另一次运行的候选出发；
-  4. **跨运行的评审经验** `prior_runs.md`：训练任务完全相同的以往运行里各候选的结果和评审笔记（MetaShare、Group-Evolving Agents）。
+  3. **存档起点**：以往比较过的版本（本次运行的，以及训练任务都在本次之内的其他运行的；2026-11-02 前要求训练任务完全相同）的完整副本 `archive/` 和工具 `reset_candidate`，候选可以从没被采纳的版本出发；检查时就指出与比较过的版本重复的候选，两个候选改动大部分相同时给出提醒（Darwin Gödel Machine、Huxley-Gödel Machine、GEPA、AIRA₂、DarwinX、ShinkaEvolve）；实测里评审员第一代就从另一次运行的候选出发；
+  4. **跨运行的评审经验** `prior_runs.md`：训练任务都在本次之内的以往运行里各候选的结果和评审笔记（MetaShare、Group-Evolving Agents）。
   另外按技能泛化和上下文工程的研究改写了评审员说明里写经验和技能的规则。
 - **评估过但没有接入的**：回合层面的提前停止（离线重放只能省下 64 个候选回合里的 4 个）、让评审员修改自己的工作方式（Hyperagents）、改内循环的起点 Harness、多目标门槛、训练数据的 GRPO 分组导出等，理由见第 5 节。
 
@@ -34,6 +34,7 @@
 |---|---|---|
 | 评测是实验：报告标准误，比较时用配对差，相关的题目要聚类，事先做检验力分析 | Miller [2411.00640] | 配对、按天块自助、同数据集任务共用天的抽样；第 4、16 节有检验力计算。已具备 |
 | 同一配置重复运行的差别常常大于配置之间的差别；单次运行的结论不可靠，区分几个点的差别需要几十次以上的运行 | [2602.07150]；[2609.33812]；Fragility [2608.18066]（加上自我改进循环后 71% 的情况方差变大） | 每版本每任务 2 个回合，在任版本每代重跑。已具备。第 16 节的数据说明模板变强后回合间标准差从 0.032 降到 0.005，这时加任务比加回合更有用，和文献一致 |
+| 比较两种方法在多个数据集上的表现，用符号秩检验而不是配对 t 检验：t 检验受个别数据集上的极端值影响，样本少时还要求差别近似正态 | Demšar 2006 [demsar06]；Benavoli 等 2017 [benavoli17] | 2026-11-02 补充：`greenhouse.wide.climate@2` 改用符号秩检验（evolution.md 第 4、19 节）。起因是验证运行里一个在 8 个任务上都更好的候选，因为一个任务上的大增益没过 t 区间。4 个任务时这个检验永远通不过，`greenhouse.climate@1` 仍用 t 区间 |
 
 ### 3.3 搜索结构：只沿在任版本爬山，还是保留踏脚石
 
@@ -76,7 +77,7 @@
 | 以一组智能体为进化单位、组内共享经验，比树状的单独进化效果好 | Group-Evolving Agents [2602.04837]（NeurIPS 2026） |
 | 允许改进机制本身被修改时，系统自己长出了持久记忆和表现追踪，并能跨运行积累 | Hyperagents [2603.19461] |
 
-**ecogym 的现状**：内循环的经验在 `memory/lessons.md` 里，评审员的笔记在本次运行内会出现在以后各代的 `archive.md` 里。但每次新的进化运行，评审员都从零开始：账本里 8 次 `greenhouse.climate@1` 运行的评审笔记（例如“模板里写死的启用门槛会让智能体整回合退化为朴素基线”“单独修 bug 的候选很难过 +0.005 的门槛，应与有可测增益的方向一起提交”）互相看不到。**这次接入了跨运行的评审经验**，只取训练任务完全相同的运行；训练任务不同的运行（例如 `greenhouse.wide.climate@1` 训练用到了本任务组的 4 个留出隔间）不取，否则留出验证会被污染。经验的写法按 ACE 的结论改进了评审员说明：逐条修改，不整篇重写。
+**ecogym 的现状**：内循环的经验在 `memory/lessons.md` 里，评审员的笔记在本次运行内会出现在以后各代的 `archive.md` 里。但每次新的进化运行，评审员都从零开始：账本里 8 次 `greenhouse.climate@1` 运行的评审笔记（例如“模板里写死的启用门槛会让智能体整回合退化为朴素基线”“单独修 bug 的候选很难过 +0.005 的门槛，应与有可测增益的方向一起提交”）互相看不到。**这次接入了跨运行的评审经验**，只取训练任务完全相同的运行（2026-11-02 起放宽为训练任务都在本次之内的运行）；训练任务里有本次留出任务的运行（例如 `greenhouse.wide.climate@1` 训练用到了 `greenhouse.climate@1` 的 4 个留出隔间）不取，否则留出验证会被污染。经验的写法按 ACE 的结论改进了评审员说明：逐条修改，不整篇重写。
 
 ### 3.7 技能库
 
@@ -181,6 +182,8 @@
 
 噪声与统计
 - [2411.00640] Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations. https://arxiv.org/abs/2411.00640
+- [demsar06] J. Demšar. Statistical Comparisons of Classifiers over Multiple Data Sets. JMLR 7 (2006) 1–30. https://jmlr.org/papers/v7/demsar06a.html
+- [benavoli17] A. Benavoli, G. Corani, J. Demšar, M. Zaffalon. Time for a Change: a Tutorial for Comparing Multiple Classifiers Through Bayesian Analysis. JMLR 18 (2017). https://jmlr.org/papers/v18/16-305.html
 - [2602.07150] On Randomness in Agentic Evals. https://arxiv.org/abs/2602.07150
 - [2608.18066] On the Fragility of Self-Improving Agents: Variance, Task Order, and Underspecification. https://arxiv.org/abs/2608.18066
 - [2609.33812] Benchmarking AI Coding Agents on Open-Weight Models. https://arxiv.org/abs/2609.33812

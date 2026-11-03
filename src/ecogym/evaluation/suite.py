@@ -16,6 +16,21 @@ days (``basis = "bootstrap"``), and tasks of one group (dataset) share their
 day draws because they share weather and calendar. That interval covers
 within-task noise only; a real test needs three or more tasks.
 
+Gates with ``test = "signed_rank"`` replace the t interval with the interval
+that belongs to the exact Wilcoxon signed-rank test over the task gains
+(``basis = "tasks_signed_rank"``; Demšar 2006 recommends this test for two
+methods compared over several data sets). The t interval grows with the
+spread of the gains, so one task with an exceptionally large gain (a crash
+fixed) can push a candidate that is better on every task below the gate; the
+signed-rank test only uses the signs and the ranks of the gains' sizes. The
+interval runs between order statistics of the Walsh averages (the means of
+every pair of task gains, each gain paired with itself included): its lower
+bound lies above zero exactly when the one-sided test at (1 − level)/2
+rejects, a zero gain counting against the candidate. The exact test cannot
+reject with too few tasks (all N gains positive has probability 2^-N under
+the null); there the t interval is used instead, so the gate's suite loader
+and the evolution loop refuse such a configuration.
+
 A candidate is adopted only if all hold:
 
 1. the mean gain over the tasks exceeds ``min_delta``;
@@ -84,7 +99,7 @@ class SuiteDecision:
     confidence: float  # of the suite interval (Bonferroni-adjusted when given)
     tasks: tuple[TaskVerdict, ...]
     cells: dict[str, float]  # mean per-cell objective gain over the tasks that have the cell
-    basis: str = "tasks_t"  # tasks_t | bootstrap
+    basis: str = "tasks_t"  # tasks_t | tasks_signed_rank | bootstrap
     task_confidence: float = 0.95  # of the per-task intervals
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,6 +141,37 @@ def t_quantile(probability: float, df: int) -> float:
     return math.sqrt(df) * math.tan((low + high) / 2)
 
 
+def signed_rank_critical(n: int, tail: float) -> int:
+    """The largest c with P(T ≤ c) ≤ ``tail`` for the Wilcoxon signed-rank statistic T of n untied, nonzero values
+    under the null (all 2^n sign patterns equally likely); −1 when even P(T = 0) = 2^-n exceeds it, so that the
+    one-sided test at ``tail`` cannot reject with n values."""
+
+    if n < 1:
+        return -1
+    counts = np.zeros(n * (n + 1) // 2 + 1)
+    counts[0] = 1.0
+    for rank in range(1, n + 1):  # subsets of the ranks 1..n by their sum
+        shifted = np.zeros_like(counts)
+        shifted[rank:] = counts[:-rank]
+        counts += shifted
+    below = np.flatnonzero(np.cumsum(counts) / 2.0**n <= tail * (1.0 + 1e-9))
+    return int(below[-1]) if below.size else -1
+
+
+def signed_rank_interval(gains: np.ndarray, tail: float) -> tuple[float, float]:
+    """Interval of the signed-rank test: from the (c + 1)-th smallest to the (c + 1)-th largest Walsh average,
+    c = ``signed_rank_critical(n, tail)``. Its lower bound lies above zero exactly when at most c Walsh averages
+    are ≤ 0, which for untied nonzero gains is the one-sided test rejecting at ``tail``. When the test cannot
+    reject, the range of the Walsh averages widened to include zero."""
+
+    upper = np.triu_indices(gains.size)
+    walsh = np.sort((gains[:, None] + gains[None, :])[upper] / 2.0)
+    c = signed_rank_critical(gains.size, tail)
+    if c < 0:
+        return min(float(walsh[0]), 0.0), max(float(walsh[-1]), 0.0)
+    return float(walsh[c]), float(walsh[-1 - c])
+
+
 def _check(pair: TaskPair) -> None:
     if not pair.candidate or not pair.incumbent:
         raise ValueError(f"{pair.task}: both versions need at least one evaluation")
@@ -154,7 +200,12 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
         raise ValueError("a suite comparison needs at least one task")
     level = gates.confidence if confidence is None else confidence
     tail, task_tail = (1.0 - level) / 2.0, (1.0 - gates.confidence) / 2.0
-    basis = "tasks_t" if len(pairs) >= 3 else "bootstrap"
+    if len(pairs) < 3:
+        basis = "bootstrap"
+    elif gates.test == "signed_rank" and signed_rank_critical(len(pairs), tail) >= 0:
+        basis = "tasks_signed_rank"
+    else:  # the t interval, also where the signed-rank test cannot reject with this many tasks
+        basis = "tasks_t"
     smallest = min(tail, task_tail) if basis == "bootstrap" else task_tail
     resamples = max(gates.resamples, math.ceil(MIN_TAIL_DRAWS / smallest) + 1)
     rng = np.random.default_rng(int(digest({"schema": "ecogym.suite-compare/2", "seed": seed})[:16], 16))
@@ -192,6 +243,8 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
     if basis == "tasks_t":
         half = t_quantile(1.0 - tail, gains.size - 1) * float(gains.std(ddof=1)) / math.sqrt(gains.size)
         interval = (delta - half, delta + half)
+    elif basis == "tasks_signed_rank":
+        interval = signed_rank_interval(gains, tail)
     else:  # one column per resample for every drawn task: tasks of one group keep their shared day draw
         picks = rng.integers(0, len(pairs), size=(resamples, len(pairs)))
         overall = np.sort(np.stack(draws)[picks, columns].mean(axis=1))
@@ -209,4 +262,5 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
     return SuiteDecision(adopted, reason, delta, interval, level, tuple(verdicts), cells, basis, gates.confidence)
 
 
-__all__ = ["SuiteDecision", "TaskPair", "TaskVerdict", "adjusted_confidence", "compare_suite", "t_quantile"]
+__all__ = ["SuiteDecision", "TaskPair", "TaskVerdict", "adjusted_confidence", "compare_suite", "signed_rank_critical",
+           "signed_rank_interval", "t_quantile"]

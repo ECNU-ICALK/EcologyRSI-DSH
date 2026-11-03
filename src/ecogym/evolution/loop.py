@@ -55,7 +55,7 @@ from ..kernel import clock
 from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger
 from ..task.spec import TaskSpec
-from ..task.suite import suite_spec
+from ..task.suite import signed_rank_reachable, suite_spec
 from .evolver import EvolverSettings, run_evolver
 from .fold import EVENT_KINDS, SCORED_STATUSES, fold
 
@@ -163,6 +163,11 @@ class Evolution:
         self.config = config
         self.ledger_path = Path(ledger_path)
         self.suite = suite_spec(config.suite)
+        gates = self.suite.gates
+        if gates.test == "signed_rank" and not signed_rank_reachable(len(self.suite.train), gates.confidence,
+                                                                     config.candidates):
+            raise ValueError(f"with {config.candidates} candidates a round, the signed-rank gate of {self.suite.id} "
+                             f"cannot pass on {len(self.suite.train)} training tasks; use fewer candidates")
         self.tasks: list[TaskSpec] = self.suite.tasks("train")
         self.benches: dict[str, Bench] = {}
         self.cancel = threading.Event()

@@ -1,6 +1,6 @@
 # 架构：前后端怎样配合
 
-ecogym 0.3.0 · 本文说明浏览器里的「生态进化」面板、DSH 里的插件宿主端和 ecogym 服务怎样分工，一次请求经过哪些层，状态放在哪里，以及加接口、加页面时改哪些地方。进化本身的设计见 [evolution.md](evolution.md)，面板的「介绍」页给出同样的分层和全部接口。
+ecogym 0.3.1 · 本文说明浏览器里的「生态进化」面板、DSH 里的插件宿主端和 ecogym 服务怎样分工，一次请求经过哪些层，状态放在哪里，以及加接口、加页面时改哪些地方。进化本身的设计见 [evolution.md](evolution.md)，面板的「介绍」页给出同样的分层和全部接口。
 
 ## 1. 分层
 
@@ -52,9 +52,10 @@ flowchart TB
 |---|---|---|---|
 | 顶栏 | `EcogymPanel` | `_status`（4 秒）、`expert`（30 秒，待回答问题的数字）、`catalog`（打开时一次，失败按 2–30 秒退避重试） | `_restart`（后端失败或退出时的按钮） |
 | 进化 | `EvolutionList` | `evolutions`（8 秒） | |
-| 运行页 | `EvolutionPage` 与其中的卡片 | `evolutions/{run}`（运行中 4 秒，否则 30 秒）、`episodes?evolution={run}&status=running`（运行中 6 秒）、展开在任 Harness 时 `harnesses/{ref}` 和 `harnesses/{起点}/diff/{在任}` | `evolutions/{run}/stop`、`abort`、`resume`、`verify`；`expert/note`（专家建议卡片） |
+| 运行页 | `EvolutionPage` 与其中的卡片（文字结论 `RunSummary`，成绩图 `ScoreCard`，谱系图 `LineageCard`，每一代的过程 `Process`） | `evolutions/{run}`（运行中 4 秒，否则 30 秒；含 `ancestry`：起点版本是哪些运行进化出来的）、`episodes?evolution={run}&status=running`（运行中 6 秒）、展开在任 Harness 时 `harnesses/{ref}` 和 `harnesses/{起点}/diff/{在任}`；展开一代时 `evolutions/{run}/evolver/{代}?steps=0`（评审看过的材料），候选从存档版本出发时 `harnesses/{出发的版本}/diff/{候选}` | `evolutions/{run}/stop`、`abort`、`resume`、`verify`；`expert/note`（专家建议卡片） |
+| 评审会话 | `EvolverPage`（`go({ page: "evolver", id: "运行\|代" })`） | `evolutions/{run}/evolver/{代}`（打开时一次） | |
 | 新建进化 | `NewEvolution` | `catalog` | `models/check`（选中模型时）、`evolutions` |
-| 回合 | `EpisodeList`、`EpisodePage` | `episodes`（8 秒）、`episodes/{id}`（运行中 5 秒） | |
+| 回合 | `EpisodeList`、`EpisodePage` | `episodes`（8 秒）、`episodes/{id}`（运行中 5 秒）、点「显示每一步」时 `episodes/{id}/transcript` | |
 | 专家 | `ExpertPage` | `expert`（15 秒） | `expert/answer`、`expert/note` |
 | 训练数据 | `DataPage`、`ExportPreview` | `exports`（20 秒，导出中 3 秒）、`exports/{id}` | `exports` |
 | 任务 | `TasksPage` | `catalog` | |
@@ -66,7 +67,9 @@ flowchart TB
 
 - `service.py`：`ROUTES`（每条路由的方法、路径、处理方法、分组和说明）在文件开头；`Service` 的方法大致按“目录、进化、回合、Harness、模型、专家、训练数据、方法竞技”排列；`_handler` 只做鉴权、请求体检查和查表。
 - `web/plugin/lib/index.js`：`Sidecar`（启动、就绪检测、崩溃后按 2、5、15、30、60 秒退避重启、停止）和 `handle`／`forward`（代理）。
-- `web/plugin/lib/client.js`：一个文件（DSH 直接加载，不经构建），依次是样式、数据（`Api` 表、`api`、`useResource`、目录、模型路由）、提示与确认、格式化与状态文字、基础组件、后端状态、进化运行、新建进化、回合、专家、训练数据、任务、介绍、面板（顶栏 `TABS`、导航、在 DSH 里注册）。
+- `web/plugin/lib/client.js`：一个文件（DSH 直接加载，不经构建），依次是样式、数据（`Api` 表、`api`、`useResource`、目录、模型路由）、提示与确认、格式化与状态文字、基础组件、后端状态、进化运行、进化过程（谱系图、每一代的过程）、新建进化、回合、会话的每一步与评审会话页、专家、训练数据、任务、介绍、面板（顶栏 `TABS`、导航、在 DSH 里注册）。导航的 `back` 是子页面返回按钮的去处，`focus` 让运行页打开并滚到某一代（从回合或评审会话返回时用）。
+- 运行页的文字结论和成绩图只用 `evolutions/{run}` 的数据：在任版本的成绩取它最近一次比较里各任务在任回合的均值，候选的成绩是这个值加上比较的增益，误差范围就是比较的区间；“可信地更好”是区间整段在 0 以上。起点版本的来历由 `evolution/ancestry.py` 从账本里的采纳事件往回追（最多 5 次运行），带上那次比较前后的成绩和最终版本的独立验证。
+- 会话的每一步来自 `episodes/transcripts.py`：从模型调用记录重建线程，按训练数据导出的规则处理路径和令牌，过长处保留首尾；面板的回合会话记录和评审读到的 `transcript.md` 用同一份。`evolution/process.py` 从评审会话的步骤里整理出它看过的材料、调用宿主工具的结果和改动候选文件的步骤（命令行改了哪些文件是从命令里推断的）。
 - 业务代码的分层见 README 的“代码结构”。
 
 ## 6. 加一个接口或页面

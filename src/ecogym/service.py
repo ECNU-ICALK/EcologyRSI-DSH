@@ -113,7 +113,10 @@ ROUTES = (
     Route("POST", "evolutions", "start_evolution", "进化",
           "在后台开始一次进化（任务组、起点、代数、候选、回合、模型…）", status=201, body=True),
     Route("GET", "evolutions/{run}", "evolution", "进化",
-          "一次进化运行：各代、候选与比较、验证、各回合预报的平均、训练任务的参考成绩"),
+          "一次进化运行：各代、候选与比较、验证、各回合预报的平均、训练任务的参考成绩、起点是哪些运行进化出来的"),
+    Route("GET", "evolutions/{run}/evolver/{generation}", "evolver_session", "进化",
+          "一代的评审会话：看了哪些证据和版本、调了哪些工具、改了哪些文件，以及每一步（?steps=0 不带每一步）",
+          query=("steps",)),
     Route("POST", "evolutions/{run}/stop", "stop", "进化", "这一代结束后停止"),
     Route("POST", "evolutions/{run}/abort", "abort", "进化", "立即中止：正在运行的智能体停下，继续时这一代重跑"),
     Route("POST", "evolutions/{run}/resume", "resume_evolution", "进化",
@@ -124,6 +127,8 @@ ROUTES = (
           "回合列表（?evolution=运行 只看一个运行，&status=running 只看运行中的）", query=("evolution", "status")),
     Route("GET", "episodes/{episode}", "episode", "回合",
           "一个回合：隐藏期成绩、本地检验与提交、笔记、最终回复、工具使用"),
+    Route("GET", "episodes/{episode}/transcript", "episode_transcript", "回合",
+          "一个回合的会话记录：智能体每一步的思考、工具调用和结果（回合结束后才有）"),
     Route("GET", "harnesses/{ref}", "harness", "Harness", "一个 Harness 版本：文件、指令、经验、DSH 设置"),
     Route("GET", "harnesses/{before}/diff/{after}", "harness_diff", "Harness", "两个版本逐文件的差异"),
     Route("POST", "models/check", "model_check", "模型", "{model}：现在能否调用（发一个很小的请求，结果缓存十分钟）",
@@ -147,8 +152,18 @@ ROUTES = (
 
 
 def _suite_entry(suite: Any) -> dict[str, Any]:
+    from .evaluation.suite import signed_rank_critical, t_quantile
+
+    # by candidates per round (Bonferroni): the t interval's half-width per unit spread of the task gains, or the
+    # signed-rank gate's critical count (adopt when at most this many Walsh averages of the task gains are <= 0)
+    tasks, tails = len(suite.train), {str(k): (1 - suite.gates.confidence) / (2 * k) for k in range(1, 7)}
+    ranked = suite.gates.test == "signed_rank" and tasks >= 3
+    width = {key: t_quantile(1 - tail, tasks - 1) / tasks ** 0.5 for key, tail in tails.items()} \
+        if tasks >= 3 and not ranked else None
+    critical = {key: signed_rank_critical(tasks, tail) for key, tail in tails.items()} if ranked else None
     return {"id": suite.id, "title": suite.title, "train": list(suite.train), "holdout_tasks": len(suite.holdout),
-            "gates": asdict(suite.gates), "notes": suite.notes.strip()}
+            "gates": asdict(suite.gates), "notes": suite.notes.strip(), "repeats": suite.repeats,
+            "recommended": suite.recommended, "interval_per_sd": width, "signed_rank_critical": critical}
 
 
 def _task_entry(task: TaskSpec) -> dict[str, Any]:
@@ -315,6 +330,7 @@ class Service:
     def evolution(self, run_id: str) -> dict[str, Any]:
         from .episodes.history import fold_episode
         from .evolution import fold
+        from .evolution.ancestry import ancestry
 
         with Ledger(self.ledger_path) as ledger:
             events = ledger.events(run_id)
@@ -328,6 +344,7 @@ class Service:
                         scored = fold_episode(ledger.events(entry["episode"])).get("scored") or {}
                         if scored.get("references"):
                             references[entry["task"]] = scored["references"]
+            view["ancestry"] = ancestry(ledger, view["seed"]["digest"], exclude=run_id)
         view["active"] = self._alive(run_id)
         view["verifying"] = self._alive(run_id, verifying=True)
         view["stale"] = not view["active"] and self._stale(view)
@@ -335,6 +352,21 @@ class Service:
         view["task_references"] = references
         view["ensembles"] = self._ensemble_scores(run_id, view)
         return view
+
+    def evolver_session(self, run_id: str, generation: str, *, steps: str | None = None) -> dict[str, Any]:
+        from .evolution import fold
+        from .evolution.process import evolver_session
+
+        if not generation.isdigit():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "generation must be a whole number")
+        with Ledger(self.ledger_path) as ledger:
+            events = ledger.events(run_id)
+        if not events or events[0].kind != "evolve_started":
+            raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
+        found = evolver_session(fold(events), int(generation), steps=steps not in ("0", "false", "no"))
+        if found is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, f"{run_id} has no finished evolver session in generation {generation}")
+        return found
 
     def _ensemble_scores(self, run_id: str, view: dict[str, Any]) -> dict[str, Any]:
         """Averaged forecasts per version and task (``evolution.ensemble``), recomputed when the run logs."""
@@ -352,10 +384,12 @@ class Service:
 
     def start_evolution(self, body: dict[str, Any]) -> dict[str, Any]:
         from .evolution import Evolution, EvolveConfig
+        from .task.suite import suite_spec
 
         try:
             values = {key: kind(body[key]) for key, kind in EVOLVE_FIELDS.items()
                       if body.get(key) not in (None, "")}
+            values.setdefault("repeats", suite_spec(str(body["suite"])).repeats)  # the suite's design
             evolution = Evolution(EvolveConfig(suite=str(body["suite"]), **values), self.ledger_path)
             run_id = evolution.start(label=str(body.get("label", ""))[:200])
         except (KeyError, TypeError, ValueError, OSError) as error:
@@ -487,6 +521,17 @@ class Service:
         record = fold_episode(events)
         record["orphaned"] = self._orphaned(record)
         return record
+
+    def episode_transcript(self, episode_id: str) -> dict[str, Any]:
+        """The episode's sessions as steps (``episodes.transcripts``); none while it runs (its model calls are
+        stored when it ends)."""
+
+        from .episodes.transcripts import session_threads
+
+        record = self.episode(episode_id)
+        directory = str(((record.get("finished") or {}).get("trajectory") or {}).get("dir") or "")
+        found = session_threads(Path(directory) / "llm_calls.jsonl.gz", [record.get("root") or ""]) if directory else []
+        return {"episode": episode_id, "status": record["status"], "recorded": bool(found), "threads": found}
 
     def harness(self, ref: str) -> dict[str, Any]:
         from .harness import HarnessError, content_files, resolve

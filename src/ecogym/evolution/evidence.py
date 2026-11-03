@@ -23,17 +23,16 @@ Three files follow published findings on what a harness proposer needs:
   and the diff between their scored programs. Episodes of one version differ
   as much as candidates do; contrasting rollouts of the same prompt is the
   learning signal of Training-Free GRPO and ReasoningBank (2025).
-- ``prior_runs.md``: earlier runs on the same training tasks, their
-  candidates' outcomes and their evolvers' notes, so failed directions are
-  not rediscovered run after run (MetaShare, Group-Evolving Agents, 2026).
-  Runs on any other set of training tasks are left out: their evidence may
-  cover this run's holdout tasks.
+- ``prior_runs.md``: earlier runs whose training tasks are all among this
+  run's (the same set, or part of it), their candidates' outcomes and their
+  evolvers' notes, so failed directions are not rediscovered run after run
+  (MetaShare, Group-Evolving Agents, 2026). A run with any other training
+  task is left out: its evidence may cover this run's holdout tasks.
 """
 
 from __future__ import annotations
 
 import difflib
-import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
@@ -42,9 +41,9 @@ from typing import Any
 
 import numpy as np
 
-from ..episodes.export import sanitize, threads
 from ..episodes.history import fold_episode
 from ..episodes.trajectory import submission_files
+from ..episodes.transcripts import session_threads
 from ..kernel.ledger import Ledger
 from .fold import SCORED_STATUSES, fold
 
@@ -54,8 +53,6 @@ NUMBER = re.compile(r"(?<!line )(?<![\w.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 TRANSCRIPT_LIMIT = 200_000  # characters of one episode's transcript
 TURN_LIMITS = {"prompt": 4000, "reasoning": 1500, "reply": 3000, "call": 2500, "result": 1800}
 FENCE = "~~~~~"
-INJECTED = ("<system-reminder>", "Current runtime context")
-CONTINUED = "这是同一个回合的第"  # how the host opens a follow-up session (``episodes.runner``)
 CONTRAST_GAP = 0.02  # hidden-score gap below which two episodes of one version are not contrasted
 CONTRAST_PAIRS = 24
 CONTRAST_DIFF = 8000  # characters of program diff per pair
@@ -349,80 +346,17 @@ def lessons(records: Iterable[dict[str, Any]], names: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _cut(text: Any, limit: int) -> str:
-    """Head and tail of a long text (what an agent read first and what it ended on)."""
-
-    text = str(text or "").strip()
-    if len(text) <= limit:
-        return text
-    head = limit * 2 // 3
-    return f"{text[:head]}\n…（中间略去 {len(text) - limit} 字）…\n{text[len(text) - (limit - head):]}"
-
-
 def _block(text: str) -> list[str]:
     return [FENCE, text.replace(FENCE, "~~~~"), FENCE, ""]
-
-
-def _text(content: Any) -> str:
-    """A message's content: a string, or a list of parts."""
-
-    if isinstance(content, list):
-        return "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
-    return str(content or "")
-
-
-def _arguments(function: dict[str, Any]) -> tuple[str, str]:
-    """A tool call's name and its arguments, long strings (code, commands, file contents) written out."""
-
-    name, raw = str(function.get("name") or "?"), function.get("arguments")
-    try:
-        arguments = json.loads(raw) if isinstance(raw, str) else raw
-    except ValueError:
-        return name, str(raw)
-    if not isinstance(arguments, dict):
-        return name, json.dumps(arguments, ensure_ascii=False)
-    lines = []
-    for key, value in arguments.items():
-        if isinstance(value, str) and ("\n" in value or len(value) > 120):
-            lines.append(f"[{key}]\n{value}")
-        else:
-            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
-    return name, "\n".join(lines)
-
-
-def _injected(text: str) -> str:
-    """One line for context DSH injects as a user message (AGENTS.md, the skill list, runtime facts, reminders)."""
-
-    if "Instructions from: AGENTS.md" in text:
-        what = "AGENTS.md（Harness 的指令和经验）"
-    elif "available_skills" in text:
-        what = "技能列表"
-    elif text.startswith("Current runtime context"):
-        what = "运行环境说明"
-    else:
-        what = "提醒：" + _clip(text.replace("<system-reminder>", "").replace("</system-reminder>", "").strip(),
-                             160).replace("\n", " ")
-    return f"（DSH 注入的上下文，{len(text)} 字，略去：{what}）"
-
-
-def _thread_label(index: int, messages: list[dict[str, Any]]) -> str:
-    first = next((_text(item.get("content")) for item in messages if item.get("role") == "user"), "")
-    if first.startswith(CONTINUED):
-        return "续跑会话"
-    return "主会话" if index == 0 else "其他线程（子智能体，或上下文压缩后的续写）"
 
 
 def transcript(record: dict[str, Any], *, role: str) -> str:
     """The agent's sessions in one episode, from its recorded model calls ("" when none are stored)."""
 
     directory = Path(((record.get("finished") or {}).get("trajectory") or {}).get("dir", ""))
-    path = directory / "llm_calls.jsonl.gz"
-    if not directory.name or not path.is_file():
+    if not directory.name:
         return ""
-    try:
-        found = threads(path)
-    except (OSError, EOFError, ValueError):  # a damaged log costs this file only
-        return ""
+    found = session_threads(directory / "llm_calls.jsonl.gz", [record.get("root") or ""], TURN_LIMITS)
     if not found:
         return ""
     lines = [f"# 回合 {record['episode']} 的会话记录", "",
@@ -430,34 +364,28 @@ def transcript(record: dict[str, Any], *, role: str) -> str:
              "- 节选：系统提示和 DSH 注入的上下文只留一行说明；推理、回复、工具参数和结果过长时保留首尾。"
              "会话目录写成 `/workspace`。",
              "- 智能体在会话中看不到隐藏期；隐藏期成绩见同目录的 `summary.md`。", ""]
-    for index, chain in enumerate(found):
-        messages = sanitize(chain["messages"], [record.get("root") or ""])
-        label = _thread_label(index, messages)
-        lines += [f"## 线程 {index + 1}/{len(found)}：{label}（{chain['calls']} 次模型调用）", ""]
-        called: dict[str, str] = {}
-        step = 0
-        for message in messages:
-            kind, text = message.get("role"), _text(message.get("content"))
-            if kind == "system":
-                lines += [f"（系统提示 {len(text)} 字，略去）", ""]
-            elif kind == "user" and text.lstrip().startswith(INJECTED):
-                lines += [_injected(text.strip()), ""]
-            elif kind == "user":
-                lines += ["### 宿主或上级智能体的消息", "", *_block(_cut(text, TURN_LIMITS["prompt"]))]
-            elif kind == "assistant":
-                step += 1
+    for index, thread in enumerate(found):
+        lines += [f"## 线程 {index + 1}/{len(found)}：{thread['label']}（{thread['calls']} 次模型调用）", ""]
+        step = None
+        for item in thread["steps"]:
+            kind = item["kind"]
+            if item.get("step") is not None and item["step"] != step:
+                step = item["step"]
                 lines += [f"### 第 {step} 步", ""]
-                if message.get("reasoning_content"):
-                    lines += ["推理：", "", *_block(_cut(message["reasoning_content"], TURN_LIMITS["reasoning"]))]
-                if text.strip():
-                    lines += ["回复：", "", *_block(_cut(text, TURN_LIMITS["reply"]))]
-                for call in message.get("tool_calls") or []:
-                    name, arguments = _arguments(call.get("function") or {})
-                    called[str(call.get("id"))] = name
-                    lines += [f"调用 `{name}`：", "", *_block(_cut(arguments, TURN_LIMITS["call"]))]
-            elif kind == "tool":
-                name = called.get(str(message.get("tool_call_id")), message.get("name") or "工具")
-                lines += [f"结果（`{name}`）：", "", *_block(_cut(text, TURN_LIMITS["result"]))]
+            if kind == "system":
+                lines += [f"（系统提示 {item['chars']} 字，略去）", ""]
+            elif kind == "context":
+                lines += [f"（DSH 注入的上下文，{item['chars']} 字，略去：{item['text']}）", ""]
+            elif kind == "prompt":
+                lines += ["### 宿主或上级智能体的消息", "", *_block(item["text"])]
+            elif kind == "reasoning":
+                lines += ["推理：", "", *_block(item["text"])]
+            elif kind == "reply":
+                lines += ["回复：", "", *_block(item["text"])]
+            elif kind == "call":
+                lines += [f"调用 `{item['name']}`：", "", *_block(item["text"])]
+            elif kind == "result":
+                lines += [f"结果（`{item['name'] or '工具'}`）：", "", *_block(item["text"])]
     text = "\n".join(lines)
     if len(text) > TRANSCRIPT_LIMIT:
         text = text[:TRANSCRIPT_LIMIT] + "\n\n…（记录过长，其余部分略去）\n"
@@ -557,13 +485,15 @@ def contrasts(view: dict[str, Any], records: dict[str, dict[str, Any]], names: d
     return "\n".join(lines) + "\n"
 
 
-def same_task_runs(ledger: Ledger, view: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every other evolution run on exactly this run's training tasks, folded, newest first.
+def related_runs(ledger: Ledger, view: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every other evolution run whose training tasks are all among this run's (the same set, or part of it),
+    folded, newest first.
 
-    A run on any other set of training tasks is left out: its evidence and its candidates were shaped by hidden
-    periods of tasks that may be this run's holdout tasks."""
+    Such a run's evolvers saw the hidden periods of those tasks only, all of them training tasks here, so its
+    candidates and notes say nothing about this run's holdout tasks. A run with any other training task is left
+    out: that task may be one of this run's holdout tasks."""
 
-    train = sorted((view.get("suite") or {}).get("train") or [])
+    train = set((view.get("suite") or {}).get("train") or [])
     found = []
     for run_id in reversed(ledger.runs(first="evolve_started")):
         if not train or run_id == view["run_id"]:
@@ -572,9 +502,17 @@ def same_task_runs(ledger: Ledger, view: dict[str, Any]) -> list[dict[str, Any]]
             other = fold(ledger.events(run_id))
         except (ValueError, KeyError):
             continue
-        if sorted((other.get("suite") or {}).get("train") or []) == train:
+        theirs = set((other.get("suite") or {}).get("train") or [])
+        if theirs and theirs <= train:
             found.append(other)
     return found
+
+
+def same_tasks(view: dict[str, Any], other: dict[str, Any]) -> bool:
+    """Whether two runs compared their versions on exactly the same training tasks."""
+
+    return (sorted((view.get("suite") or {}).get("train") or [])
+            == sorted((other.get("suite") or {}).get("train") or []))
 
 
 def version_label(run_id: str, generation: int, name: str, *, current: str) -> str:
@@ -586,20 +524,25 @@ def version_label(run_id: str, generation: int, name: str, *, current: str) -> s
 
 def prior_runs(ledger: Ledger, view: dict[str, Any], runs: Sequence[dict[str, Any]] | None = None,
                archived: Mapping[str, Any] | None = None) -> str:
-    """Earlier runs on exactly this run's training tasks (``same_task_runs``): their candidates' outcomes and
-    their evolvers' notes; ``archived`` says which candidates the evolver's ``archive/`` holds (see ``archive``)."""
+    """Earlier runs whose training tasks are all among this run's (``related_runs``): their candidates' outcomes
+    and their evolvers' notes; ``archived`` says which candidates the evolver's ``archive/`` holds (see
+    ``archive``)."""
 
     archived = _archived(archived)
+    ours = len((view.get("suite") or {}).get("train") or [])
     blocks = []
-    for other in same_task_runs(ledger, view) if runs is None else runs:
+    for other in related_runs(ledger, view) if runs is None else runs:
         run_id = other["run_id"]
         rounds = [round_ for round_ in other["rounds"] if round_["generation"] > 0]
         if not rounds and not other["notes"]:
             continue
         seed = other.get("seed") or {}
         status = RUN_STATUS.get(other["status"], other["status"])
+        theirs = len((other.get("suite") or {}).get("train") or [])
+        tasks = ("训练任务与本次相同" if same_tasks(view, other) else
+                 f"训练任务 {theirs} 个，都是本次 {ours} 个训练任务中的；它比较过的版本可以在本次原样再比较一次")
         lines = [f"## `{run_id}`（{str(other.get('started_at', ''))[:10]}，起点 {seed.get('name', '')} "
-                 f"`{str(seed.get('digest', ''))[:12]}`，{status}，采纳 {len(other['adoptions'])} 次）", ""]
+                 f"`{str(seed.get('digest', ''))[:12]}`，{status}，采纳 {len(other['adoptions'])} 次；{tasks}）", ""]
         for round_ in rounds:
             for candidate in round_["candidates"]:
                 decision = candidate.get("decision") or {}
@@ -618,11 +561,13 @@ def prior_runs(ledger: Ledger, view: dict[str, Any], runs: Sequence[dict[str, An
         blocks.append("\n".join(lines))
     if not blocks:
         return ""
-    head = ["# 以往运行（训练任务完全相同）的候选与评审笔记", "",
-            "同一组训练任务上的其他进化运行，新的在前：每个候选的结果和一句话摘要，以及那些运行的评审员记下的经验和无效方向。"
-            "它们的在任版本可能和本次不同，增益是相对当时的在任版本算的。用来避免重复已经失败的方向，"
-            "也可以从其中的候选出发（在 `archive/` 里的那些）；在这些运行里比较过的版本原样提交不会再运行。"
-            "训练任务不同的运行不在这里（它们的证据可能涉及本次的留出任务）。", ""]
+    head = ["# 以往运行的候选与评审笔记", "",
+            "训练任务都在本次之内（与本次相同，或是本次训练任务的一部分）的其他进化运行，新的在前：每个候选的结果和一句话摘要，"
+            "以及那些运行的评审员记下的经验和无效方向。它们的在任版本可能和本次不同，增益是相对当时的在任版本、"
+            "在那次的训练任务上算的。用来避免重复已经失败的方向，也可以从其中的候选出发（在 `archive/` 里的那些）。"
+            "训练任务与本次相同的运行里比较过的版本，原样提交不会再运行；训练任务比本次少的运行里比较过的版本，"
+            "可以原样在本次的全部训练任务上再比较一次：任务更多，检验更有力。"
+            "有本次训练任务之外的任务的运行不在这里（它们的证据可能涉及本次的留出任务）。", ""]
     return _clip("\n".join(head) + "\n" + "\n\n".join(blocks), PRIOR_LIMIT) + "\n"
 
 
@@ -634,7 +579,7 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
     """Write ``overview.md``, ``archive.md``, ``lessons.md``, ``contrasts.md``, ``expert.md``, ``prior_runs.md``
     and one folder per episode (``summary.md``, ``transcript.md``, the scored ``submission/``); ``archived``
     maps the labels of the versions copied into the evolver's ``archive/`` to their harnesses, ``prior`` lists
-    the runs on the same training tasks (``same_task_runs``, read from the ledger when None)."""
+    the runs whose training tasks are all among this run's (``related_runs``, read from the ledger when None)."""
 
     archived = _archived(archived)
 
@@ -682,4 +627,4 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
 
 
 __all__ = ["archive", "contrast_pairs", "contrasts", "episode_summary", "lessons", "overview", "prior_runs",
-           "program_diff", "same_task_runs", "transcript", "version_label", "write_evidence"]
+           "program_diff", "related_runs", "same_tasks", "transcript", "version_label", "write_evidence"]

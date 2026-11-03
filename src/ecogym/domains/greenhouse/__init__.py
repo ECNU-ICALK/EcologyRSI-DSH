@@ -2,10 +2,10 @@
 
 Ships the AGC 2018 cucumber and AGC 2019 tomato dataset specs, a climate
 task card for each (with expert and recipe-seed presets; ``<card>:<team>``
-runs a card on another team's compartment), two suites for evolving agent
-harnesses across compartments of both crops (four or eight training
-compartments), the domain knowledge notes shown to research agents, and the
-diurnal-profile expert solver.
+runs a card on another team's compartment), suites for evolving agent
+harnesses across compartments of both crops (four training compartments; or
+eight, with a t or a signed-rank gate), the domain knowledge notes shown to
+research agents, and the diurnal-profile expert solver.
 """
 
 from pathlib import Path
@@ -15,4 +15,5 @@ from . import expert  # noqa: F401  (registers greenhouse.diurnal_profile@1)
 HERE = Path(__file__).resolve().parent
 DATASETS = (HERE / "agc_cucumber_2018.toml", HERE / "agc_tomato_2019.toml")
 TASKS = (HERE / "tasks" / "cucumber_climate.toml", HERE / "tasks" / "tomato_climate.toml")
-SUITES = (HERE / "suites" / "climate.toml", HERE / "suites" / "climate_wide.toml")
+SUITES = (HERE / "suites" / "climate.toml", HERE / "suites" / "climate_wide.toml",
+          HERE / "suites" / "climate_wide_2.toml")

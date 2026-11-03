@@ -5,14 +5,25 @@
 # adoption interval is a t interval over the per-task gains, so four tasks
 # leave 3 degrees of freedom and only large, very consistent gains pass; for
 # the same spread of task gains, eight tasks make the interval about half as
-# wide (95%: t 2.36 / sqrt 8 against 3.18 / sqrt 4). Each generation runs
-# twice as many episodes. Holdout verification rests on two compartments; the
-# sealed periods (validation, final_test) still test transfer in time.
+# wide (two candidates: t 2.84 / sqrt 8 against 4.18 / sqrt 4). One episode
+# per version and compartment keeps a generation at the cost of
+# greenhouse.climate@1 with two: near a good template the spread between
+# compartments, not the episode noise, sets the interval, and only more
+# compartments narrow it (docs/evolution.md, section 19). Without a second
+# episode the per-task veto does not apply; the eight-task interval stands in
+# for it. Holdout verification rests on two compartments; the sealed periods
+# (validation, final_test) still test transfer in time.
+#
+# Superseded by greenhouse.wide.climate@2 (same tasks, signed-rank gate): one
+# compartment with a much larger gain than the others widens the t interval,
+# so a candidate better on all eight can fail here. Kept so that runs on it
+# can be continued and verified.
 #
 # Four of greenhouse.climate@1's holdout compartments are training tasks here:
 # verify a harness evolved on this suite with this suite, not with that one.
 id = "greenhouse.wide.climate@1"
-title = "温室气候（八个训练隔间）：两季作物、十个隔间"
+title = "温室气候（八个训练隔间、t 区间）：两季作物、十个隔间"
+repeats = 1
 notes = """
 Training: cucumber 2018 AiCU, DeepGreens, Croperators and iGrow; tomato 2019 AICU, Automatoes, Digilog and TheAutomators.
 Holdout: cucumber 2018 Sonoma; tomato 2019 IUACAAS.

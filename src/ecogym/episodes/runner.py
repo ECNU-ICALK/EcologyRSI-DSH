@@ -20,8 +20,15 @@ current submission is and what it last replied; every harness version is
 treated the same, so this does not bias comparisons.
 
 An episode whose agent never got a model reply is ``infra_failed``: a
-failure of the service, not of the harness, which callers may retry. An
-episode stopped during its session or its judging (``cancel``) is recorded as
+failure of the service, not of the harness, which callers may retry. So is
+one whose agent could not work for more than ``STALL_SHARE`` of its time
+because model calls failed (``Session.stalled_seconds``: the waits on failed
+calls, and the rest of the time when the session ended while its calls kept
+failing): it is scored and kept, but its score measures the provider's
+trouble more than the harness (in evo:7fa21a9920cd an incumbent episode lost
+381 of its 480 seconds that way, never submitted and scored as its crashing
+template). An episode stopped
+during its session or its judging (``cancel``) is recorded as
 ``interrupted``, unscored, before the interruption propagates.
 """
 
@@ -57,6 +64,7 @@ PROMPT = ("请先阅读当前目录下的 TASK.md 和 AGENTS.md，然后独立�
 PREDICTIONS = "scored.npz"
 CONTINUE_SHARE = 0.25  # an agent that ends with more than this share of its time left gets a follow-up session
 MAX_CONTINUATIONS = 3
+STALL_SHARE = 0.5  # an episode whose agent waited on failed model calls for more of its time is infra_failed
 
 
 def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
@@ -219,11 +227,18 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
                    "start": bool(final.get("start")) if final else False, "predictions": PREDICTIONS,
                    "predictions_digest": file_digest(stored)})
     events("episode_scored", scored)
+    status = session.status
+    budget = config.minutes * 60
+    if status != "infra_failed" and session.stalled_seconds > STALL_SHARE * budget:
+        status = "infra_failed"  # the provider, not the harness: most of the time went to waiting on it
     finished = {
-        **session.to_dict(), "status": session.status, "local_evaluations": tools.evaluations,
+        **session.to_dict(), "status": status, "local_evaluations": tools.evaluations,
         "submissions": len(tools.submissions), "notes": len(tools.notes), "questions": len(tools.questions),
         "score": scored["score"], "local_check": LOCAL_STAGE,
     }
+    if status != session.status:
+        finished["stalled"] = (f"failed model calls kept the agent from working for {session.stalled_seconds:.0f} "
+                               f"of its {budget:.0f} seconds")
     events("episode_finished", finished)
     if not config.keep:
         subprocess.run(["rm", "-r", "-f", str(root)], check=False)

@@ -5,7 +5,8 @@ Workspace, inside the agent sandbox:
     work/AGENTS.md            the evolver's fixed instructions (``evolver.md``, host-owned)
     work/EVOLVE.md            this round's brief: tasks, comparison rules, options, limits, budget
     work/incumbent/           the incumbent harness, for reference
-    work/archive/<label>/     versions compared before (this run's, other runs' on the same training tasks, the seed)
+    work/archive/<label>/     versions compared before (this run's, other runs' on training tasks all among
+                              this run's, the seed)
     work/candidates/<name>/   one editable copy of the incumbent per candidate
     work/proposals/<name>.md  each candidate's rationale
     work/evidence/            overview, archive, lessons, contrasts, prior runs, expert notes, one folder per episode
@@ -26,10 +27,11 @@ current best (the Darwin Gödel Machine's open-ended-exploration ablation,
 Zhang et al., 2025; Huxley-Gödel Machine; GEPA's Pareto candidate pool;
 AIRA-2's population): a candidate that was better on most tasks but missed the
 gate is often a better parent than the incumbent. The archive also holds the
-candidates of other runs on exactly the same training tasks (no other run can
-carry hidden-period knowledge of this run's holdout tasks), and none of those
-compared versions runs again unchanged: that would only retest it until it
-passed by chance. Two candidates of one round
+candidates of other runs whose training tasks are all among this run's (no
+other run can carry hidden-period knowledge of this run's holdout tasks).
+None of the versions compared on exactly this run's training tasks runs again
+unchanged: that would only retest it until it passed by chance; a version
+compared on part of them may run once more, on all of them. Two candidates of one round
 whose edits mostly coincide get a warning: they split one round's power
 (Bonferroni) without testing two directions (ShinkaEvolve's novelty
 rejection; on 2026-10-29 and 11-01 three of nine rounds had two candidates
@@ -63,7 +65,7 @@ from ..episodes.sandbox import Runtime, discover_runtime, ecogym_home, scratch_r
 from ..episodes.tools import REPLACE_MARGIN
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench
-from ..evaluation.suite import adjusted_confidence
+from ..evaluation.suite import adjusted_confidence, signed_rank_critical
 from ..harness import (
     MAX_BYTES,
     MAX_FILES,
@@ -83,7 +85,7 @@ from ..kernel.ledger import Ledger
 from ..task.spec import TaskSpec, base_id
 from ..task.suite import SuiteSpec
 from .ensemble import ensemble_scores
-from .evidence import same_task_runs, version_label, write_evidence
+from .evidence import related_runs, same_tasks, version_label, write_evidence
 
 NAMES = "abcdefghij"
 ARCHIVE_LIMIT = 24  # earlier candidates copied into the evolver's archive/
@@ -201,11 +203,16 @@ def archive_versions(view: dict[str, Any], incumbent: Harness,
 
 def known_versions(view: dict[str, Any], incumbent: Harness, prior: Sequence[dict[str, Any]] = ()) -> dict[str, str]:
     """Behavior digest -> label of every version that will not run again: the seed, the incumbent, every candidate
-    compared in a finished round of this run (the loop's ``State.tried``) and of the ``prior`` runs on the same
-    training tasks. Running a compared version again only retests it until it passes by chance."""
+    compared in a finished round of this run (the loop's ``State.tried``) and of the ``prior`` runs on exactly
+    the same training tasks. Running a compared version again on the same tasks only retests it until it passes
+    by chance. A version compared on fewer tasks (a prior run on part of this run's training tasks) may run once
+    here: the test on more tasks is a stronger one, as in staged evaluation (the Darwin Gödel Machine evaluates a
+    promising agent on more tasks), and once compared here it is known like any other."""
 
     known = {view["seed"].get("behavior") or "": "起点版本"}
     for other in prior:
+        if not same_tasks(view, other):
+            continue
         for round_, candidate in _compared(other, finished_only=True):
             if candidate.get("behavior"):
                 label = version_label(other["run_id"], round_["generation"], candidate["name"], current=view["run_id"])
@@ -252,12 +259,19 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
                    incumbent: str = "") -> str:
     """``work/archive/README.md``: what each archived version is and how it did."""
 
+    ours = len((view.get("suite") or {}).get("train") or [])
+    fewer = "、".join(f"`{other['run_id']}`" for other in prior if not same_tasks(view, other))
     lines = ["# 存档：以往比较过的版本", "",
              "每个目录是一个以往版本的完整副本（只读参考）：`g2b` 这样的是本次运行的候选，`35ad33-g1b` 这样带前缀的来自"
-             "训练任务完全相同的其他运行（前缀是运行编号的开头）。新候选可以从其中任何一个出发：调用 "
+             "其他运行（前缀是运行编号的开头），它们的训练任务都在本次之内。新候选可以从其中任何一个出发：调用 "
              "`reset_candidate(name, base)` 把 `candidates/<name>/` 重置为它的副本再修改，也可以把两个版本在不同任务上"
-             "有效的部分合到一个候选里。比较对象始终是在任版本；与比较过的版本内容相同的候选不会运行。"
-             "下表的增益是相对它当时的在任版本算的，“当时的在任”一列标出它是否就是本次的在任版本；"
+             "有效的部分合到一个候选里。比较对象始终是在任版本。与本次或训练任务相同的运行里比较过的版本内容相同的候选"
+             "不会运行。"
+             + (f"来自训练任务比本次少的运行（{fewer}）的版本只在那几个任务上比较过，"
+                f"可以原样在本次的 {ours} 个训练任务上再比较一次：任务多了，以前分不清的小增益可能分得清。"
+                if fewer else "")
+             + "下表的增益是相对它当时的在任版本、在当时的训练任务上算的，"
+             "“当时的在任”一列标出它是否就是本次的在任版本；"
              "本次运行的细节见 `evidence/archive.md`，其他运行见 `evidence/prior_runs.md`。", "",
              "| 目录 | 摘要 | 当时的结果 | 好于当时在任的任务 | 当时的在任 |", "|---|---|---|---|---|"]
     by_label = {version_label(other["run_id"], round_["generation"], candidate["name"], current=view["run_id"]):
@@ -676,11 +690,12 @@ def _archive_rows(archived: dict[str, Harness]) -> list[str]:
         return ["还没有比较过的候选，`archive/` 是空的；候选从在任版本出发。", ""]
     return ["`archive/` 里是以往比较过的版本的完整副本（`archive/README.md` 列出每个版本当时的结果）："
             + "、".join(f"`{label}`" for label in archived) + "。"
-            "`g2b` 这样的是本次运行的候选，带前缀的来自训练任务完全相同的其他运行。"
+            "`g2b` 这样的是本次运行的候选，带前缀的来自训练任务都在本次之内的其他运行。"
             "候选不必从在任版本出发：没被采纳、但在多数任务上好于当时在任版本的候选，常常是更好的起点。"
             "`reset_candidate(name, base)` 把 `candidates/<name>/` 重置为在任版本或某个存档版本，再在上面修改；"
-            "也可以把两个版本在不同任务上有效的部分合进一个候选。比较对象始终是在任版本，"
-            "与比较过的版本内容完全相同的候选不会运行。",
+            "也可以把两个版本在不同任务上有效的部分合进一个候选。比较对象始终是在任版本。"
+            "与在同样的训练任务上比较过的版本内容完全相同的候选不会运行；只在更少的任务上比较过的版本"
+            "（`archive/README.md` 写明是哪些）可以原样提交，在本次的全部训练任务上再比较一次。",
             ""]
 
 
@@ -690,6 +705,21 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
           deadline: float, archived: dict[str, Harness] | None = None) -> str:
     gates = suite.gates
     confidence = adjusted_confidence(gates.confidence, len(names))
+    critical = signed_rank_critical(len(tasks), (1 - confidence) / 2) if gates.test == "signed_rank" else -1
+    if len(tasks) < 3:
+        interval_text = "任务少于 3 个时区间由分层自助法给出（依次重抽任务、回合和天），只反映任务内的随机差异。"
+        rank_rule = ""
+    elif critical >= 0:
+        interval_text = ("区间是各任务增益的符号秩区间（Wilcoxon 符号秩检验对应的 Hodges–Lehmann 区间）：只看每个任务"
+                         "是变好还是变差、变化的大小在各任务里排第几，不看具体差多少。所以一个任务上特别大的增益不会把区间"
+                         "拉宽，但几乎每个任务都要变好；平均增益（条件 1）仍按各任务增益的平均算。")
+        worse = "在所有任务里最小" if critical == 1 else f"是最小的 {critical} 个之一"
+        rank_rule = (f"这时要 {len(tasks)} 个训练任务全部更好" if critical == 0 else
+                     f"这时要 {len(tasks)} 个训练任务全部更好，或者变差的任务按变化大小（绝对值从小到大）排的名次加起来"
+                     f"不超过 {critical}，例如只有一个任务变差、且它的变化{worse}")
+    else:
+        interval_text = "区间是各任务增益的 t 区间，回合间和任务间的差异都会让它变宽。"
+        rank_rule = ""
     ends = time.strftime("%Y-%m-%d %H:%M", time.localtime(clock.wall(deadline)))
     pinned = (f"本次运行把内循环的模型固定为 `{model}`，修改 `model` 不起作用。" if model
               else f"在任版本用 `{incumbent.agent.model}`；可以改，但更强的模型也更贵、更慢。")
@@ -720,13 +750,12 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
         "",
         f"本代每个通过检查的候选和在任版本在每个训练任务上各跑 {repeats} 个回合，按任务交替排队、预算相同，"
         "看到的专家意见也相同（本代开始时账本里的内容）。候选 − 在任的增益按任务配对，"
-        + ("区间是各任务增益的 t 区间，回合间和任务间的差异都会让它变宽。" if len(tasks) >= 3 else
-           "任务少于 3 个时区间由分层自助法给出（依次重抽任务、回合和天），只反映任务内的随机差异。")
-        + "采纳需要同时满足：",
+        + interval_text + "采纳需要同时满足：",
         "",
         f"1. 各任务平均增益大于 {gates.min_delta}；",
         f"2. 区间下限大于 0（置信度按实际比较的候选数 K 做 Bonferroni 调整，为 1 − {1 - gates.confidence:.2g}/K："
-        f"{len(names)} 个候选都通过检查时是 {confidence:.1%}，即单侧 {(1 - confidence) / 2:.2%}）；",
+        f"{len(names)} 个候选都通过检查时是 {confidence:.1%}，即单侧 {(1 - confidence) / 2:.2%}"
+        + (f"；{rank_rule}" if rank_rule else "") + "）；",
         f"3. 没有任务的损失超过 {gates.task_cap} 且它自己的 {gates.confidence:.0%} 区间整体低于 0"
         "（两个版本在这个任务上都至少有 2 个回合时才判断：只有一个回合时区间不含回合间的随机差异）。",
         "",
@@ -807,7 +836,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
                                     encoding="utf-8")
     fork(incumbent, work / "incumbent")
     with Ledger(ledger_path) as ledger:
-        prior = same_task_runs(ledger, view)
+        prior = related_runs(ledger, view)
     archived = archive_versions(view, incumbent, prior)
     for label, version in archived.items():
         fork(version, work / "archive" / label)
