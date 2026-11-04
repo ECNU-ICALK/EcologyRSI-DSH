@@ -15,16 +15,20 @@ with a ``baseURL`` and a ``models`` list can run, because their replies are
 assembled into trajectories; other routes are listed with the reason they
 cannot. Settings are read with DSH's own YAML parser (a ``node`` next to
 ``dsh``), again whenever the file changes. Settings can list a model the key
-may not use, so ``probe`` sends one tiny request before a run starts.
+may not use, so ``probe`` sends one tiny request before a run starts;
+``answers`` sends it during a run, to tell an outage from one failed session.
 """
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -161,6 +165,12 @@ def routes() -> dict[str, Route]:
     return found
 
 
+def canonical(ref: str) -> str:
+    """``provider/model`` of a reference (``ModelError`` when it is not one): one name per model."""
+
+    return "/".join(split(ref))
+
+
 def split(ref: str) -> tuple[str, str]:
     """``(provider, model)`` of a reference; a bare DeepSeek id is deepseek-official's."""
 
@@ -234,16 +244,7 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
     """
 
     route, model = resolve(ref)
-    if not has_secret(route.key_env):
-        raise ModelError(f"{route.provider}: no {route.key_env} in the environment or DSH's credential store")
-    # streamed: the status arrives before any (possibly slow) reasoning, and the status is all this asks for
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16,
-                       "stream": True, "tools": [PROBE_TOOL]}).encode()
-    request = urllib.request.Request(route.base_url.rstrip("/") + "/chat/completions", data=body, method="POST",
-                                     headers={"Content-Type": "application/json", **route.headers,
-                                              "Authorization": f"Bearer {resolve_secret(route.key_env)}"})
-    proxy = os.environ.get("ECOGYM_UPSTREAM_PROXY")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {}))
+    request, opener = _test_request(route, model)
     try:
         with opener.open(request, timeout=timeout):
             pass  # accepted: closing drops the rest of the stream
@@ -256,6 +257,84 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
         return f"test request answered {error.code}: {detail}"
     except (OSError, ValueError) as error:
         return f"test request failed: {type(error).__name__}: {error}"
+
+
+def _test_request(route: Route, model: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector]:
+    """One tiny streamed chat request with one tool, as every agent call carries, and the opener to send it."""
+
+    if not has_secret(route.key_env):
+        raise ModelError(f"{route.provider}: no {route.key_env} in the environment or DSH's credential store")
+    # streamed: the status arrives before any (possibly slow) reasoning
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16,
+                       "stream": True, "tools": [PROBE_TOOL]}).encode()
+    request = urllib.request.Request(route.base_url.rstrip("/") + "/chat/completions", data=body, method="POST",
+                                     headers={"Content-Type": "application/json", **route.headers,
+                                              "Authorization": f"Bearer {resolve_secret(route.key_env)}"})
+    proxy = os.environ.get("ECOGYM_UPSTREAM_PROXY")
+    return request, urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}
+                                                                            if proxy else {}))
+
+
+ANSWER_BYTES = 65_536  # read at most this much of a test reply
+
+
+def _object(text: str) -> dict[str, Any] | None:
+    with contextlib.suppress(ValueError):
+        value = json.loads(text)
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def answers(ref: str, *, timeout: float = 30.0) -> tuple[str, str]:
+    """Whether the model answers a tiny request now: ``("ok" | "down" | "refused", what happened)``.
+
+    Stricter than ``probe``: the reply must carry a choice, streamed (or as one JSON object from a provider that
+    ignores ``stream``), within ``timeout`` seconds in all; on 2026-11-02 a gateway answered 200 with an empty body
+    for an hour. ``refused``: no wait can help (401, 403 or 404, an unknown route or model, no key); ``down``:
+    anything else (5xx, 429, network errors, empty or slow replies). The loop asks this after an episode or an
+    evolver got no reply, to tell an outage (wait for the service) from one failed session (retry it). Never
+    raises.
+    """
+
+    started = time.monotonic()
+    try:
+        route, model = resolve(ref)
+        request, opener = _test_request(route, model)
+        with opener.open(request, timeout=timeout) as response:
+            lines: list[bytes] = []
+            seen, streamed, problem = 0, False, ""
+            for raw in response:
+                seen += len(raw)
+                if seen > ANSWER_BYTES:
+                    break
+                if time.monotonic() - started > timeout:  # each read has its own timeout; the reply as a whole too
+                    return "down", f"no choice within {timeout:.0f} seconds"
+                lines.append(raw)
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                streamed = True
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = _object(data)
+                if chunk and chunk.get("choices"):
+                    return "ok", "ok"
+                if chunk and chunk.get("error") and not problem:
+                    problem = _message(data)
+        text = b"".join(lines).decode("utf-8", "replace")
+        if not streamed and (_object(text) or {}).get("choices"):
+            return "ok", "ok"
+        if not text.strip():
+            return "down", "the reply was empty"
+        return "down", f"the reply had no choice ({problem or _message(text)})"
+    except urllib.error.HTTPError as error:
+        detail = f"answered {error.code}: {_message(error.read(4000).decode('utf-8', 'replace'))}"
+        return ("refused" if error.code in PROBE_REFUSED else "down"), detail
+    except (ModelError, LookupError) as error:  # no such route or model, no key (SecretMissing is a LookupError)
+        return "refused", f"{type(error).__name__}: {error}"[:300]
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        return "down", f"{type(error).__name__}: {error}"[:300]
 
 
 def describe() -> dict[str, Any]:
@@ -277,5 +356,5 @@ def describe() -> dict[str, Any]:
     return {"routes": items, "dsh_default": default, "settings": str(settings_path()), "error": error}
 
 
-__all__ = ["DEEPSEEK", "DEEPSEEK_KEY", "DEEPSEEK_URL", "ModelError", "Route", "check", "describe", "dsh_settings",
-           "probe", "resolve", "routes", "settings_path", "split"]
+__all__ = ["DEEPSEEK", "DEEPSEEK_KEY", "DEEPSEEK_URL", "ModelError", "Route", "answers", "canonical", "check",
+           "describe", "dsh_settings", "probe", "resolve", "routes", "settings_path", "split"]

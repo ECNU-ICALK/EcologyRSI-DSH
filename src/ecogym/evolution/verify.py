@@ -19,14 +19,25 @@
   verification keeps what it finished, and judges again only what this run
   claimed without a result (no score was ever revealed for those). A result
   recorded by another run for the same version is reused.
+* ``check_adoptions``: each adoption of a run against the version it
+  replaced, on the training tasks' ``validation`` period, with the programs
+  the comparison used (judged once per version, task and stage, as above).
+  The loop runs it after every adopting round. People read the result; the
+  evolver never does, and ``final_test`` stays for the verification above.
+
+A run must have finished to be verified; a stopped one can be finished where
+it is (``loop.finish_run``).
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,7 +48,7 @@ import numpy as np
 from ..episodes.agent import Cancelled
 from ..episodes.history import fold_episode
 from ..episodes.judge import file_digest, judge_program, load_predictions, reference_scores, save_predictions
-from ..episodes.providers import split as split_model
+from ..episodes.providers import canonical
 from ..episodes.runner import EpisodeConfig, run_episode
 from ..episodes.sandbox import discover_runtime, ecogym_home, scratch_root
 from ..episodes.trajectory import extract_submission
@@ -76,7 +87,7 @@ def holdout_conditions(config: EvolveConfig) -> dict[str, Any]:
     other conditions runs again instead of reusing an episode that measured something else (on 2026-11-01 the
     seed's 4-minute deepseek-v4-flash episode on Sonoma, from the smoke run, stood in an 8-minute pjlab one)."""
 
-    model = "/".join(split_model(config.model)) if config.model else None
+    model = canonical(config.model) if config.model else None
     return {"model": model, "minutes": float(config.minutes), "tokens": int(config.tokens)}
 
 
@@ -87,12 +98,15 @@ def _finished_view(ledger_path: Path, run_id: str) -> dict[str, Any]:
         raise KeyError(f"no evolution run {run_id}")
     view = fold(events)
     if view["status"] != "finished":
-        raise ValueError(f"{run_id} has not finished (status {view['status']})")
+        raise ValueError(f"{run_id} has not finished (status {view['status']}); a stopped run can be ended where it "
+                         "is first (ecogym evolve finish)")
     return view
 
 
 def versions(view: dict[str, Any]) -> list[tuple[str, str]]:
-    seed, final = view["seed"]["digest"], view["incumbent"]
+    """The starting and the final version (the one ``evolve_finished`` recorded) of a run."""
+
+    seed, final = view["seed"]["digest"], (view.get("result") or {}).get("final") or view["incumbent"]
     return [("seed", seed)] if final == seed else [("seed", seed), ("final", final)]
 
 
@@ -139,13 +153,17 @@ def complete(body: dict[str, Any] | None) -> bool:
                for version in (body.get("versions") or {}).values() for task in body.get("tasks") or [])
 
 
-def _compare(evaluations: dict[str, dict[str, Evaluation]], gates: Any, seed: Any) -> dict[str, Any] | None:
-    if set(evaluations) != {"seed", "final"}:
+def _compare(evaluations: dict[str, dict[str, Evaluation]], gates: Any, seed: Any,
+             labels: tuple[str, str] = ("final", "seed")) -> dict[str, Any] | None:
+    """``labels[0]`` against ``labels[1]`` on the tasks both have, by the suite's gates."""
+
+    after, before = labels
+    if set(evaluations) != {after, before}:
         return None
-    tasks = sorted(set(evaluations["seed"]) & set(evaluations["final"]))
+    tasks = sorted(set(evaluations[before]) & set(evaluations[after]))
     if not tasks:
         return None
-    pairs = [TaskPair(task, (evaluations["final"][task],), (evaluations["seed"][task],),
+    pairs = [TaskPair(task, (evaluations[after][task],), (evaluations[before][task],),
                       group=task_spec(task).dataset) for task in tasks]
     return compare_suite(pairs, gates, seed).to_dict()
 
@@ -277,64 +295,12 @@ def verify_sealed(ledger_path: Path, run_id: str, stage: str, *,
         for task_id, entry in ((holdout.get("versions") or {}).get(label, {}).get("episodes") or {}).items():
             if entry.get("status") in SCORED_STATUSES:
                 sources[label][task_id] = entry
-    runtime = discover_runtime()
-    benches: dict[str, Bench] = {}
     tag = run_id.partition(":")[2] or run_id
-    store = ecogym_home() / "verifications" / tag / stage
-    store.mkdir(parents=True, exist_ok=True)
-    results: dict[str, dict[str, dict[str, Any]]] = {label: {} for label in sources}
-    evaluations: dict[str, dict[str, Evaluation]] = {}
-    with Ledger(ledger_path) as ledger:
-        judged = _judged(ledger)
-    for label, harness in versions(view):
-        for task_id, entry in sorted(sources[label].items()):
-            if cancel is not None and cancel.is_set():
-                raise Cancelled("the verification was cancelled")
-            bench = _open(task_id, benches)
-            if stage == "final_test":
-                validated = judged.get(exposure_key(bench, harness, "validation", SEALED))
-                if validated is None:
-                    continue  # final_test only follows a recorded validation result
-                entry = {"episode": validated["episode"]}  # the very program that was validated
-            key = exposure_key(bench, harness, stage, SEALED)
-            access = SealedAccess(stage, key)
-            if key in judged:  # this version met this task's stage before: its one result stands
-                result = {key_: value for key_, value in judged[key].items()
-                          if key_ not in ("stage", "version", "harness", "task", "run_id")}
-                result["reused"] = judged[key]["run_id"] != run_id or bool(result.get("reused"))
-                results[label][task_id] = result
-                evaluations.setdefault(label, {})[task_id] = load_predictions(
-                    Path(result["predictions"]), bench, bench.stage(stage, sealed=access),
-                    expect=result.get("predictions_digest"))
-                continue
-            with Ledger(ledger_path) as ledger:
-                if not ledger.claim_exposure(key, task=task_id, stage=stage, method=harness, run_id=run_id):
-                    claim = next((item for item in ledger.exposures(task=task_id) if item["key"] == key), {})
-                    if claim.get("run_id") != run_id:
-                        raise PermissionError(f"{label} {harness[:12]} on {task_id} was claimed for {stage} by "
-                                              f"{claim.get('run_id')}, which has no result yet; verify that run first")
-                    # claimed by this run before an interruption, never recorded: no score was revealed
-                record = fold_episode(ledger.events(entry["episode"]))
-            trajectory = Path(((record.get("finished") or {}).get("trajectory") or {}).get("dir", ""))
-            scratch = scratch_root() / f"seal-{uuid.uuid4().hex[:12]}"
-            try:
-                program = extract_submission(trajectory, record.get("scored"), scratch / "program")
-                report, evaluation = judge_program(bench, program, stage, runtime, limits=config.limits,
-                                                   sealed=access, cancel=cancel)
-            finally:
-                subprocess.run(["rm", "-r", "-f", str(scratch)], check=False)
-            path = save_predictions(store / f"{label}-{task_id.replace(':', '_')}.npz", bench, evaluation)
-            result = {
-                "episode": entry["episode"], "status": report["status"], "score": report["score"],
-                "interval": report["interval"], "coverage": report["coverage"], "origins": report["origins"],
-                "cells": report["cells"], "predictions": str(path), "predictions_digest": file_digest(path),
-                "exposure_key": key, "judged_at": time.time(),
-            }
-            with Ledger(ledger_path) as ledger:
-                ledger.append(run_id, "sealed_task", {"stage": stage, "version": label, "harness": harness,
-                                                      "task": task_id, **result})
-            results[label][task_id] = result
-            evaluations.setdefault(label, {})[task_id] = evaluation
+    results, evaluations = _seal(ledger_path, run_id, stage,
+                                 [(label, harness, sources[label]) for label, harness in versions(view)],
+                                 limits=config.limits, store=ecogym_home() / "verifications" / tag / stage,
+                                 filename=lambda label, harness, task_id: f"{label}-{task_id.replace(':', '_')}.npz",
+                                 cancel=cancel)
     with Ledger(ledger_path) as ledger:
         body = {"stage": stage,
                 "versions": {label: {"digest": harness, "tasks": results[label]} for label, harness in versions(view)},
@@ -346,4 +312,199 @@ def verify_sealed(ledger_path: Path, run_id: str, stage: str, *,
     return body
 
 
-__all__ = ["HOLDOUT", "SEALED", "complete", "exposure_key", "verify_holdout", "verify_sealed", "versions"]
+def _seal(ledger_path: Path, run_id: str, stage: str,
+          plan: list[tuple[str, str, dict[str, dict[str, Any]]]], *, limits: Any, store: Path,
+          filename: Callable[[str, str, str], str], cancel: threading.Event | None = None
+          ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, Evaluation]]]:
+    """Judge the programs of ``plan`` ((label, harness, task -> the episode that submitted it)) on a sealed stage,
+    once per (harness, task, stage) across all runs: a result recorded before, by any run, is reused (whichever
+    program was judged first stands for the version: a final version checked when it was adopted keeps that
+    check's result). Each new result is recorded as soon as it is judged (``sealed_task``). One process at a time
+    judges a run's stage (``_stage_lock``), so this run's own claims without a result, left by an interruption,
+    are judged again by nobody else meanwhile. Results and evaluations by label and task."""
+
+    tag = run_id.partition(":")[2] or run_id
+    with _stage_lock(ecogym_home() / "verifications" / tag / f"{stage}.lock", run_id, stage):
+        return _seal_locked(ledger_path, run_id, stage, plan, limits=limits, store=store, filename=filename,
+                            cancel=cancel)
+
+
+@contextlib.contextmanager
+def _stage_lock(path: Path, run_id: str, stage: str) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PermissionError(f"another process is judging {run_id} on {stage}; try again when it is done") \
+                from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _seal_locked(ledger_path: Path, run_id: str, stage: str,
+                 plan: list[tuple[str, str, dict[str, dict[str, Any]]]], *, limits: Any, store: Path,
+                 filename: Callable[[str, str, str], str], cancel: threading.Event | None = None
+                 ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, Evaluation]]]:
+    runtime = discover_runtime()
+    benches: dict[str, Bench] = {}
+    store.mkdir(parents=True, exist_ok=True)
+    results: dict[str, dict[str, dict[str, Any]]] = {label: {} for label, _, _ in plan}
+    evaluations: dict[str, dict[str, Evaluation]] = {}
+    for label, harness, sources in plan:
+        for task_id, entry in sorted(sources.items()):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("the verification was cancelled")
+            bench = _open(task_id, benches)
+            with Ledger(ledger_path) as ledger:  # read again for every task: another run may have judged it since
+                judged = _judged(ledger)
+            if stage == "final_test":
+                validated = judged.get(exposure_key(bench, harness, "validation", SEALED))
+                if validated is None:
+                    continue  # final_test only follows a recorded validation result
+                entry = {"episode": validated["episode"]}  # the very program that was validated
+            key = exposure_key(bench, harness, stage, SEALED)
+            access = SealedAccess(stage, key)
+            if key in judged:  # this version met this task's stage before: its one result stands
+                result = {key_: value for key_, value in judged[key].items()
+                          if key_ not in ("stage", "version", "harness", "task", "run_id")}
+                result["reused"] = judged[key]["run_id"] != run_id or bool(result.get("reused"))
+                result["judged_as"] = judged[key].get("version")  # e.g. "adopted": judged by an adoption check
+                results[label][task_id] = result
+                evaluations.setdefault(label, {})[task_id] = load_predictions(
+                    Path(result["predictions"]), bench, bench.stage(stage, sealed=access),
+                    expect=result.get("predictions_digest"))
+                continue
+            with Ledger(ledger_path) as ledger:
+                if not ledger.claim_exposure(key, task=task_id, stage=stage, method=harness, run_id=run_id):
+                    claim = next((item for item in ledger.exposures(task=task_id) if item["key"] == key), {})
+                    if claim.get("run_id") != run_id:
+                        other = claim.get("run_id")
+                        raise PermissionError(
+                            f"{label} {harness[:12]} on {task_id} was claimed for {stage} by {other}, which has no "
+                            f"result yet (it was interrupted); complete that first: `ecogym evolve check-adoptions "
+                            f"{other}` if it was an adoption check, else verify {other} on {stage}")
+                    # claimed by this run before an interruption, never recorded: no score was revealed
+                record = fold_episode(ledger.events(entry["episode"]))
+            trajectory = Path(((record.get("finished") or {}).get("trajectory") or {}).get("dir", ""))
+            scratch = scratch_root() / f"seal-{uuid.uuid4().hex[:12]}"
+            try:
+                program = extract_submission(trajectory, record.get("scored"), scratch / "program")
+                report, evaluation = judge_program(bench, program, stage, runtime, limits=limits,
+                                                   sealed=access, cancel=cancel)
+            finally:
+                subprocess.run(["rm", "-r", "-f", str(scratch)], check=False)
+            path = save_predictions(store / filename(label, harness, task_id), bench, evaluation)
+            result = {
+                "episode": entry["episode"], "status": report["status"], "score": report["score"],
+                "interval": report["interval"], "coverage": report["coverage"], "origins": report["origins"],
+                "cells": report["cells"], "predictions": str(path), "predictions_digest": file_digest(path),
+                "exposure_key": key, "judged_at": time.time(),
+            }
+            with Ledger(ledger_path) as ledger:
+                ledger.append(run_id, "sealed_task", {"stage": stage, "version": label, "harness": harness,
+                                                      "task": task_id, **result})
+            results[label][task_id] = result
+            evaluations.setdefault(label, {})[task_id] = evaluation
+    return results, evaluations
+
+
+ADOPTION_STAGE = "validation"  # final_test stays untouched until the run's own verification
+
+
+def unchecked(view: dict[str, Any]) -> list[int]:
+    """The generations whose adoption has no check recorded without an error."""
+
+    done = {item.get("generation") for item in view.get("adoption_checks", []) if not item.get("error")}
+    return [item["generation"] for item in view["adoptions"] if item["generation"] not in done]
+
+
+def adoption_sources(view: dict[str, Any], generation: int) -> tuple[str, str, dict[str, dict[str, Any]],
+                                                                     dict[str, dict[str, Any]]] | None:
+    """The version adopted in ``generation`` and the incumbent it replaced, with the programs to judge for each:
+    the adopted candidate's episodes of that round, and the replaced incumbent's latest episodes up to that round
+    (the ones the comparison used), one per training task. None when the generation adopted nothing.
+
+    A version judged on the stage before keeps that result (``_seal``): the incumbent replaced in a later
+    generation was judged when it was adopted, so its check uses the programs of its own adoption."""
+
+    last = {}
+    for round_ in view["rounds"]:
+        last[round_["generation"]] = round_
+    round_ = last.get(generation)
+    if not round_ or not round_.get("finished") or not round_.get("adopted"):
+        return None
+    adopted = round_["incumbent_after"]
+    parent = round_["incumbent"]
+    mine: dict[str, dict[str, Any]] = {}
+    theirs: dict[str, dict[str, Any]] = {}
+    for entry in round_["episodes"]:
+        if (entry.get("role") == "candidate" and entry.get("candidate") == round_["adopted"]
+                and entry.get("status") in SCORED_STATUSES and entry.get("episode")):
+            mine[entry["task"]] = entry
+    for key in sorted(last):
+        if key > generation:
+            break
+        for entry in last[key]["episodes"]:
+            if (entry.get("role") == "incumbent" and entry.get("harness") == parent
+                    and entry.get("status") in SCORED_STATUSES and entry.get("episode")):
+                theirs[entry["task"]] = entry  # later rounds overwrite: the latest program per task
+    return parent, adopted, theirs, mine
+
+
+def check_adoptions(ledger_path: Path, run_id: str, *, generations: list[int] | None = None,
+                    cancel: threading.Event | None = None) -> list[dict[str, Any]]:
+    """Each adoption of a run (or those of ``generations``) against the incumbent it replaced, on the training
+    tasks' sealed ``validation`` period, where no adoption was checked yet; the new ``adoption_checked`` bodies.
+
+    The gate adopts on the training tasks' hidden period, and a run adopts many small changes chosen on that one
+    period: their sum can be partly selection on its noise. The later, sealed period was looked at by nobody, so
+    each adoption is measured there once: only the programs are judged again (no episodes), every version meets
+    each task's stage once across all runs (results are reused), and ``final_test`` is left for the run's own
+    verification. The evolver never sees these results (the evidence never reads them); people do, in the panel."""
+
+    with Ledger(ledger_path) as ledger:
+        events = ledger.events(run_id)
+    if not events:
+        raise KeyError(f"no evolution run {run_id}")
+    view = fold(events)
+    config = EvolveConfig.from_dict(view["config"])
+    gates = suite_spec(config.suite).gates
+    wanted = [generation for generation in unchecked(view) if generations is None or generation in generations]
+    tag = run_id.partition(":")[2] or run_id
+    bodies = []
+    for generation in wanted:
+        found = adoption_sources(view, generation)
+        if found is None:
+            continue
+        parent, adopted, theirs, mine = found
+        tasks = sorted(set(theirs) & set(mine))
+        body: dict[str, Any] = {"generation": generation, "digest": adopted, "parent": parent,
+                                "stage": ADOPTION_STAGE, "tasks": tasks}
+        try:
+            results, evaluations = _seal(
+                ledger_path, run_id, ADOPTION_STAGE,
+                [("parent", parent, {task: theirs[task] for task in tasks}),
+                 ("adopted", adopted, {task: mine[task] for task in tasks})],
+                limits=config.limits, store=ecogym_home() / "verifications" / tag / ADOPTION_STAGE / "adoptions",
+                filename=lambda label, harness, task_id: f"{harness[:12]}-{task_id.replace(':', '_')}.npz",
+                cancel=cancel)
+            body.update({"versions": {"parent": {"digest": parent, "tasks": results["parent"]},
+                                      "adopted": {"digest": adopted, "tasks": results["adopted"]}},
+                         "means": _means(results),
+                         "decision": _compare(evaluations, gates, {"adoption": run_id, "generation": generation},
+                                              labels=("adopted", "parent"))})
+        except Cancelled:
+            raise
+        except Exception as error:  # recorded, and tried again by the next check of this run
+            body["error"] = f"{type(error).__name__}: {error}"[:1000]
+        with Ledger(ledger_path) as ledger:
+            ledger.append(run_id, "adoption_checked", body)
+        bodies.append(body)
+    return bodies
+
+
+__all__ = ["ADOPTION_STAGE", "HOLDOUT", "SEALED", "adoption_sources", "check_adoptions", "complete", "exposure_key",
+           "unchecked", "verify_holdout", "verify_sealed", "versions"]

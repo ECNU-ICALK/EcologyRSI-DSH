@@ -48,6 +48,12 @@ def has_secret(name: str) -> bool:
     return bool(os.environ.get(name, "").strip()) or bool(_lookup(name))
 
 
+def in_files(name: str) -> bool:
+    """Whether a credential file holds ``name``: what a process started without this shell's environment sees."""
+
+    return bool(_lookup(name))
+
+
 def resolve_secret(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if value:
@@ -64,4 +70,4 @@ def resolve_secret(name: str) -> str:
     )
 
 
-__all__ = ["SecretMissing", "has_secret", "resolve_secret"]
+__all__ = ["SecretMissing", "has_secret", "in_files", "resolve_secret"]

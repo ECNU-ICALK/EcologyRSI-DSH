@@ -51,6 +51,10 @@ class LedgerError(RuntimeError):
     """The ledger is corrupt or an append was refused."""
 
 
+class LedgerConflict(LedgerError):
+    """A conditional append (``after``) found events of the run newer than the caller had read."""
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
     seq: int
@@ -104,10 +108,19 @@ class Ledger:
             raise
         self._db.execute("COMMIT")
 
-    def append(self, run_id: str, kind: str, body: Any) -> Event:
+    def append(self, run_id: str, kind: str, body: Any, *, after: int | None = None) -> Event:
+        """Append one event. ``after``: only if the run's newest event still has that sequence number
+        (``LedgerConflict`` otherwise), so a decision taken on what one process read cannot interleave with
+        another process's append; checked and written in one transaction."""
+
         text = canonical_json(jsonable(body))
         at = _now()
         with self._transaction() as db:
+            if after is not None:
+                newest = int(db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE run_id = ?",
+                                        (run_id,)).fetchone()[0])
+                if newest != after:
+                    raise LedgerConflict(f"{run_id} changed meanwhile (newest event {newest}, expected {after})")
             row = db.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
             prev = row[0] if row else _GENESIS
             event_hash = _event_hash(prev, run_id, kind, at, text)
@@ -195,4 +208,4 @@ class Ledger:
         ]
 
 
-__all__ = ["SCHEMA_VERSION", "Event", "Ledger", "LedgerError"]
+__all__ = ["SCHEMA_VERSION", "Event", "Ledger", "LedgerConflict", "LedgerError"]

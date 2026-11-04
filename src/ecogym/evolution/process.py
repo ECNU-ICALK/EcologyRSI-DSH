@@ -130,6 +130,11 @@ def _condensed(tool: str, data: dict[str, Any] | None, text: str) -> dict[str, A
                           if key in smoke} if smoke else None}
     if tool == "reset_candidate":
         return {key: data.get(key) for key in ("name", "base", "digest", "summary")}
+    if tool == "screen_templates":  # the per-task scores stay in the transcript
+        return {"incumbent_mean": data.get("incumbent_mean"), "left": data.get("left"),
+                "variants": [{key: item.get(key) for key in ("name", "status", "mean", "gain", "better", "worse",
+                                                              "worst", "problem") if item.get(key) is not None}
+                             for item in data.get("variants") or [] if isinstance(item, dict)]}
     if tool == "task_info":
         return {key: data.get(key) for key in ("minutes_left", "tokens_used", "tokens_left", "candidates")}
     return {key: (cut(value, RESULT_TEXT) if isinstance(value, str) else value) for key, value in data.items()}
@@ -195,7 +200,7 @@ def summarize(threads: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 SESSION_FIELDS = ("status", "seconds", "tokens", "metered_tokens", "llm_calls", "answered_calls", "failed_calls",
-                  "continuations", "error", "upstream_error", "activity")
+                  "continuations", "error", "upstream_error", "stalled", "stalled_seconds", "activity")
 
 
 def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True) -> dict[str, Any] | None:

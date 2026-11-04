@@ -1,6 +1,6 @@
 # 架构：前后端怎样配合
 
-ecogym 0.3.1 · 本文说明浏览器里的「生态进化」面板、DSH 里的插件宿主端和 ecogym 服务怎样分工，一次请求经过哪些层，状态放在哪里，以及加接口、加页面时改哪些地方。进化本身的设计见 [evolution.md](evolution.md)，面板的「介绍」页给出同样的分层和全部接口。
+ecogym 0.3.2 · 本文说明浏览器里的「生态进化」面板、DSH 里的插件宿主端和 ecogym 服务怎样分工，一次请求经过哪些层，状态放在哪里，以及加接口、加页面时改哪些地方。进化本身的设计见 [evolution.md](evolution.md)，面板的「介绍」页给出同样的分层和全部接口。
 
 ## 1. 分层
 
@@ -52,7 +52,7 @@ flowchart TB
 |---|---|---|---|
 | 顶栏 | `EcogymPanel` | `_status`（4 秒）、`expert`（30 秒，待回答问题的数字）、`catalog`（打开时一次，失败按 2–30 秒退避重试） | `_restart`（后端失败或退出时的按钮） |
 | 进化 | `EvolutionList` | `evolutions`（8 秒） | |
-| 运行页 | `EvolutionPage` 与其中的卡片（文字结论 `RunSummary`，成绩图 `ScoreCard`，谱系图 `LineageCard`，每一代的过程 `Process`） | `evolutions/{run}`（运行中 4 秒，否则 30 秒；含 `ancestry`：起点版本是哪些运行进化出来的）、`episodes?evolution={run}&status=running`（运行中 6 秒）、展开在任 Harness 时 `harnesses/{ref}` 和 `harnesses/{起点}/diff/{在任}`；展开一代时 `evolutions/{run}/evolver/{代}?steps=0`（评审看过的材料），候选从存档版本出发时 `harnesses/{出发的版本}/diff/{候选}` | `evolutions/{run}/stop`、`abort`、`resume`、`verify`；`expert/note`（专家建议卡片） |
+| 运行页 | `EvolutionPage` 与其中的卡片（文字结论 `RunSummary`，成绩图 `ScoreCard`，谱系图 `LineageCard`，每一代的过程 `Process`） | `evolutions/{run}`（运行中 4 秒，否则 30 秒；含 `ancestry`：起点版本是哪些运行进化出来的）、`episodes?evolution={run}&status=running`（运行中 6 秒）、展开在任 Harness 时 `harnesses/{ref}` 和 `harnesses/{起点}/diff/{在任}`；展开一代时 `evolutions/{run}/evolver/{代}?steps=0`（评审看过的材料），候选从存档版本出发时 `harnesses/{出发的版本}/diff/{候选}` | `evolutions/{run}/stop`、`abort`、`resume`、`finish`（就此结束停下的运行）、`verify`（留出、封存时期，或 `kind: adoptions` 复核各次采纳）；`expert/note`（专家建议卡片） |
 | 评审会话 | `EvolverPage`（`go({ page: "evolver", id: "运行\|代" })`） | `evolutions/{run}/evolver/{代}`（打开时一次） | |
 | 新建进化 | `NewEvolution` | `catalog` | `models/check`（选中模型时）、`evolutions` |
 | 回合 | `EpisodeList`、`EpisodePage` | `episodes`（8 秒）、`episodes/{id}`（运行中 5 秒）、点「显示每一步」时 `episodes/{id}/transcript` | |

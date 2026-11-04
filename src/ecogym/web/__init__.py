@@ -14,12 +14,22 @@ managed block in the profile's ``cordis.patch.yml`` is removed (after a backup),
 needs a service that no longer exists; a block whose end marker is missing is left for the user.
 ``ecogym dsh uninstall`` takes the plugin out again, and the settings file unless another profile's
 install wrote it.
+
+``ecogym dsh autostart on`` (macOS) makes launchd start ``dsh --profile web --no-open`` at login and again
+after a crash or a kill, independent of any terminal or editor: a DSH started from an agent's shell ended
+with the agent's turn (2026-11-04), and a restart of the machine ended everything. Its output, with the
+web address and token, goes to ``~/.ecogym/dsh-web.log``; ``status`` prints the latest address and ``off``
+stops it and removes the job. The job file and the log are private (0600): the job may carry proxy settings,
+the log holds each start's token. Model keys are not copied into the job; a key that only this shell's
+environment holds is reported, since the DSH launchd starts cannot see it.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +40,11 @@ from typing import Any
 PACKAGE = "@ecogym/dsh-plugin"
 LEGACY_BLOCK = ("# BEGIN ECOLOGYRSI DSH RUNTIME (managed)", "# END ECOLOGYRSI DSH RUNTIME (managed)")
 CARRIED = ("ECOGYM_DATA_ROOT", "ECOGYM_RUNTIME_PYTHON", "ECOGYM_DSH_BIN", "ECOGYM_CACHE_DIR")
+LAUNCH_PATH = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+LAUNCH_CARRIED = ("LANG", "DSH_HOME", "ECOGYM_DSH_SETTINGS", "ECOGYM_CREDENTIALS_FILE", "ECOGYM_UPSTREAM_PROXY",
+                  "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy",
+                  "no_proxy")
+LOG_TAIL = 65_536  # bytes of the log read for the latest address
 
 
 def plugin_dir() -> Path:
@@ -197,5 +212,143 @@ def status(*, profile: str = "web") -> dict[str, Any]:
     }
 
 
-__all__ = ["PACKAGE", "install", "plugin_dir", "profile_dir", "remove_legacy", "settings_path", "status",
-           "uninstall"]
+def launch_agent(profile: str = "web") -> tuple[str, Path]:
+    """The launchd label and job file that start ``profile``."""
+
+    label = f"local.ecogym.dsh.{profile}"
+    return label, Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def autostart_log(profile: str = "web") -> Path:
+    return Path.home() / ".ecogym" / f"dsh-{profile}.log"
+
+
+def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+
+def _others(profile: str) -> list[int]:
+    """Processes serving ``profile`` that this job did not start (they hold its port)."""
+
+    names = f"(--profile {re.escape(profile)}|{re.escape(profile)})" if profile == "web" else \
+        f"--profile {re.escape(profile)}"
+    found = subprocess.run(["pgrep", "-f", f"/dsh {names}( |$)"], capture_output=True, text=True).stdout.split()
+    return [int(pid) for pid in found if pid.isdigit()]
+
+
+def _shell_only_keys() -> list[str]:
+    """API keys of the model routes that only this shell's environment holds (no credential file has them)."""
+
+    from ..episodes import providers
+    from ..kernel.secrets import in_files
+
+    try:
+        names = {route.key_env for route in providers.routes().values() if route.key_env}
+    except (providers.ModelError, OSError):
+        return []
+    return sorted(name for name in names if os.environ.get(name, "").strip() and not in_files(name))
+
+
+def autostart(*, profile: str = "web", enable: bool) -> dict[str, Any]:
+    """Start ``dsh --profile <profile> --no-open`` at login and after a crash (``enable``), or stop it and remove the
+    job. Enabling again rewrites the job and restarts DSH with it."""
+
+    if sys.platform != "darwin":
+        raise RuntimeError("autostart uses launchd, so it works on macOS only")
+    label, plist = launch_agent(profile)
+    target = f"gui/{os.getuid()}/{label}"
+    loaded = _launchctl("print", target).returncode == 0
+    if not enable:
+        if loaded:
+            _launchctl("bootout", target)  # stops the DSH it started
+        removed = plist.is_file()
+        if removed:
+            plist.unlink()
+        return {"label": label, "plist": str(plist), "stopped": loaded, "removed": removed}
+    dsh = str(Path(find_dsh()).absolute())
+    if "--no-open" not in _dsh(dsh, "--profile", profile, "--help"):
+        raise RuntimeError(f"profile {profile} does not serve the web UI (dsh --profile {profile} --help lists no "
+                           "--no-open)")
+    node = shutil.which("node")
+    path = ":".join(dict.fromkeys([str(Path(dsh).parent), *([str(Path(node).parent)] if node else []),
+                                   str(Path.home() / ".local" / "bin"), *LAUNCH_PATH]))
+    env = {"PATH": path, "LANG": os.environ.get("LANG") or "en_US.UTF-8"}
+    env.update({key: os.environ[key] for key in LAUNCH_CARRIED if os.environ.get(key) and key not in env})
+    log = autostart_log(profile)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    job = {
+        "Label": label,
+        "ProgramArguments": [dsh, "--profile", profile, "--no-open"],
+        "EnvironmentVariables": env,
+        "WorkingDirectory": str(Path.home()),
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},  # again after a crash or a kill; not after DSH quits by itself
+        "ThrottleInterval": 30,
+        "AbandonProcessGroup": True,  # the ecogym service finishes its own shutdown: runs end as stopped
+        "ExitTimeOut": 45,
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+    }
+    if loaded:
+        _launchctl("bootout", target)
+        for _ in range(30):  # bootout returns before the job is gone
+            if _launchctl("print", target).returncode != 0:
+                break
+            time.sleep(1)
+    notes = []
+    others = _others(profile)
+    if others:
+        notes.append(f"another DSH serves profile {profile} (pid {', '.join(map(str, others))}); the started one "
+                     "cannot take its port until it stops, and launchd tries again every 30 seconds")
+    shell_only = _shell_only_keys()
+    if shell_only:
+        notes.append(f"{', '.join(shell_only)} is set only in this shell's environment, which the DSH launchd starts "
+                     "does not see; store it in DSH's credential store (~/.dsh/.credentials.yaml) or in "
+                     "$ECOGYM_CREDENTIALS_FILE, or runs that need it will fail")
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    # private: the job may carry proxy settings, and the log gets each start's web address with its token
+    with os.fdopen(os.open(plist, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as handle:
+        plistlib.dump(job, handle)
+    os.chmod(plist, 0o600)
+    with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a", encoding="utf-8") as handle:
+        handle.write(f"---- {time.strftime('%Y-%m-%d %H:%M:%S')} launchd job {label} (re)loaded\n")
+    os.chmod(log, 0o600)
+    done = _launchctl("bootstrap", f"gui/{os.getuid()}", str(plist))
+    if done.returncode != 0:
+        raise RuntimeError(f"launchctl bootstrap {plist} failed: {(done.stdout + done.stderr).strip()[:500]}")
+    return {"label": label, "plist": str(plist), "log": str(log), "program": job["ProgramArguments"], "path": path,
+            "notes": notes}
+
+
+def autostart_status(*, profile: str = "web", since: int = 0) -> dict[str, Any]:
+    """The launchd job of ``profile`` and the latest web address in its log (written after byte ``since``)."""
+
+    label, plist = launch_agent(profile)
+    log = autostart_log(profile)
+    found: dict[str, Any] = {"label": label, "plist": str(plist) if plist.is_file() else None, "loaded": False,
+                             "state": None, "pid": None, "last_exit": None, "log": str(log), "url": None,
+                             "service": None}
+    if sys.platform == "darwin":
+        done = _launchctl("print", f"gui/{os.getuid()}/{label}")
+        if done.returncode == 0:
+            found["loaded"] = True
+            for key, pattern in (("state", r"^\s*state = (.+)$"), ("pid", r"^\s*pid = (\d+)$"),
+                                 ("last_exit", r"^\s*last exit code = (.+)$")):
+                match = re.search(pattern, done.stdout, re.MULTILINE)
+                if match:
+                    found[key] = int(match.group(1)) if key == "pid" else match.group(1).strip()
+    if log.is_file():
+        size = log.stat().st_size
+        with log.open("rb") as handle:
+            handle.seek(max(since, size - LOG_TAIL, 0))
+            lines = handle.read().decode("utf-8", "replace").splitlines()
+        urls = [line.split("dsh web: ", 1)[1].strip() for line in lines if line.startswith("dsh web: http")]
+        ready = [line.strip() for line in lines if "service ready" in line]
+        found["url"] = urls[-1] if urls else None
+        found["service"] = ready[-1] if ready else None
+        found["log_bytes"] = size
+    return found
+
+
+__all__ = ["PACKAGE", "autostart", "autostart_log", "autostart_status", "install", "launch_agent", "plugin_dir",
+           "profile_dir", "remove_legacy", "settings_path", "status", "uninstall"]

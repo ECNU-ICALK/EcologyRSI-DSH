@@ -289,6 +289,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
         threading.Thread(target=watch, name="stdin watch", daemon=True).start()
     threading.Thread(target=service.warm, name="warm up", daemon=True).start()
+    if not args.no_auto_resume:
+        threading.Thread(target=service.auto_resume, name="auto resume", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -403,6 +405,58 @@ def cmd_dsh_status(args: argparse.Namespace) -> int:
     width = max(len(key) for key in result)
     for key, value in result.items():
         print(f"{key:<{width}}  {value}")
+    return 0
+
+
+def cmd_dsh_autostart(args: argparse.Namespace) -> int:
+    from .web import autostart, autostart_log, autostart_status
+
+    if args.action == "status":
+        result = autostart_status(profile=args.profile)
+    else:
+        log = autostart_log(args.profile)
+        before = log.stat().st_size if log.is_file() else 0
+        try:
+            result = autostart(profile=args.profile, enable=args.action == "on")
+        except (RuntimeError, OSError) as error:
+            print(f"ecogym: {error}", file=sys.stderr)
+            return 2
+        if args.action == "on":
+            deadline = time.monotonic() + args.wait
+            while True:  # the address DSH prints once it listens, with this start's token
+                state = autostart_status(profile=args.profile, since=before)
+                if state["url"] or time.monotonic() > deadline:
+                    break
+                time.sleep(2)
+            result["status"] = state
+    if args.json:
+        _print_json(result)
+        return 0
+    if args.action == "off":
+        print(f"{result['label']}: {'stopped' if result['stopped'] else 'was not loaded'}; "
+              f"{'removed ' + result['plist'] if result['removed'] else 'no job file'}")
+        return 0
+    state = result.get("status") or result
+    if args.action == "on":
+        print(f"launchd job {result['label']} ({result['plist']}) starts {' '.join(result['program'])} at login "
+              f"and after a crash")
+        for note in result.get("notes") or []:
+            print(f"  note: {note}")
+    elif not state["plist"]:
+        print(f"no launchd job for profile {args.profile}; `ecogym dsh autostart on` adds it")
+        return 0
+    else:
+        print(f"launchd job {state['label']} ({state['plist']}){'' if state['loaded'] else ', not loaded'}")
+    print(f"  {'running, pid ' + str(state['pid']) if state['pid'] else 'not running'}"
+          f"{'; last exit ' + str(state['last_exit']) if state.get('last_exit') else ''} (log {state['log']})")
+    if state["url"] and state["pid"]:
+        print(f"  open {state['url']}")
+    elif state["url"]:
+        print(f"  last address (DSH is not running now): {state['url']}")
+    elif args.action == "on":
+        print(f"  no web address yet; see {state['log']}")
+    if state.get("service"):
+        print(f"  {state['service']}")
     return 0
 
 
@@ -564,6 +618,14 @@ def _progress(kind: str, body: dict[str, Any]) -> None:
         print(f"{stamp}   adopted {body['name']} {body['digest'][:12]} (gain {body['delta']:+.4f})", flush=True)
     elif kind == "round_finished":
         print(f"{stamp} round {body['generation']} done: {body.get('outcome')}", flush=True)
+    elif kind == "adoption_checked":
+        print(f"{stamp}   round {body.get('generation')} adoption {_adoption_check(body)}", flush=True)
+    elif kind == "outage_started":
+        print(f"{stamp}   {body['model']} gives no reply ({body.get('probe')}); waiting up to "
+              f"{body.get('limit_minutes')} min, no episode starts meanwhile", flush=True)
+    elif kind == "outage_ended":
+        print(f"{stamp}   {body['model']} {'answers again' if body.get('recovered') else 'still gives no reply'} "
+              f"after {body.get('seconds', 0) / 60:.0f} min", flush=True)
 
 
 def cmd_evolve_run(args: argparse.Namespace) -> int:
@@ -571,9 +633,17 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
 
     run_id = None
     if args.resume:
+        from .evolution.loop import RunBusy, claim_resume
+        from .kernel.ledger import LedgerConflict
+
         with Ledger(args.ledger) as ledger:
             run_id = _match(ledger, args.resume, "evolve_started", "evo:")
             config = EvolveConfig.from_dict(fold(ledger.events(run_id))["config"])
+        try:  # recorded before it starts, so no other process continues it too
+            claim_resume(args.ledger, run_id, by="cli", force=args.force)
+        except (ValueError, RunBusy, LedgerConflict) as error:
+            raise SystemExit(f"{error}" + ("; pass --force if it is not" if isinstance(error, RunBusy)
+                                           else "")) from None
     else:
         if not args.suite:
             raise SystemExit("evolve run needs --suite (or --resume RUN)")
@@ -584,7 +654,9 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
                               candidates=args.candidates, repeats=repeats, minutes=args.minutes,
                               tokens=args.tokens, model=args.model, evolver_minutes=args.evolver_minutes,
                               evolver_tokens=args.evolver_tokens, evolver_model=args.evolver_model,
-                              concurrency=args.concurrency, retries=args.retries)
+                              concurrency=args.concurrency, retries=args.retries,
+                              outage_minutes=args.outage_minutes, auto_resume=args.auto_resume,
+                              check_adoptions=not args.no_check_adoptions)
     evolution = Evolution(config, args.ledger, on_event=None if args.json else _progress)
     run_id = run_id or evolution.start(label=args.label)
     first, later = config.episodes_per_round(len(evolution.tasks))
@@ -650,6 +722,11 @@ def cmd_evolve_show(args: argparse.Namespace) -> int:
                   f"{gain}")
             if candidate.get("summary"):
                 print(f"      {candidate['summary'][:160]}")
+        if round_.get("sealed_check"):
+            print(f"  {_adoption_check(round_['sealed_check'])}")
+    if view.get("ended_early"):
+        print(f"\nended early after round {view['result'].get('last_generation')} of "
+              f"{view['result'].get('planned_generations')}")
     verification = view["verification"]
     for name, body in [("holdout", verification["holdout"]), *verification["sealed"].items()]:
         if body:
@@ -685,6 +762,70 @@ def cmd_evolve_verify(args: argparse.Namespace) -> int:
     if decision:
         low, high = decision["interval"]
         print(f"  final - seed: {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}] -> {decision['reason']}")
+    return 0
+
+
+def _adoption_check(body: dict[str, Any]) -> str:
+    """One line on an adoption's check on the training tasks' sealed period."""
+
+    stage = body.get("stage", "validation")
+    if body.get("error"):
+        return f"check on {stage} failed: {body['error'][:200]}"
+    decision = body.get("decision")
+    if not decision:
+        return f"check on {stage}: no task to compare"
+    tasks = decision.get("tasks") or []
+    better = sum(1 for item in tasks if (item.get("delta") or 0) > 0)
+    low, high = decision["interval"]
+    return (f"check on {stage}: adopted - replaced {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}], "
+            f"better on {better}/{len(tasks)} tasks")
+
+
+def _not_running(view: dict[str, Any], force: bool) -> None:
+    from .evolution.loop import stale
+
+    if view["status"] == "running" and not stale(view) and not force:
+        raise SystemExit(f"{view['run_id']} may still be running (owner {view.get('owner') or 'unknown'}, last "
+                         f"event {view['updated_at']}); stop it first, or pass --force if it is not")
+
+
+def cmd_evolve_finish(args: argparse.Namespace) -> int:
+    from .evolution.loop import RunBusy, finish_run
+    from .kernel.ledger import LedgerConflict
+
+    with Ledger(args.ledger) as ledger:
+        run_id = _match(ledger, args.run, "evolve_started", "evo:")
+    try:
+        body = finish_run(args.ledger, run_id, force=args.force)
+    except (ValueError, RunBusy, LedgerConflict) as error:
+        raise SystemExit(f"{error}" + ("; pass --force if it is not" if isinstance(error, RunBusy) else "")) from None
+    if args.json:
+        _print_json({"run_id": run_id, **body})
+        return 0
+    print(f"{run_id} ended after round {body['last_generation']} of {body['planned_generations']}: final "
+          f"{body['final'][:12]} ({body['adoptions']} adoption(s)); it cannot be resumed now\n"
+          f"next: ecogym evolve verify {run_id} --holdout")
+    return 0
+
+
+def cmd_evolve_check_adoptions(args: argparse.Namespace) -> int:
+    from .evolution import fold
+    from .evolution.verify import check_adoptions, unchecked
+
+    with Ledger(args.ledger) as ledger:
+        run_id = _match(ledger, args.run, "evolve_started", "evo:")
+        view = fold(ledger.events(run_id))
+    _not_running(view, args.force)
+    if not args.json:
+        pending = unchecked(view)
+        print(f"{run_id}: {len(pending)} adoption(s) to check" + (f" (generations {pending})" if pending else ""),
+              flush=True)
+    bodies = check_adoptions(args.ledger, run_id)
+    if args.json:
+        _print_json(bodies)
+        return 0
+    for body in bodies:
+        print(f"  round {body['generation']} {body['parent'][:12]} -> {body['digest'][:12]}: {_adoption_check(body)}")
     return 0
 
 
@@ -825,6 +966,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--token", default=None,
                        help="bearer token for every API call (default $ECOGYM_SERVICE_TOKEN); required beyond loopback")
     serve.add_argument("--exit-with-stdin", action="store_true", help="shut down when stdin reaches end of file")
+    serve.add_argument("--no-auto-resume", action="store_true",
+                       help="never resume runs by itself (by default it resumes, every 5 minutes, the runs started "
+                            "with auto_resume that a shutdown, an outage of the model service or a crash stopped)")
     setup = command("setup", cmd_setup, "create the agent runtime (Python with the scientific stack)")
     setup.add_argument("--force", action="store_true", help="rebuild it")
 
@@ -847,6 +991,13 @@ def build_parser() -> argparse.ArgumentParser:
                                   "this shell")
             sub.add_argument("--keep-legacy", action="store_true",
                              help="leave the EcologyRSI plugin block in the profile's cordis.patch.yml")
+    auto = dshs.add_parser("autostart", help="macOS: launchd starts `dsh --profile web --no-open` at login and after "
+                                             "a crash (on), stops it and removes the job (off), or reports it")
+    auto.set_defaults(handler=cmd_dsh_autostart)
+    auto.add_argument("action", choices=("on", "off", "status"))
+    auto.add_argument("--json", action="store_true", help="machine-readable output")
+    auto.add_argument("--profile", default="web", help="a DSH profile that serves the web UI (default web)")
+    auto.add_argument("--wait", type=float, default=90.0, help="seconds `on` waits for the web address (default 90)")
 
     episode = commands.add_parser("episode", help="agent episodes: a DSH agent solves a task, the judge scores it")
     episodes = episode.add_subparsers(dest="episode_command", required=True)
@@ -903,6 +1054,14 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
     start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
     start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
+    start.add_argument("--outage-minutes", type=float, default=120.0,
+                       help="how long a round waits for a model service that stopped answering (0: stop at once)")
+    start.add_argument("--auto-resume", action="store_true",
+                       help="let the service (ecogym serve, the DSH panel) resume the run if it stops for an outage "
+                            "or this process dies (off by default here; on by default for runs the panel starts)")
+    start.add_argument("--no-check-adoptions", action="store_true",
+                       help="do not check each adoption on the training tasks' sealed validation period")
+    start.add_argument("--force", action="store_true", help="--resume even though the ledger says it is running")
     start.add_argument("--label", default="")
     evolve_command("list", cmd_evolve_list, "evolution runs in the ledger")
     evolve_command("show", cmd_evolve_show, "rounds, candidates and decisions of a run").add_argument("run")
@@ -912,6 +1071,14 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--holdout", action="store_true", help="run seed and final harness on the holdout tasks")
     target.add_argument("--sealed", choices=("validation", "final_test"),
                         help="re-judge their programs on a sealed period")
+    end = evolve_command("finish", cmd_evolve_finish,
+                         "end a stopped run where it is (its incumbent becomes the final version), to verify it")
+    end.add_argument("run")
+    end.add_argument("--force", action="store_true", help="even though the ledger says it is running")
+    recheck = evolve_command("check-adoptions", cmd_evolve_check_adoptions,
+                             "check each adoption not checked yet on the training tasks' sealed validation period")
+    recheck.add_argument("run")
+    recheck.add_argument("--force", action="store_true", help="even though the ledger says it is running")
 
     harness = commands.add_parser("harness", help="inspect harness versions")
     harnesses = harness.add_subparsers(dest="harness_command", required=True)

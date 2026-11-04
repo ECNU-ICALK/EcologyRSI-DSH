@@ -16,14 +16,16 @@ call needs ``Authorization: Bearer <token>``. ``close`` stops what the service
 runs (agents and judges included), so evolution runs end as stopped and can be
 resumed; a run still busy at its deadline is recorded as stopped by ``close``
 itself. A run that says running belongs to the process named in its latest
-round (``owner``); it is stale once that process is gone.
+round (``owner``); it is stale once that process is gone. ``auto_resume``
+(started by ``ecogym serve``) resumes, every few minutes, the runs that asked
+for it and stopped for a reason that passes: a shutdown of this service, an
+outage of the model service that is over, or a process that died.
 """
 
 from __future__ import annotations
 
 import hmac
 import json
-import os
 import re
 import socket
 import sys
@@ -50,7 +52,7 @@ from .arena.sealed import exposure_key
 from .data.catalog import dataset_spec
 from .evaluation.harness import Bench
 from .kernel.canonical import jsonable
-from .kernel.ledger import Ledger
+from .kernel.ledger import Ledger, LedgerConflict
 from .protocol.partitions import SEALED_STAGES, STAGES
 from .report import render_run
 from .solvers.base import solver_specs
@@ -63,9 +65,21 @@ SEALED_ORDER = tuple(stage for stage in STAGES if stage in SEALED_STAGES)
 EXPORT_ID = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
 PREVIEW_MESSAGES = 16
 PREVIEW_CHARS = 600
+AUTO_RESUME_DELAY = 60.0  # seconds after the service starts before it first resumes runs by itself
+AUTO_RESUME_EVERY = 300.0  # seconds between its looks at the ledger
+AUTO_RESUME_LIMIT = 12  # automatic resumes of one run; after that it waits for a person
+
+
+def _flag(value: Any) -> bool:
+    """A JSON boolean, or a form's text for one."""
+
+    return value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 EVOLVE_FIELDS = {"harness": str, "generations": int, "candidates": int, "repeats": int, "minutes": float,
                  "tokens": int, "model": str, "evolver_minutes": float, "evolver_tokens": int, "evolver_model": str,
-                 "concurrency": int, "retries": int}
+                 "concurrency": int, "retries": int, "outage_minutes": float, "auto_resume": _flag,
+                 "check_adoptions": _flag}
 HARNESS_TEXT = ("instructions.md", "memory/lessons.md", "harness.toml")
 ARENA = "方法竞技"
 
@@ -121,8 +135,11 @@ ROUTES = (
     Route("POST", "evolutions/{run}/abort", "abort", "进化", "立即中止：正在运行的智能体停下，继续时这一代重跑"),
     Route("POST", "evolutions/{run}/resume", "resume_evolution", "进化",
           "继续停下或中断的运行（{force: true}：仍像在另一个进程里运行时）", status=202, body=True),
+    Route("POST", "evolutions/{run}/finish", "finish_evolution", "进化",
+          "就此结束停下的运行：最后完成的一代之后的在任版本就是最终版本，之后可以验证，不能再继续", body=True),
     Route("POST", "evolutions/{run}/verify", "verify_evolution", "进化",
-          "在后台验证：{kind: holdout} 或 {kind: sealed, stage}", status=202, body=True),
+          "在后台验证：{kind: holdout}、{kind: sealed, stage}，或 {kind: adoptions}"
+          "（还没复核的采纳，在训练任务的封存时期 validation 上复核）", status=202, body=True),
     Route("GET", "episodes", "episodes", "回合",
           "回合列表（?evolution=运行 只看一个运行，&status=running 只看运行中的）", query=("evolution", "status")),
     Route("GET", "episodes/{episode}", "episode", "回合",
@@ -193,16 +210,6 @@ class ApiError(Exception):
         self.status = status
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # it exists and belongs to someone else
-        return True
-    return True
-
-
 class Service:
     def __init__(self, ledger_path: Path, *, token: str | None = None) -> None:
         self.ledger_path = Path(ledger_path)
@@ -219,6 +226,9 @@ class Service:
         self._cancels: dict[str, threading.Event] = {}  # holdout verifications
         self._exporting: dict[str, threading.Thread] = {}
         self._model_checks: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._closing = threading.Event()  # set by close: background loops end
+        self._resume_notes: dict[str, dict[str, Any]] = {}  # run id -> what the last automatic-resume look found
+        self.auto_resuming = False  # whether auto_resume runs in this service
         self.started = datetime.now(UTC)
         Ledger(self.ledger_path).close()  # create the file and schema up front
 
@@ -311,21 +321,12 @@ class Service:
         return thread is not None and thread.is_alive()
 
     def _stale(self, view: dict[str, Any]) -> bool:
-        """Says running, but no thread of this service runs it and its owner process is gone.
+        """Says running, but no thread of this service runs it and its owner process is gone (``loop.stale``);
+        callers check this service's own threads first."""
 
-        Callers check this service's own threads first. Without an owner on this host (older runs, another
-        machine) the run is stale once it has logged nothing for longer than any of its steps can take.
-        """
+        from .evolution.loop import stale
 
-        if view["status"] != "running":
-            return False
-        owner = view.get("owner") or {}
-        if owner.get("host") == socket.gethostname() and isinstance(owner.get("pid"), int):
-            return owner["pid"] == os.getpid() or not _pid_alive(owner["pid"])
-        config = view["config"]
-        quiet = (datetime.now(UTC) - datetime.fromisoformat(view["updated_at"])).total_seconds()
-        longest = max(float(config.get("minutes") or 0), float(config.get("evolver_minutes") or 0)) * 60
-        return quiet > longest * 2 + 1800
+        return stale(view)
 
     def evolution(self, run_id: str) -> dict[str, Any]:
         from .episodes.history import fold_episode
@@ -351,6 +352,7 @@ class Service:
         view["error"] = view.get("error") or self._errors.get(run_id)
         view["task_references"] = references
         view["ensembles"] = self._ensemble_scores(run_id, view)
+        view["resume_plan"] = self.resume_plan(view)
         return view
 
     def evolver_session(self, run_id: str, generation: str, *, steps: str | None = None) -> dict[str, Any]:
@@ -422,45 +424,168 @@ class Service:
     def resume_evolution(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """Continue after the last finished round; the interrupted round starts again."""
 
+        self._resume(run_id, force=bool(body.get("force")), by="user")
+        return {"run_id": run_id, "resumed": True}
+
+    def _resume(self, run_id: str, *, force: bool = False, by: str = "user", why: str | None = None,
+                expect: int | None = None) -> None:
+        """Launch a stopped run again, recorded first (``loop.claim_resume``) so that no other process continues it
+        too. ``expect``: only if the run's newest event is still that one (the automatic resume decided on it)."""
+
         from .evolution import Evolution, EvolveConfig, fold
+        from .evolution.loop import RunBusy, claim_resume
 
         with self._jobs:
+            if self._closing.is_set():  # close() takes its snapshot of the runs under _jobs after setting this
+                raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "the service is shutting down")
             if self._alive(run_id) or self._alive(run_id, verifying=True):
                 raise ApiError(HTTPStatus.CONFLICT, f"{run_id} is already running in this service")
             with Ledger(self.ledger_path) as ledger:
                 events = ledger.events(run_id)
             if not events or events[0].kind != "evolve_started":
                 raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
-            view = fold(events)
-            if view["status"] == "finished":
-                raise ApiError(HTTPStatus.CONFLICT, f"{run_id} has finished")
-            if view["status"] == "running" and not body.get("force") and not self._stale(view):
-                raise ApiError(HTTPStatus.CONFLICT, f"{run_id} may still be running in another process "
-                                                    f"(owner {view.get('owner') or 'unknown'}, last event "
-                                                    f"{view['updated_at']}); resume with force")
-            try:
-                evolution = Evolution(EvolveConfig.from_dict(view["config"]), self.ledger_path)
+            try:  # a config this version cannot run fails before anything is recorded
+                evolution = Evolution(EvolveConfig.from_dict(fold(events)["config"]), self.ledger_path)
             except (KeyError, TypeError, ValueError, OSError) as error:
                 raise ApiError(HTTPStatus.BAD_REQUEST, f"{type(error).__name__}: {error}") from None
+            try:  # the run reads as running in this process from here on, for every other process too
+                claim_resume(self.ledger_path, run_id, by=by, why=why, force=force,
+                             expect=events[-1].seq if expect is None else expect)
+            except (ValueError, RunBusy, LedgerConflict) as error:
+                raise ApiError(HTTPStatus.CONFLICT, f"{error}" + ("; resume with force" if isinstance(error, RunBusy)
+                                                                  else "")) from None
             self._errors.pop(run_id, None)
             self._launch(run_id, evolution)
-        return {"run_id": run_id, "resumed": True}
+
+    def resumable(self, view: dict[str, Any]) -> str | None:
+        """Why the service may resume this run by itself, or None: the run asked for it (``auto_resume``), runs
+        nowhere and stopped for a reason that passes: a shutdown of the service, an outage of the model service,
+        or a process of this machine that is gone (a crash, a restart of the machine)."""
+
+        from .evolution import EvolveConfig
+        from .evolution.loop import stale
+
+        run_id = view["run_id"]
+        if self._alive(run_id) or self._alive(run_id, verifying=True) or view["status"] == "finished" \
+                or view.get("result") is not None:
+            return None
+        try:
+            if not EvolveConfig.from_dict(view["config"]).auto_resume:
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        if sum(1 for item in view.get("resumes", []) if item.get("by") == "auto") >= AUTO_RESUME_LIMIT:
+            return None
+        reason = view.get("stop_reason")
+        if view["status"] == "stopped" and reason == "shutdown":
+            return "shutdown"
+        if view["status"] == "failed" and reason == "service_down":
+            return "service_down"
+        if view["status"] == "running" and (view.get("owner") or {}).get("host") == socket.gethostname() \
+                and stale(view):
+            return "stale"
+        return None
+
+    def resume_stopped(self, *, dry: bool = False) -> list[dict[str, Any]]:
+        """Resume (or, ``dry``, only list) every run ``resumable`` says may go on; a run that stopped for an
+        outage only once its models answer again."""
+
+        from .episodes import providers
+        from .evolution import EvolveConfig, fold
+        from .evolution.loop import run_models
+
+        with Ledger(self.ledger_path) as ledger:
+            views = [fold(ledger.events(run_id)) for run_id in ledger.runs(first="evolve_started")]
+        found = []
+        for view in views:
+            why = self.resumable(view)
+            if why is None:
+                self._resume_notes.pop(view["run_id"], None)
+                continue
+            item: dict[str, Any] = {"run_id": view["run_id"], "why": why, "at": datetime.now(UTC).isoformat()}
+            if why == "service_down":
+                silent = [ref for ref in run_models(EvolveConfig.from_dict(view["config"]), view["seed"]["digest"])
+                          if providers.answers(ref)[0] != "ok"]
+                if silent:
+                    item.update(resumed=False, waiting_for=silent)
+            if "resumed" not in item and dry:
+                item["resumed"] = False
+            elif "resumed" not in item:
+                try:
+                    self._resume(view["run_id"], by="auto", why=why, expect=view["last_seq"])
+                    item["resumed"] = True
+                except ApiError as error:
+                    item.update(resumed=False, error=str(error))
+            self._resume_notes[view["run_id"]] = item
+            found.append(item)
+        return found
+
+    def resume_plan(self, view: dict[str, Any]) -> dict[str, Any] | None:
+        """Whether this service will continue a stopped run by itself, for the panel: why it may, whether its
+        automatic resume is on, how many automatic resumes are left, and what its last look found (the models it
+        waits for, or why it could not resume)."""
+
+        why = self.resumable(view)
+        if why is None:
+            return None
+        used = sum(1 for item in view.get("resumes", []) if item.get("by") == "auto")
+        note = self._resume_notes.get(view["run_id"]) or {}
+        return {"why": why, "enabled": self.auto_resuming, "left": AUTO_RESUME_LIMIT - used,
+                "every_seconds": AUTO_RESUME_EVERY, "checked_at": note.get("at"),
+                "waiting_for": note.get("waiting_for"), "error": note.get("error")}
+
+    def auto_resume(self) -> None:
+        """Every ``AUTO_RESUME_EVERY`` seconds, from ``AUTO_RESUME_DELAY`` after the start: ``resume_stopped``.
+        ``ecogym serve`` runs this in a thread; ``close`` ends it."""
+
+        self.auto_resuming = True
+        if self._closing.wait(AUTO_RESUME_DELAY):
+            return
+        while True:
+            try:
+                for item in self.resume_stopped():
+                    if item.get("resumed"):
+                        print(f"ecogym: resumed {item['run_id']} by itself ({item['why']})", flush=True)
+            except Exception:  # a scan that fails is tried again at the next one
+                traceback.print_exc()
+            if self._closing.wait(AUTO_RESUME_EVERY):
+                return
 
     def abort(self, run_id: str) -> dict[str, Any]:
         with self._jobs:
             evolution, stop = self._evolutions.get(run_id), self._stops.get(run_id)
         if evolution is None or stop is None or not self._alive(run_id):
             raise ApiError(HTTPStatus.NOT_FOUND, f"{run_id} is not running in this service")
+        evolution.stop_reason = "user"
         stop.set()
         evolution.cancel.set()
         return {"run_id": run_id, "aborting": True}
 
+    def finish_evolution(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """End a stopped run where it is (``loop.finish_run``), so its result can be verified."""
+
+        from .evolution.loop import RunBusy, finish_run
+
+        with self._jobs:  # no resume of this service can start in between; other processes: finish_run's checks
+            if self._alive(run_id) or self._alive(run_id, verifying=True):
+                raise ApiError(HTTPStatus.CONFLICT, f"{run_id} is running in this service; stop it first")
+            try:
+                result = finish_run(self.ledger_path, run_id)
+            except KeyError as error:
+                raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from None
+            except (ValueError, RunBusy, LedgerConflict) as error:
+                raise ApiError(HTTPStatus.CONFLICT, str(error)) from None
+            self._errors.pop(run_id, None)
+        return {"run_id": run_id, "finished": True, **result}
+
     def verify_evolution(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
         from .evolution import fold, verify_holdout, verify_sealed
+        from .evolution.verify import check_adoptions
 
         kind, stage = body.get("kind"), body.get("stage")
-        if kind not in ("holdout", "sealed") or (kind == "sealed" and stage not in SEALED_ORDER):
-            raise ApiError(HTTPStatus.BAD_REQUEST, "verify needs kind holdout, or kind sealed with a sealed stage")
+        if kind not in ("holdout", "sealed", "adoptions") or (kind == "sealed" and stage not in SEALED_ORDER):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "verify needs kind holdout, kind sealed with a sealed stage, "
+                                                   "or kind adoptions")
         with self._jobs:  # one at a time: verifications of runs that share a version claim the same exposures
             busy = next((other for other, thread in self._verifying.items() if thread.is_alive()), None)
             if busy is not None:
@@ -468,7 +593,13 @@ class Service:
                                else f"{busy} is being verified; verifications run one at a time")
             with Ledger(self.ledger_path) as ledger:
                 events = ledger.events(run_id)
-            if not events or fold(events)["status"] != "finished":
+            if not events or events[0].kind != "evolve_started":
+                raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
+            view = fold(events)
+            if kind == "adoptions":  # the loop checks between rounds: only a run nobody runs is checked here
+                if self._alive(run_id) or (view["status"] == "running" and not self._stale(view)):
+                    raise ApiError(HTTPStatus.CONFLICT, f"{run_id} is running; it checks its adoptions itself")
+            elif view["status"] != "finished":
                 raise ApiError(HTTPStatus.CONFLICT, f"{run_id} has not finished")
             cancel = self._cancels[run_id] = threading.Event()
 
@@ -476,6 +607,8 @@ class Service:
                 try:
                     if kind == "holdout":
                         verify_holdout(self.ledger_path, run_id, cancel=cancel)
+                    elif kind == "adoptions":
+                        check_adoptions(self.ledger_path, run_id, cancel=cancel)
                     else:
                         verify_sealed(self.ledger_path, run_id, str(stage), cancel=cancel)
                 except Exception as error:
@@ -485,7 +618,7 @@ class Service:
             thread = threading.Thread(target=work, name=f"verify {run_id}", daemon=True)
             self._verifying[run_id] = thread
             thread.start()
-        return {"run_id": run_id, "verifying": kind if kind == "holdout" else stage}
+        return {"run_id": run_id, "verifying": stage if kind == "sealed" else kind}
 
     def _orphaned(self, item: dict[str, Any]) -> bool:
         """Says running, belongs to a run this service does not run, and started before the service did."""
@@ -691,10 +824,14 @@ class Service:
         here, so the ledger never says running for a process that is about to exit.
         """
 
+        self._closing.set()
         with self._jobs:
             stops, cancels = list(self._stops.values()), list(self._cancels.values())
             evolutions = dict(self._evolutions)
             threads = {**self._threads, **{f"verify {key}": value for key, value in self._verifying.items()}}
+        for evolution in evolutions.values():  # a shutdown, not a person: the run may resume by itself
+            if evolution.stop_reason is None:
+                evolution.stop_reason = "shutdown"
         for event in stops:
             event.set()
         for evolution in evolutions.values():
@@ -709,7 +846,8 @@ class Service:
             if run_id in evolutions:
                 with Ledger(self.ledger_path) as ledger:
                     ledger.append(run_id, "evolve_failed", {"error": "the service stopped while a step was still "
-                                                                     "running", "stopped": True})
+                                                                     "running", "stopped": True,
+                                                            "reason": evolutions[run_id].stop_reason})
         return not busy
 
     def _run_view(self, ledger: Ledger, run_id: str) -> dict[str, Any]:
@@ -825,6 +963,8 @@ class Service:
     def stop(self, run_id: str) -> dict[str, Any]:
         if run_id not in self._stops:
             raise ApiError(HTTPStatus.NOT_FOUND, f"{run_id} is not running in this service")
+        if run_id in self._evolutions:
+            self._evolutions[run_id].stop_reason = "user"
         self._stops[run_id].set()
         return {"run_id": run_id, "stopping": True}
 

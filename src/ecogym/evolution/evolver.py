@@ -9,10 +9,13 @@ Workspace, inside the agent sandbox:
                               this run's, the seed)
     work/candidates/<name>/   one editable copy of the incumbent per candidate
     work/proposals/<name>.md  each candidate's rationale
+    work/variants/<name>/     template variants to screen (not part of any harness)
     work/evidence/            overview, archive, lessons, contrasts, prior runs, expert notes, one folder per episode
 
-Tools: ``task_info``, ``check_candidate``, ``reset_candidate``, ``note`` and
-``ask_expert``. When the session ends the host checks every candidate again on
+Tools: ``task_info``, ``check_candidate``, ``screen_templates``,
+``reset_candidate``, ``note`` and ``ask_expert``. ``screen_templates`` runs
+many template variants on every training task's local check before any of them
+becomes a candidate. When the session ends the host checks every candidate again on
 its own: it copies the directory without following links, writes ``name``,
 ``parent`` and ``author``, loads and digests it, refuses names of training
 tasks and versions compared before, diffs it against the incumbent, and runs
@@ -88,6 +91,10 @@ from .ensemble import ensemble_scores
 from .evidence import related_runs, same_tasks, version_label, write_evidence
 
 NAMES = "abcdefghij"
+SCREEN_LIMIT = 12  # template variants screen_templates judges in one call
+SCREEN_TOTAL = 48  # ... and in one evolver session
+SCREEN_TIE = 0.0005  # a task's local change this small counts as neither better nor worse
+VARIANT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 ARCHIVE_LIMIT = 24  # earlier candidates copied into the evolver's archive/
 SIMILAR_EDITS = 0.5  # two candidates sharing this share of their added lines get a warning
 LAYOUT = frozenset({"harness.toml", "instructions.md", "skills", "template", "memory"})  # what a harness may hold
@@ -272,7 +279,10 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
                 if fewer else "")
              + "下表的增益是相对它当时的在任版本、在当时的训练任务上算的，"
              "“当时的在任”一列标出它是否就是本次的在任版本；"
-             "本次运行的细节见 `evidence/archive.md`，其他运行见 `evidence/prior_runs.md`。", "",
+             "本次运行的细节见 `evidence/archive.md`，其他运行见 `evidence/prior_runs.md`。"
+             "标 ★ 的版本在当时的全部训练任务上都好于在任版本，只是平均增益不够大或区间跨 0，没被采纳："
+             "这样的改动多半是真的但很小，在它上面再加一处有效的改动，或把两个 ★ 版本的改动合在一起，"
+             "最可能通过门槛（先用 `screen_templates` 在本地检验期上看叠加后是否还有效）。", "",
              "| 目录 | 摘要 | 当时的结果 | 好于当时在任的任务 | 当时的在任 |", "|---|---|---|---|---|"]
     by_label = {version_label(other["run_id"], round_["generation"], candidate["name"], current=view["run_id"]):
                 candidate for other in (*prior, view) for round_, candidate in _compared(other)}
@@ -280,7 +290,10 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
         candidate = by_label.get(label) or {}
         decision = candidate.get("decision") or {}
         tasks = decision.get("tasks") or []
-        result = (f"Δ {decision['delta']:+.4f}，{decision.get('reason')}"
+        everywhere = bool(tasks) and not candidate.get("missing") and all((item.get("delta") or 0) > 0
+                                                                          for item in tasks)
+        stack = everywhere and candidate.get("status") not in ("adopted", "passed")
+        result = (("★ " if stack else "") + f"Δ {decision['delta']:+.4f}，{decision.get('reason')}"
                   + ("（采纳）" if candidate.get("status") == "adopted" else "")
                   if isinstance(decision.get("delta"), (int, float)) else "起点版本" if label == "seed" else "–")
         better = f"{sum(1 for item in tasks if (item.get('delta') or 0) > 0)}/{len(tasks)}" if tasks else "–"
@@ -331,6 +344,8 @@ class EvolverTools:
         self._counter = 0
         self._incumbent_smoke: dict[str, dict[str, Any]] | None = None  # the incumbent template's checks, once
         self._incumbent_lock = threading.Lock()  # held while it is judged
+        self._screen_lock = threading.Lock()  # one screen_templates call at a time: each runs every task at once
+        self._screened = 0  # variants screened in this session
 
     def catalog(self) -> list[Tool]:
         return [
@@ -343,6 +358,17 @@ class EvolverTools:
                  {"type": "object", "required": ["name"],
                   "properties": {"name": {"type": "string", "enum": list(self.names)}}},
                  self.check_candidate),
+            Tool("screen_templates",
+                 "批量试模板：variants/ 下每个目录是一个完整的 template/ 副本（含 predictor.py），"
+                 "在每个训练任务的本地检验期上按裁判协议运行，和在任版本的模板比较，"
+                 "返回每个变体的平均分、平均增益、更好和更差的任务数与各任务分数，按平均增益排序。"
+                 f"每次最多 {SCREEN_LIMIT} 个、每个会话最多 {SCREEN_TOTAL} 个，一次调用约一两分钟；"
+                 "只用本地检验期，不涉及隐藏期。用它在做成候选之前多试几个方向或参数，"
+                 "再把选中的变体复制进候选的 template/。",
+                 {"type": "object", "required": ["variants"],
+                  "properties": {"variants": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                              "maxItems": SCREEN_LIMIT}}},
+                 self.screen_templates),
             Tool("reset_candidate",
                  "把一个候选目录重置为在任版本（base 为 incumbent）或 archive/ 里某个以往版本的完整副本，"
                  "原有改动全部丢弃，然后在它上面修改。比较对象始终是在任版本；"
@@ -571,6 +597,90 @@ class EvolverTools:
             shown["warnings"] = [*shown.get("warnings", []), *self.similar(name, {**edits, name: self._edits[name]})]
         return shown
 
+    def screen_templates(self, variants: Sequence[str]) -> dict[str, Any]:
+        """Judge template variants (directories under ``work/variants/``) on every training task's local check and
+        compare each with the incumbent's template, best mean gain first.
+
+        A check_candidate costs a candidate slot and an hour of episodes to learn what one template does; the local
+        check of a whole template takes seconds, and its mean over the training tasks predicts the hidden-period
+        gain well (2026-11-04: correlation +0.86 over nine candidates), its per-task changes poorly (+0.21). So the
+        evolver can try many directions or settings here and spend its candidates on the best. Only the local check
+        period is used: nothing here tells the hidden period's values. Calls run one at a time."""
+
+        names = [str(item).strip().removeprefix("variants/").strip("/") for item in (variants or [])]
+        if not names:
+            raise ToolError("variants must name at least one directory under variants/")
+        if len(names) > SCREEN_LIMIT:
+            raise ToolError(f"at most {SCREEN_LIMIT} variants per call")
+        if len(set(names)) != len(names):
+            raise ToolError("name each variant once")
+        bad = [name for name in names if not VARIANT_NAME.fullmatch(name)]
+        if bad:
+            raise ToolError(f"{bad[0]}: a variant is the name of a directory under variants/ (letters, digits, . _ -)")
+        with self._screen_lock:
+            if self._screened + len(names) > SCREEN_TOTAL:
+                left = SCREEN_TOTAL - self._screened
+                raise ToolError(f"this session may screen {SCREEN_TOTAL} variants; {left} left")
+            reference = self.incumbent_smoke()
+            scores = [item["score"] for item in reference.values() if isinstance(item.get("score"), float)]
+            base = float(sum(scores) / len(scores)) if scores else None
+            results = []
+            for name in names:
+                if self.cancel is not None and self.cancel.is_set():
+                    raise Cancelled("the run was cancelled")
+                results.append(self._screen_one(name, reference))
+                if results[-1]["status"] in ("ok", "failed"):  # judged: a missing or broken directory costs nothing
+                    self._screened += 1
+        results.sort(key=lambda item: (item.get("gain") is None, -(item.get("gain") or 0.0)))
+        without = sorted(task for task, item in reference.items() if not isinstance(item.get("score"), float))
+        return {"incumbent_mean": base, "tasks": [bench.task.id for bench in (self.smoke, *self.others)],
+                "variants": results, "left": SCREEN_TOTAL - self._screened,
+                **({"incumbent_failed": without} if without else {}),
+                "note": "本地检验期比隐藏期短得多：以多个任务的平均增益和更好的任务数为准，"
+                        "单个任务上的本地差别常常在隐藏期上不成立。选中的变体复制进 candidates/<名字>/template/，"
+                        "再用 check_candidate 检查；最终由隐藏期上的比较决定。"
+                        + ("在任版本的模板在 incumbent_failed 列出的任务上没有正常完成，增益只在其他任务上算。"
+                           if without else "")}
+
+    def _screen_one(self, name: str, reference: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        source = self.work / "variants" / name
+        if source.is_symlink() or not source.is_dir():
+            return {"name": name, "status": "missing", "problem": f"variants/{name}/ 不存在或不是目录"}
+        folder = self.root / "checks" / f"screen-{self._next():03d}-{name}"
+        template = folder / "template"
+        try:
+            try:
+                copy_tree(source, template)
+            except (HarnessError, OSError) as error:
+                return {"name": name, "status": "invalid", "problem": str(error)}
+            if not (template / "predictor.py").is_file():
+                return {"name": name, "status": "invalid",
+                        "problem": "没有 predictor.py：变体应是一个完整的 template/ 目录副本，例如 "
+                                   f"cp -r candidates/a/template variants/{name}"}
+            reports = self._judge_template(template, folder)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        tasks, failed = {}, []
+        for task, report in reports.items():
+            incumbent = (reference.get(task) or {}).get("score")
+            ok = report["status"] == "ok" and report["coverage"] >= 0.999
+            score = report["score"] if ok else None
+            tasks[task] = {"score": score, "incumbent": incumbent,
+                           "delta": score - incumbent if isinstance(score, float) and isinstance(incumbent, float)
+                           else None}
+            if not ok:
+                failed.append(f"{task}：状态 {report['status']}，覆盖率 {report['coverage']:.0%}，"
+                              f"错误 {report['errors'][:1]}")
+        if failed:
+            return {"name": name, "status": "failed", "problem": "；".join(failed[:3]), "tasks": tasks}
+        values = [item["score"] for item in tasks.values()]
+        deltas = [item["delta"] for item in tasks.values() if item["delta"] is not None]
+        return {"name": name, "status": "ok", "mean": float(sum(values) / len(values)),
+                "gain": float(sum(deltas) / len(deltas)) if deltas else None,  # over the tasks the incumbent scored
+                "better": sum(1 for delta in deltas if delta > SCREEN_TIE),
+                "worse": sum(1 for delta in deltas if delta < -SCREEN_TIE),
+                "worst": min(deltas) if deltas else None, "tasks": tasks}
+
     def note(self, kind: str, text: str) -> dict[str, Any]:
         if kind not in NOTE_KINDS:
             raise ToolError(f"kind must be one of {NOTE_KINDS}")
@@ -772,6 +882,16 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
         "- 用 `check_candidate` 检查每个候选。没有通过检查、与在任版本或以往比较过的版本相同的候选不会运行；"
         "两个候选的改动大部分相同时会有提醒。",
         "",
+        "## 批量试模板（`variants/`）",
+        "",
+        f"每个候选要 {repeats} × {len(tasks)} 个回合、约一小时才知道结果，每代只有 {len(names)} 个；"
+        "模板在本地检验期上跑一遍只要几秒。所以先在 `variants/` 里多试：把模板复制成几个目录"
+        "（`cp -r candidates/a/template variants/<名字>`），各改一处，调用 `screen_templates`，一次在全部训练任务的"
+        f"本地检验期上比较最多 {SCREEN_LIMIT} 个（每个会话最多 {SCREEN_TOTAL} 个），再把最好的复制进候选。"
+        "可以用它扫一个参数的几个取值、比较几种结构，或检查两个改动叠在一起是否还有效。"
+        "以多个任务的平均增益和更好的任务数为准：单个任务上的本地差别常常在隐藏期上不成立。"
+        "`variants/` 不属于任何 Harness，不会交给内循环智能体。",
+        "",
         "## 存档（`archive/`）",
         "",
         *_archive_rows(archived or {}),
@@ -794,11 +914,11 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
         "## 证据（`evidence/`）",
         "",
         "- `overview.md`：各版本在各训练任务上的隐藏期成绩、在任版本的逐格技能、各版本几个回合的预报平均后的成绩、"
-        "上一代的比较结果；",
+        "上一代的比较结果，以及在任版本一路被采纳时的增益（采纳记录）；",
         "- `archive.md`：以往所有候选的改动、提案、结果和原因，以及评审员的笔记；",
         "- `lessons.md`：内循环智能体在各回合记下的发现、经验和无效方向；",
         "- `contrasts.md`：同一版本在同一任务上成绩最好和最差的回合、两者评分程序的差别；",
-        "- `prior_runs.md`（如果有）：训练任务完全相同的以往运行里各候选的结果和评审员的笔记；",
+        "- `prior_runs.md`（如果有）：训练任务都在本次之内的以往运行里各候选的结果和评审员的笔记；",
         "- `expert.md`：领域专家的意见（如果有）；",
         "- `episodes/<回合>/summary.md` 和 `submission/`：每个回合的成绩、时间线、笔记、工具使用、错误、"
         "最终回复和被评分的代码；",
@@ -830,7 +950,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
     deadline = clock.now() + settings.minutes * 60  # awake time: a sleeping machine spends none of it
     gateway = make_gateway(trajectory, tokens=settings.tokens, deadline=deadline,
                            model=settings.model)  # an unusable model fails before anything is created
-    for path in (work / "candidates", work / "proposals", root / "harness" / "skills", trajectory):
+    for path in (work / "candidates", work / "proposals", work / "variants", root / "harness" / "skills", trajectory):
         path.mkdir(parents=True, exist_ok=True)
     (work / "AGENTS.md").write_text(resources.files("ecogym.evolution").joinpath("evolver.md").read_text("utf-8"),
                                     encoding="utf-8")

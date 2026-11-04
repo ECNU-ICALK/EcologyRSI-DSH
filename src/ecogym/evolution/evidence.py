@@ -254,6 +254,46 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
     return "\n".join(lines) + "\n"
 
 
+def lineage(view: dict[str, Any], prior: Sequence[dict[str, Any]] = ()) -> str:
+    """How the incumbent came about, oldest adoption first: each adoption on its line in this run and in the
+    ``prior`` runs (``related_runs``: training tasks all among this run's), with the gain that adopted it.
+
+    Successive gains say whether the current family of changes is running out (on 2026-11-04 they had fallen from
+    +0.075 to +0.014, +0.007 and +0.006 along one line). Runs with another training task are never read, and the
+    independent verifications of a run are not shown: they cover holdout tasks and sealed periods."""
+
+    adopted: dict[str, dict[str, Any]] = {}  # digest -> how it was adopted
+    for other in (*prior, view):
+        last = {}
+        for round_ in other["rounds"]:
+            last[round_["generation"]] = round_  # the attempt that counted
+        for adoption in other.get("adoptions") or []:
+            round_ = last.get(adoption["generation"]) or {}
+            candidate = next((item for item in round_.get("candidates") or [] if item["name"] == adoption["name"]), {})
+            tasks = (candidate.get("decision") or {}).get("tasks") or []
+            adopted[adoption["digest"]] = {
+                "run": other["run_id"], "current": other is view, "generation": adoption["generation"],
+                "name": adoption["name"], "parent": round_.get("incumbent"), "delta": adoption.get("delta"),
+                "better": sum(1 for item in tasks if (item.get("delta") or 0) > 0), "tasks": len(tasks),
+                "summary": candidate.get("summary", "")}
+    chain, digest = [], view["incumbent"]
+    while digest in adopted and len(chain) < 12:
+        chain.append((digest, adopted[digest]))
+        digest = adopted[digest]["parent"]
+    if not chain:
+        return ""
+    lines = ["## 在任版本的来历（采纳记录）", "",
+             "在任版本一路被采纳的过程，最早的在前。增益是相对当时的在任版本、在那次运行的训练任务上算的。"
+             "最近几次的增益越来越小、候选又多是调一两个参数时，见 `AGENTS.md`「增益越来越小时」。", "",
+             "| 运行 | 代 | 采纳的版本 | 增益 | 更好的任务 | 摘要 |", "|---|---|---|---|---|---|"]
+    for digest, item in reversed(chain):
+        where = "本次" if item["current"] else f"`{item['run']}`"
+        summary = " ".join(item["summary"].split())[:160].replace("|", "/")
+        lines.append(f"| {where} | {item['generation']} | {item['name']} `{digest[:12]}` | "
+                     f"{_signed(item['delta'], 4)} | {item['better']}/{item['tasks']} | {summary} |")
+    return "\n".join(lines) + "\n"
+
+
 def _archived(archived: Mapping[str, Any] | None) -> dict[str, str]:
     """Label -> digest of the versions copied into the evolver's ``archive/`` (values: harnesses or digests)."""
 
@@ -608,7 +648,9 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
         if text := transcript(record, role=roles[episode]):
             (folder / "transcript.md").write_text(text, encoding="utf-8")
             transcripts += 1
-    (target / "overview.md").write_text(overview(view, records, tasks, names, ensembles), encoding="utf-8")
+    record = lineage(view, related_runs(ledger, view) if prior is None else prior)
+    (target / "overview.md").write_text(overview(view, records, tasks, names, ensembles)
+                                        + (f"\n{record}" if record else ""), encoding="utf-8")
     (target / "archive.md").write_text(archive(view, archived), encoding="utf-8")
     (target / "lessons.md").write_text(lessons(records.values(), names), encoding="utf-8")
     (target / "contrasts.md").write_text(contrasts(view, records, names, programs), encoding="utf-8")
