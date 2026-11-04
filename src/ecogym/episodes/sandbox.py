@@ -75,6 +75,30 @@ def ecogym_home() -> Path:
     return Path(os.environ.get("ECOGYM_HOME") or Path.home() / ".ecogym").expanduser()
 
 
+THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                    "NUMEXPR_NUM_THREADS")
+
+
+def _count(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    return int(value) if value.isascii() and value.isdigit() and int(value) > 0 else default
+
+
+def thread_limits(count: int | None = None) -> dict[str, str]:
+    """Numeric-library threads of a sandboxed process: ``count``, else ``ECOGYM_THREADS`` (2 by default) for the
+    agents' own experiments. Unlimited, each of several sessions at once used every core (2026-11-04: six episodes
+    at a time kept a 12-core laptop hot). The judge passes a fixed count, so a score never depends on the setting."""
+
+    value = str(count or _count("ECOGYM_THREADS", 2))
+    return {name: value for name in THREAD_VARIABLES}
+
+
+def check_workers() -> int:
+    """How many training tasks a template check judges at the same time: ``ECOGYM_CHECK_WORKERS``, 4 by default."""
+
+    return _count("ECOGYM_CHECK_WORKERS", 4)
+
+
 def runtime_python() -> Path:
     configured = os.environ.get("ECOGYM_RUNTIME_PYTHON")
     return Path(configured).expanduser() if configured else ecogym_home() / "runtime" / "python" / "bin" / "python"
@@ -168,10 +192,12 @@ __all__ = [
     "SandboxUnavailable",
     "agent_profile",
     "available",
+    "check_workers",
     "confine",
     "discover_runtime",
     "ecogym_home",
     "program_profile",
     "runtime_python",
     "scratch_root",
+    "thread_limits",
 ]

@@ -200,7 +200,7 @@ def summarize(threads: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 SESSION_FIELDS = ("status", "seconds", "tokens", "metered_tokens", "llm_calls", "answered_calls", "failed_calls",
-                  "continuations", "error", "upstream_error", "stalled", "stalled_seconds", "activity")
+                  "continuations", "error", "upstream_error", "stalled", "stalled_seconds", "activity", "rerun")
 
 
 def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True) -> dict[str, Any] | None:

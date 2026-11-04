@@ -4,9 +4,9 @@ The user interface is the DSH plugin in ``ecogym/web/plugin``: DSH starts this
 service with ``--port 0 --exit-with-stdin`` and proxies ``/api/ecogym/*`` here
 (the plugin answers ``_status`` and ``_restart`` itself). ``ROUTES`` lists every
 endpoint with the ``Service`` method that answers it; ``GET /api/routes`` serves
-the same table, and the panel's introduction page shows it. The panel uses every
-group but the method arena, which is there for programs using the service
-directly and for the tests (the command line runs the arena itself). Every view
+the same table. The panel uses every group but the method arena, which is there
+for programs using the service directly and for the tests (the command line runs
+the arena itself). Every view
 is folded from the ledger on request, so the service holds no state a restart
 would lose beyond the runs it is executing.
 
@@ -127,7 +127,7 @@ ROUTES = (
     Route("POST", "evolutions", "start_evolution", "进化",
           "在后台开始一次进化（任务组、起点、代数、候选、回合、模型…）", status=201, body=True),
     Route("GET", "evolutions/{run}", "evolution", "进化",
-          "一次进化运行：各代、候选与比较、验证、各回合预报的平均、训练任务的参考成绩、起点是哪些运行进化出来的"),
+          "一次进化运行：各代、候选与比较、验证、训练任务的参考成绩、起点是哪些运行进化出来的、后端会不会自动继续它"),
     Route("GET", "evolutions/{run}/evolver/{generation}", "evolver_session", "进化",
           "一代的评审会话：看了哪些证据和版本、调了哪些工具、改了哪些文件，以及每一步（?steps=0 不带每一步）",
           query=("steps",)),
@@ -141,7 +141,8 @@ ROUTES = (
           "在后台验证：{kind: holdout}、{kind: sealed, stage}，或 {kind: adoptions}"
           "（还没复核的采纳，在训练任务的封存时期 validation 上复核）", status=202, body=True),
     Route("GET", "episodes", "episodes", "回合",
-          "回合列表（?evolution=运行 只看一个运行，&status=running 只看运行中的）", query=("evolution", "status")),
+          "回合列表（?evolution=运行 只看一个运行，&generation=代 只看其中一代，&status=running 只看运行中的）",
+          query=("evolution", "status", "generation")),
     Route("GET", "episodes/{episode}", "episode", "回合",
           "一个回合：隐藏期成绩、本地检验与提交、笔记、最终回复、工具使用"),
     Route("GET", "episodes/{episode}/transcript", "episode_transcript", "回合",
@@ -169,18 +170,16 @@ ROUTES = (
 
 
 def _suite_entry(suite: Any) -> dict[str, Any]:
-    from .evaluation.suite import signed_rank_critical, t_quantile
+    from .evaluation.suite import signed_rank_critical
 
-    # by candidates per round (Bonferroni): the t interval's half-width per unit spread of the task gains, or the
-    # signed-rank gate's critical count (adopt when at most this many Walsh averages of the task gains are <= 0)
-    tasks, tails = len(suite.train), {str(k): (1 - suite.gates.confidence) / (2 * k) for k in range(1, 7)}
-    ranked = suite.gates.test == "signed_rank" and tasks >= 3
-    width = {key: t_quantile(1 - tail, tasks - 1) / tasks ** 0.5 for key, tail in tails.items()} \
-        if tasks >= 3 and not ranked else None
-    critical = {key: signed_rank_critical(tasks, tail) for key, tail in tails.items()} if ranked else None
+    # the signed-rank gate's critical count by candidates per round (Bonferroni): adopt when at most this many
+    # Walsh averages of the task gains are <= 0 (the new-run form explains the gate with it)
+    tasks = len(suite.train)
+    critical = {str(k): signed_rank_critical(tasks, (1 - suite.gates.confidence) / (2 * k)) for k in range(1, 7)} \
+        if suite.gates.test == "signed_rank" and tasks >= 3 else None
     return {"id": suite.id, "title": suite.title, "train": list(suite.train), "holdout_tasks": len(suite.holdout),
             "gates": asdict(suite.gates), "notes": suite.notes.strip(), "repeats": suite.repeats,
-            "recommended": suite.recommended, "interval_per_sd": width, "signed_rank_critical": critical}
+            "recommended": suite.recommended, "signed_rank_critical": critical}
 
 
 def _task_entry(task: TaskSpec) -> dict[str, Any]:
@@ -220,7 +219,6 @@ class Service:
         self._stops: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._errors: dict[str, str] = {}  # failures raised before a run could log anything
-        self._ensembles: dict[str, tuple[str, dict[str, Any]]] = {}  # run id -> (its last event time, scores)
         self._verifying: dict[str, threading.Thread] = {}
         self._evolutions: dict[str, Any] = {}  # run id -> Evolution, for abort and shutdown
         self._cancels: dict[str, threading.Event] = {}  # holdout verifications
@@ -351,7 +349,6 @@ class Service:
         view["stale"] = not view["active"] and self._stale(view)
         view["error"] = view.get("error") or self._errors.get(run_id)
         view["task_references"] = references
-        view["ensembles"] = self._ensemble_scores(run_id, view)
         view["resume_plan"] = self.resume_plan(view)
         return view
 
@@ -369,20 +366,6 @@ class Service:
         if found is None:
             raise ApiError(HTTPStatus.NOT_FOUND, f"{run_id} has no finished evolver session in generation {generation}")
         return found
-
-    def _ensemble_scores(self, run_id: str, view: dict[str, Any]) -> dict[str, Any]:
-        """Averaged forecasts per version and task (``evolution.ensemble``), recomputed when the run logs."""
-
-        from .evolution.ensemble import ensemble_scores
-
-        cached = self._ensembles.get(run_id)
-        if cached is not None and cached[0] == view["updated_at"]:
-            return cached[1]
-        failures: list[str] = []
-        scores = ensemble_scores(view, self.bench, failures=failures)
-        if not failures:  # a file that could not be read is tried again on the next request
-            self._ensembles[run_id] = (view["updated_at"], scores)
-        return scores
 
     def start_evolution(self, body: dict[str, Any]) -> dict[str, Any]:
         from .evolution import Evolution, EvolveConfig
@@ -628,15 +611,22 @@ class Service:
             return False
         return datetime.fromisoformat(item["started_at"]) < self.started
 
-    def episodes(self, *, evolution: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
-        """Episode summaries, newest first; ``evolution`` keeps one run's episodes (only those are folded)."""
+    def episodes(self, *, evolution: str | None = None, status: str | None = None,
+                 generation: str | None = None) -> list[dict[str, Any]]:
+        """Episode summaries, newest first; ``evolution`` keeps one run's episodes, ``generation`` one of its
+        generations (only those are folded: a live run's panel asks for its current generation every few seconds)."""
 
         from .episodes.history import episode_records, summary
 
+        if generation is not None and not (generation.isascii() and generation.isdigit()):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "generation must be a whole number")
+        if generation is not None and not evolution:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "generation needs evolution: a generation belongs to one run")
         with Ledger(self.ledger_path) as ledger:
             ids = None if not evolution else [
                 event.run_id for event in ledger.events(kind="episode_started")
-                if (event.body.get("context") or {}).get("evolution") == evolution]
+                if (context := event.body.get("context") or {}).get("evolution") == evolution
+                and (generation is None or context.get("generation") == int(generation))]
             items = list(reversed([summary(record) for record in episode_records(ledger, ids)]))
         if status:
             items = [item for item in items if item["status"] == status]

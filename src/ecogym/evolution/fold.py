@@ -192,6 +192,15 @@ def evolver_sessions(view: dict[str, Any]) -> list[dict[str, Any]]:
             for item in [*round_.get("earlier_evolvers", []), *([round_["evolver"]] if round_.get("evolver") else [])]]
 
 
+def verified_gains(view: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Final minus starting version in each independent verification done: holdout, validation, final_test."""
+
+    sealed = sorted(view["verification"]["sealed"].items(), key=lambda item: (item[0] != "validation", item[0]))
+    checks = [("holdout", view["verification"]["holdout"]), *sealed]
+    return {name: {key: decision.get(key) for key in ("delta", "interval", "reason")}
+            for name, body in checks if body and (decision := body.get("decision"))}
+
+
 def summary(view: dict[str, Any]) -> dict[str, Any]:
     rounds = view["rounds"]
     episodes = [item for round_ in rounds for item in round_["episodes"]]
@@ -207,7 +216,9 @@ def summary(view: dict[str, Any]) -> dict[str, Any]:
         "tokens": sum(item.get("tokens") or 0 for item in sessions),
         "metered_tokens": sum(item.get("metered_tokens") or 0 for item in sessions),
         "verified": {"holdout": view["verification"]["holdout"] is not None,
-                     "sealed": sorted(view["verification"]["sealed"])},
+                     "sealed": sorted(view["verification"]["sealed"]),
+                     "gains": verified_gains(view)},
+        "adoption_gains": [item.get("delta") for item in view["adoptions"]],
         "ended_early": bool(view.get("ended_early")),
         "error": (view.get("error") or "")[:300] or None,
     }

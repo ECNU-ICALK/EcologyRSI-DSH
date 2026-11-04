@@ -38,7 +38,7 @@ from ..kernel.secrets import has_secret, resolve_secret
 from . import providers
 from .gateway import PREFIX, ROUTE_PREFIX, Gateway
 from .mcp import McpServer, Tool
-from .sandbox import Runtime, agent_profile, confine
+from .sandbox import Runtime, agent_profile, confine, thread_limits
 from .trajectory import store
 
 ROUTE_KEY = "ECOGYM_ROUTE_API_KEY"  # the session's token for a provider route (never a real key)
@@ -223,7 +223,8 @@ def session_env(root: Path, runtime: Runtime, gateway: Gateway) -> dict[str, str
             "LANG": "en_US.UTF-8", "DSH_PERMISSION_MODE": "danger-full-access", "DEEPSEEK_API_KEY": gateway.token,
             ROUTE_KEY: gateway.token,
             "DEEPSEEK_BASE_URL": gateway.base_url, "DEEPSEEK_SEARCH_BASE_URL": gateway.base_url + "/anthropic/v1",
-            "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "PYTHONDONTWRITEBYTECODE": "1"}
+            "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "PYTHONDONTWRITEBYTECODE": "1",
+            **thread_limits()}
 
 
 class Cancelled(RuntimeError):

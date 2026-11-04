@@ -112,6 +112,16 @@ window.__ModuleLoader__.load({
 .eg-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .eg-meta{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:6px;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
 .eg-meta b{font-weight:400;color:var(--dsw-alias-label-tertiary);margin-right:6px}
+.eg-facts{color:var(--dsw-alias-label-primary)}
+.eg-flowline{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:10px 0 6px;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.eg-flowline span{display:inline-flex;align-items:center;gap:6px;background:var(--eg-fill);border-radius:10px;padding:5px 10px}
+.eg-flowline i{font-style:normal;flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--dsw-alias-state-business-primary);color:#fff;font-size:11px}
+.eg-flowline em{font-style:normal;color:var(--dsw-alias-label-tertiary)}
+.eg-section-title{margin:22px 0 8px;font-size:14px;font-weight:600}
+.eg-sections{display:flex;gap:4px;margin:14px 0 2px;padding-bottom:8px;border-bottom:.5px solid var(--dsw-alias-border-l2);overflow-x:auto}
+.eg-live{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13px;margin-bottom:10px}
+.eg-live .eg-progress{flex:0 0 220px;margin-top:0}
+.eg-checks{display:flex;flex-direction:column;gap:8px;margin-top:14px}
 .eg-alert{border-radius:12px;padding:10px 14px;margin-top:12px;font-size:13px;background:var(--eg-fill)}
 .eg-alert[data-tone=danger]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .eg-alert[data-tone=warning]{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent)}
@@ -146,7 +156,6 @@ window.__ModuleLoader__.load({
 .eg-cand[data-adopted=true]{box-shadow:inset 3px 0 0 var(--dsw-alias-state-success-primary)}
 .eg-cand-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .eg-cand-summary{margin-top:6px;font-size:13px;overflow-wrap:anywhere}
-.eg-line{margin-top:6px;font-size:13px}
 .eg-forest{display:grid;grid-template-columns:max-content minmax(160px,1fr) max-content;gap:8px 14px;align-items:center;font-size:12.5px}
 .eg-track{position:relative;height:22px}
 .eg-track i{position:absolute;top:50%}
@@ -181,14 +190,11 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 .eg-q{font-weight:500;overflow-wrap:anywhere}
 .eg-note{padding:8px 0;border-bottom:.5px solid var(--dsw-alias-border-l2);font-size:13px;overflow-wrap:anywhere}
 .eg-note:last-child{border-bottom:0}
-.eg-two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
 .eg-flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .eg-step{border-radius:12px;background:var(--eg-fill);padding:10px 12px;min-width:0}
 .eg-step b{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:600}
 .eg-step i{font-style:normal;flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--dsw-alias-state-business-primary);color:#fff;font-size:11px}
 .eg-step p{margin:5px 0 0;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
-.eg-layers{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
-.eg-layers p{margin:0}
 .eg-timeline{position:relative;height:30px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}
 .eg-seg{position:absolute;top:0;bottom:0;display:flex;align-items:center;padding:0 6px;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .eg-seg[data-kind=visible],.eg-swatch[data-kind=visible]{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 22%,transparent)}
@@ -196,12 +202,6 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 .eg-seg[data-kind=hidden],.eg-swatch[data-kind=hidden]{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 38%,transparent)}
 .eg-seg[data-kind=sealed],.eg-swatch[data-kind=sealed]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 24%,transparent)}
 .eg-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:-1px}
-.eg-stack{display:flex;flex-direction:column}
-.eg-tier{border-radius:12px;background:var(--eg-fill);padding:10px 14px}
-.eg-tier-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.eg-tier-head b{font-weight:600;font-size:13.5px}
-.eg-tier p{margin:4px 0 0;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
-.eg-tier-arrow{text-align:center;color:var(--dsw-alias-label-tertiary);line-height:20px}
 .eg-summary{font-size:13.5px;line-height:1.75}
 .eg-summary-head{font-size:16px;font-weight:600;line-height:24px;margin-bottom:8px}
 .eg-summary p{margin:6px 0 0;overflow-wrap:anywhere}
@@ -311,7 +311,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 .eg-call>summary small.eg-bad{color:var(--dsw-alias-state-error-primary)}
 .eg-call .eg-pre{max-height:360px}
 .eg-call-result{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-top:6px}
-@media (max-width:900px){.eg-two{grid-template-columns:1fr}.eg-page{padding:20px 18px 64px}.eg-bar{padding:0 12px}}
+@media (max-width:900px){.eg-page{padding:20px 18px 64px}.eg-bar{padding:0 12px}}
 `;
     const styleId = "@ecogym/dsh-plugin/client";
     if (typeof document !== "undefined" && !document.querySelector(`style[data-plugin-css="${styleId}"]`)) {
@@ -330,12 +330,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const enc = encodeURIComponent;
     const Api = {
       status: "_status", restart: "_restart",
-      catalog: "catalog", routes: "routes", stages: (task) => `tasks/${enc(task)}/stages`,
+      catalog: "catalog", stages: (task) => `tasks/${enc(task)}/stages`,
       evolutions: "evolutions", evolution: (id) => `evolutions/${enc(id)}`,
       evolutionAction: (id, action) => `evolutions/${enc(id)}/${action}`,
       evolverSession: (id, generation, steps = true) => `evolutions/${enc(id)}/evolver/${enc(generation)}${steps ? "" : "?steps=0"}`,
       episodes: "episodes", episode: (id) => `episodes/${enc(id)}`, episodeTranscript: (id) => `episodes/${enc(id)}/transcript`,
-      runningEpisodes: (evolution) => `episodes?evolution=${enc(evolution)}&status=running`,
+      roundEpisodes: (evolution, generation) => `episodes?evolution=${enc(evolution)}&generation=${enc(generation)}`,
       harness: (ref) => `harnesses/${enc(ref)}`, harnessDiff: (before, after) => `harnesses/${enc(before)}/diff/${enc(after)}`,
       modelCheck: "models/check",
       expert: "expert", expertAnswer: "expert/answer", expertNote: "expert/note",
@@ -449,7 +449,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     function CatalogPending({ error, text = "正在读取…" }) {
       return error ? h(Alert, { tone: "warning" }, `读不到任务目录：${error.message}。稍后会自动重试。`)
-        : h("p", { className: "eg-hint" }, text);
+        : hint(text);
     }
 
     /** DSH's Session Remote, read without an inject requirement: the panel still works on a host without it. */
@@ -564,9 +564,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const route = routes.find((item) => ref.startsWith(`${item.provider}/`));
       const listed = routes.some((item) => item.options.some((option) => option.value === ref));
       const check = useModelCheck(listed && route?.runnable ? ref : "");
-      let hint = note;
-      if (ref && !listed) hint = "这个模型不在 DSH 当前的设置里，开始运行时会被拒绝；请换一个。";
-      else if (ref && route) hint = route.runnable ? routeNote(route) : `不可用：${route.problem}`;
+      let help = note;
+      if (ref && !listed) help = "这个模型不在 DSH 当前的设置里，开始运行时会被拒绝；请换一个。";
+      else if (ref && route) help = route.runnable ? routeNote(route) : `不可用：${route.problem}`;
       const tested = !check ? null : check.pending ? h("span", { className: "eg-faint" }, "正在测试能否调用…")
         : check.ok ? h("span", { className: "eg-good" }, check.note && check.note !== "ok" ? `测试请求：${check.note}` : "已测试：可以调用")
           : h("span", { className: "eg-bad" }, check.error);
@@ -577,7 +577,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           routes.map((item) => h("optgroup", { key: item.provider,
             label: `${item.name}${item.host ? ` · ${item.host}` : ""}${item.runnable ? "" : `（不可用：${item.problem}）`}` },
           item.options.map((option) => h("option", { key: option.value, value: option.value, disabled: !item.runnable }, option.label))))),
-        hint ? h("small", null, hint) : null,
+        help ? h("small", null, help) : null,
         tested ? h("small", null, tested) : null);
     }
 
@@ -632,8 +632,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function plain(value, digits = 3) {
       return isNum(value) ? (value < 0 ? MINUS : "") + Math.abs(value).toFixed(digits) : "–";
     }
-    function toneClass(value) {
-      if (!isNum(value) || Math.abs(value) < 5e-5) return "";
+    /** Green above 0, red below; none for a value that shows as zero with ``digits`` decimals. */
+    function toneClass(value, digits = 3) {
+      if (!isNum(value) || Math.abs(value) < 0.5 * 10 ** -digits) return "";
       return value > 0 ? "eg-good" : "eg-bad";
     }
     function timeOf(value) {
@@ -671,8 +672,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function copy(text) {
       navigator.clipboard?.writeText(text).then(() => toast(`已复制 ${text}`), () => toast(text));
     }
+    /** A cell's background: green above 0, red below, stronger up to ``scale``; none for what shows as 0.000. */
     function mix(value, scale) {
-      if (!isNum(value) || value === 0) return undefined;
+      if (!isNum(value) || Math.abs(value) < 5e-4) return undefined;
       const share = Math.round(6 + Math.min(Math.abs(value) / scale, 1) * 26);
       const color = value > 0 ? "var(--dsw-alias-state-success-primary)" : "var(--dsw-alias-state-error-primary)";
       return `color-mix(in srgb, ${color} ${share}%, transparent)`;
@@ -694,6 +696,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       duplicate: ["与以往版本相同", "warning"], rejected: ["被拒绝", "danger"],
     };
     const ROLE = { incumbent: "在任", candidate: "候选", holdout: "留出验证" };
+    /** Which version an episode ran for its run (its ``context``): 在任, 候选 a, 留出验证. */
+    const roleText = (context) => `${ROLE[context?.role] || context?.role || ""}${context?.candidate ? ` ${context.candidate}` : ""}`;
     const SCORED = ["finished", "timeout"];
 
     function evoKey(run) {
@@ -717,6 +721,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const task = taskInfo(catalog, card);
       if (!task) return String(id || "");
       return `${episode || task.episodes?.[0] || ""}（${task.dataset}）`;
+    }
+    /** A task as a column of a Table's head: its episode with the dataset below, the task id on hover. */
+    function taskHead(catalog, id, kind = "num") {
+      const [card, episode] = String(id || "").split(":");
+      const task = taskInfo(catalog, card);
+      return [task ? h(Fragment, null, episode || task.episodes?.[0] || "", h("div", { className: "eg-faint" }, task.dataset)) : String(id || ""), kind, id];
     }
     /** A task in a table cell: its episode, with the dataset in a quieter tone. */
     function TaskLabel({ catalog, id }) {
@@ -770,6 +780,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const [text, tone] = map[keyName] || [keyName, "neutral"];
       return h(Tag, { tone }, text);
     }
+    /** A page's title and what the page is for; ``children`` go below the text. */
+    function PageHead({ title, text, children }) {
+      return h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, title),
+        text ? h("p", null, text) : null, children));
+    }
     function Card({ title, hint, actions, children }) {
       return h("section", { className: "eg-card" },
         title || actions ? h("div", { className: "eg-card-head" },
@@ -784,6 +799,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         sub ? h("div", { className: "eg-stat-sub" }, sub) : null,
         isNum(progress) ? h("div", { className: "eg-progress" }, h("i", { style: { width: `${Math.min(100, progress * 100)}%` } })) : null);
     }
+    /** A quiet paragraph: explanations, empty and loading states. */
+    const hint = (...children) => h("p", { className: "eg-hint" }, ...children);
     function Alert({ tone = "info", children }) {
       return h("div", { className: "eg-alert", "data-tone": tone }, children);
     }
@@ -825,6 +842,22 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function KV({ pairs }) {
       return h("dl", { className: "eg-kv" }, pairs.flatMap(([key, value]) => [h("dt", { key: `k${key}` }, key), h("dd", { key: `v${key}` }, value)]));
     }
+    /** A table in its scroll wrapper. ``head``: column titles; ``[title, "num", tip]`` right-aligns a number column. */
+    function Table({ head, children, style }) {
+      return h("div", { className: "eg-table-wrap", style }, h("table", { className: "eg-table" },
+        h("thead", null, h("tr", null, head.map((item, index) => {
+          const [title, kind, tip] = Array.isArray(item) ? item : [item];
+          return h("th", { key: index, className: kind === "num" ? "num" : undefined, title: tip }, title);
+        }))),
+        h("tbody", null, children)));
+    }
+    /** A link that moves within the panel. */
+    function Link({ onClick, children }) {
+      return h("a", { href: "#", onClick: (event) => {
+        event.preventDefault();
+        onClick();
+      } }, children);
+    }
     function Mono({ children, title }) {
       return h("span", { className: "eg-mono", title }, children);
     }
@@ -864,29 +897,65 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     /* ---- evolution runs ------------------------------------------------------------------------------------ */
 
-    function EvolutionList({ go, catalog }) {
+    /** The method in five steps: [name, its line on the landing page, what it does (the 介绍 page)]. */
+    const FLOW = [
+      ["回合", "研究智能体按一份工作说明（Harness）独立解每个预测任务",
+        "一个 DSH 智能体按一版 Harness 独立解一个任务：看数据、查资料、写预测程序，用本地检验挑版本，然后提交。"],
+      ["裁判", "宿主在智能体看不到的隐藏期上打分",
+        "宿主在隐藏期上逐时刻运行被评分的程序，算出每格相对朴素基线的技能。被评分的是最后一次在本地明显好过起始程序（模板）的提交，没有就是模板本身。"],
+      ["评审", "评审智能体读成绩和完整过程，改出新的 Harness（候选）",
+        "评审智能体读各回合的成绩、代码、笔记和会话记录，以及以往的候选和运行，从在任版本或存档里的版本出发写出候选，宿主逐个检查。"],
+      ["比较与采纳", "候选在多个任务上可信地更好，才换上",
+        "候选和在任版本在每个训练任务上各跑几个回合，做多任务配对比较；通过门槛的候选成为新的在任版本。"],
+      ["独立验证", "最后在没见过的任务和更晚的时期上验证",
+        "进化结束后，起点和最终版本在留出任务上各跑一个回合，它们的程序再在更晚的封存时期上重新评分。"],
+    ];
+    const CHECK_NAMES = { holdout: "留出任务", validation: "封存 validation", final_test: "封存 final_test" };
+
+    /** A run's independent verifications (its summary's ``verified``) as small tags: each gain and whether its
+     * interval clears 0, or just "已验证" when there was nothing to compare (one version); null when none was done. */
+    function GainTags({ verified, style }) {
+      const gains = verified?.gains || {};
+      const done = Object.keys(CHECK_NAMES).filter((name) => gains[name] || (name === "holdout" ? verified?.holdout : (verified?.sealed || []).includes(name)));
+      return done.length ? h("div", { className: "eg-chips", style }, done.map((name) => {
+        const gain = gains[name];
+        if (!isNum(gain?.delta)) return h(Tag, { key: name, title: "只有一个版本（没有采纳过候选），或者没有可比较的任务" }, `${CHECK_NAMES[name]} 已验证`);
+        const side = credibility(gain.interval);
+        return h(Tag, { key: name, tone: side === "above" ? "success" : side === "below" ? "danger" : "neutral",
+          title: `${CHECK_NAMES[name]}：最终 − 起点 ${signed(gain.delta, 4)}，区间 [${signed(gain.interval?.[0], 3)}, ${signed(gain.interval?.[1], 3)}]，${CREDIBLE_TEXT[side]}` },
+        `${CHECK_NAMES[name]} ${signed(gain.delta, 3)}`);
+      })) : null;
+    }
+
+    function EvolutionList({ go }) {
       const { data, error } = useResource(Api.evolutions, { interval: 8000 });
       const runs = data || [];
+      const latest = runs.find((run) => run.status === "finished" && run.adoptions);
       return h(Fragment, null,
-        h("div", { className: "eg-head" },
-          h("div", { className: "eg-head-main" }, h("h1", null, "Harness 进化"),
-            h("p", null, "DSH 研究智能体按一版 Harness 独立解每个训练任务，宿主在隐藏时期逐时刻打分；评审智能体读成绩和完整轨迹，改指令、技能、代码库、DSH 设置和经验，提出候选。候选只有在多任务配对比较中可信地变好才被采纳，最后在留出任务和封存时期各验证一次。",
-              " ", h("a", { href: "#", onClick: (event) => { event.preventDefault(); go({ tab: "about", page: null }); } }, "整个流程见「介绍」")))),
+        h(PageHead, { title: "Harness 进化", text: "让研究智能体的工作方式自己变好：每一代改出几个新版本，只有在多个任务上可信地更好才换上。" },
+          h("div", { className: "eg-flowline" }, FLOW.map(([, text], index) => h(Fragment, { key: text },
+            index ? h("em", null, "→") : null, h("span", null, h("i", null, index + 1), text))),
+          h(Link, { onClick: () => go({ tab: "about", page: null }) }, "详细流程"))),
+        latest ? h(Card, { title: "最近一次有结果的进化", hint: latest.label || latest.run_id,
+          actions: h(Button, { onClick: () => go({ page: "evolution", id: latest.run_id }) }, "查看") },
+        h("p", { style: { margin: 0 } }, `从 ${short(latest.seed?.digest)} 进化到 ${short(latest.incumbent)}：采纳 ${latest.adoptions} 次`,
+          (latest.adoption_gains || []).length ? `（训练任务上每次 ${latest.adoption_gains.map((value) => signed(value, 3)).join("、")}）` : "", "。",
+          Object.keys(latest.verified?.gains || {}).length ? "独立验证（最终 − 起点）：" : "还没有独立验证。"),
+        h(GainTags, { verified: latest.verified })) : null,
         error ? h(Alert, { tone: "danger" }, `读取失败：${error.message}`) : null,
         data && !runs.length ? h(Empty, { title: "还没有进化运行", text: "选择任务组和预算，开始第一次 Harness 进化。运行在后台进行，可以随时离开这个页面。",
           action: h(Button, { variant: "primary", onClick: () => go({ page: "new" }) }, "新建进化") }) : null,
+        runs.length ? h("h2", { className: "eg-section-title" }, `全部运行（${runs.length}）`) : null,
         h("div", { className: "eg-list" }, runs.map((run) => {
           const key = evoKey(run);
           const [text, tone, dot] = EVO_STATUS[key];
-          const verified = [run.verified?.holdout ? "留出" : "", ...(run.verified?.sealed || [])].filter(Boolean);
           return h("button", { key: run.run_id, className: "eg-row", onClick: () => go({ page: "evolution", id: run.run_id }) },
             h("span", { className: "eg-row-dot" }, h(Dot, { state: dot })),
             h("span", { className: "eg-row-main" },
               h("div", { className: "eg-row-title" }, run.label || run.run_id),
               h("div", { className: "eg-row-meta" }, [run.suite?.title || run.suite?.id, `第 ${run.rounds_finished ?? 0} / ${run.generations ?? "?"} 代`,
-                `采纳 ${run.adoptions ?? 0} 次`, `${run.episodes ?? 0} 个回合`, run.tokens ? `${tokens(run.tokens)} token` : null].filter(Boolean).join(" · ")),
-              h("div", { className: "eg-row-meta eg-faint" }, h(Mono, null, `${short(run.seed?.digest)} → ${short(run.incumbent)}`),
-                ` · ${when(run.started_at)}`, verified.length ? ` · 已验证 ${verified.join("、")}` : "")),
+                `采纳 ${run.adoptions ?? 0} 次`, `${run.episodes ?? 0} 个回合`, run.tokens ? `${tokens(run.tokens)} token` : null, when(run.started_at)].filter(Boolean).join(" · ")),
+              h(GainTags, { verified: run.verified, style: { marginTop: "4px" } })),
             h("span", { className: "eg-row-side" }, h(Tag, { tone }, text), run.ended_early ? h(Tag, { title: "停下后就此结束，剩下的代没有运行" }, "提前结束") : null,
               run.verifying ? h(Tag, { tone: "info" }, "验证中") : null));
         })));
@@ -921,32 +990,40 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return `第 ${round.generation} 代：正在比较候选与在任版本${elapsed}`;
     }
 
-    function harnessNames(view) {
-      const names = new Map([[view.seed?.digest, `起点 ${view.seed?.name || "seed"}`]]);
-      for (const round of view.rounds || []) {
-        for (const candidate of round.candidates || []) {
-          if (candidate.digest) names.set(candidate.digest, `第 ${round.generation} 代候选 ${candidate.name}`);
-        }
-      }
-      return names;
+    /** The run's numbers in one line: progress, adoptions, episodes, tokens, time. */
+    function runFacts(view) {
+      const rounds = view.rounds || [];
+      const done = rounds.filter((round) => round.generation > 0 && round.finished).length;
+      const episodes = rounds.flatMap((round) => round.episodes || []);
+      const failures = episodes.filter((item) => !SCORED.includes(item.status)).length;
+      const used = [...episodes, ...rounds.flatMap((round) => [...(round.earlier_evolvers || []), round.evolver].filter(Boolean))]
+        .reduce((sum, item) => sum + (item.tokens || 0), 0);
+      const start = timeOf(view.started_at);
+      const end = view.status === "running" ? Date.now() : timeOf(view.finished_at || view.updated_at);
+      return [`第 ${done} / ${view.config?.generations ?? "?"} 代`, `采纳 ${(view.adoptions || []).length} 次`,
+        `${episodes.length} 个回合${failures ? `（${failures} 个故障或中断）` : ""}`, used ? `${tokens(used)} token` : null,
+        `用时 ${duration(start !== null && end !== null ? (end - start) / 1000 : null)}`].filter(Boolean);
     }
+
+    const RUN_SECTIONS = [["overview", "概览"], ["process", "每一代"], ["versions", "版本与成绩"], ["settings", "设置"]];
 
     function EvolutionPage({ id, go, catalog, focus: initialFocus }) {
       const [confirmEl, ask] = useConfirm();
       const [live, setLive] = useState(true);
       const [focus, setFocus] = useState(initialFocus || null);
-      const pick = useCallback((target) => setFocus({ ...target, at: Date.now() }), []);
-      const { data: view, error, reload } = useResource(Api.evolution(id), { interval: live ? 4000 : 30000 });
+      const [section, setSection] = useState(initialFocus ? "process" : "overview");
+      const pick = useCallback((target) => {
+        setFocus({ ...target, at: Date.now() });
+        setSection("process");
+      }, []);
+      const { data: view, error, reload } = useResource(Api.evolution(id), { interval: live ? 5000 : 30000 });
       const running = view ? view.active || view.verifying || view.status === "running" : true;
       useEffect(() => setLive(Boolean(running)), [running]);
       useTick(Boolean(view?.active));
-      const { data: episodes } = useResource(Api.runningEpisodes(id),
-        { interval: 6000, enabled: Boolean(view?.active || view?.verifying) });
       if (error && !view) return h(Alert, { tone: "danger" }, `无法读取进化运行 ${id}：${error.message}`);
-      if (!view) return h("p", { className: "eg-hint" }, "正在读取进化运行…");
+      if (!view) return hint("正在读取进化运行…");
       const key = evoKey(view);
       const [text, tone] = EVO_STATUS[key];
-      const names = harnessNames(view);
       const act = async (path, body, message) => {
         try {
           await api(Api.evolutionAction(view.run_id, path), { body: body || {} });
@@ -956,32 +1033,23 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           toast(`操作失败：${failure.message}`, "danger");
         }
       };
-      const stop = async () => {
-        if (await ask({ title: "在本代结束后停止？", text: "当前这一代会跑完；已完成的代保留在账本里，之后可以继续。", confirm: "本代结束后停止" })) {
-          act("stop", {}, "将在当前这一代结束后停止");
-        }
+      // a button's action: ask first, then post it
+      const confirmed = (question, path, body, message) => async () => {
+        if (await ask(question)) act(path, body, message);
       };
-      const abort = async () => {
-        if (await ask({ title: "立即中止？", text: "正在运行的智能体会被停止，这一代的工作作废；继续运行时从这一代重新开始。", confirm: "立即中止" })) {
-          act("abort", {}, "正在中止");
-        }
-      };
-      const resume = async () => {
-        const elsewhere = key === "elsewhere";
-        if (await ask({ title: "继续这次进化？", text: elsewhere
-          ? "账本显示它仍在运行，但不是由这个后端运行的（可能在命令行里运行，也可能已经中断）。确认它已不在运行再继续，否则会重复运行。"
-          : "从最后一个完成的代继续；中断的那一代会重新运行。", confirm: "继续运行" })) {
-          act("resume", { force: elsewhere }, "已继续运行");
-        }
-      };
+      const stop = confirmed({ title: "在本代结束后停止？", text: "当前这一代会跑完；已完成的代保留在账本里，之后可以继续。", confirm: "本代结束后停止" },
+        "stop", {}, "将在当前这一代结束后停止");
+      const abort = confirmed({ title: "立即中止？", text: "正在运行的智能体会被停止，这一代的工作作废；继续运行时从这一代重新开始。", confirm: "立即中止" },
+        "abort", {}, "正在中止");
+      const elsewhere = key === "elsewhere";
+      const resume = confirmed({ title: "继续这次进化？", confirm: "继续运行", text: elsewhere
+        ? "账本显示它仍在运行，但不是由这个后端运行的（可能在命令行里运行，也可能已经中断）。确认它已不在运行再继续，否则会重复运行。"
+        : "从最后一个完成的代继续；中断的那一代会重新运行。" }, "resume", { force: elsewhere }, "已继续运行");
       const lastDone = lastAttempts(view).filter((round) => round.finished).pop();
-      const finish = async () => {
-        const left = (view.config?.generations ?? lastDone.generation) - lastDone.generation;
-        if (await ask({ title: "就此结束这次进化？", text: `第 ${lastDone.generation} 代结束后的在任版本（${versionAlias(view, lastDone.incumbent_after)} ${short(lastDone.incumbent_after)}）就是最终版本，`
-          + `${left > 0 ? `剩下的 ${left} 代不再运行` : "没有剩下的代"}。结束后可以做独立验证，但不能再继续运行。`, confirm: "结束运行" })) {
-          act("finish", {}, "已结束，可以验证了");
-        }
-      };
+      const left = lastDone ? (view.config?.generations ?? lastDone.generation) - lastDone.generation : 0;
+      const finish = confirmed({ title: "就此结束这次进化？", confirm: "结束运行", text: lastDone ? `第 ${lastDone.generation} 代结束后的在任版本`
+        + `（${versionAlias(view, lastDone.incumbent_after)} ${short(lastDone.incumbent_after)}）就是最终版本，`
+        + `${left > 0 ? `剩下的 ${left} 代不再运行` : "没有剩下的代"}。结束后可以做独立验证，但不能再继续运行。` : "" }, "finish", {}, "已结束，可以验证了");
       const auto = resumeText(view.resume_plan);
       const choice = auto + (lastDone ? "可以继续运行，也可以就此结束、验证现在的在任版本。" : "可以继续运行。");
       const notice = key === "failed" ? h(Alert, { tone: "danger" }, h("b", null, "运行失败："), view.error || "没有记录原因", `。${choice}`)
@@ -1000,11 +1068,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               view.verifying ? h(Tag, { tone: "info" }, "验证进行中") : null),
             h("div", { className: "eg-meta" },
               h("span", null, h("b", null, "任务组"), view.suite?.title || view.suite?.id),
-              h("span", null, h("b", null, "起点 → 在任"), h(Mono, null, `${short(view.seed?.digest)} → ${short(view.incumbent)}`), ` ${names.get(view.incumbent) || ""}`),
+              h("span", null, h("b", null, "起点 → 在任"), h(Mono, null, `${short(view.seed?.digest)} → ${short(view.incumbent)}`), ` ${versionAlias(view, view.incumbent)}`),
               h("span", null, h("b", null, "开始"), when(view.started_at, true)),
               (view.resumes || []).length ? h("span", null, h("b", null, "继续过"), `${view.resumes.length} 次`
                 + (view.resumes.some((item) => item.by === "auto") ? `（后端自动 ${view.resumes.filter((item) => item.by === "auto").length} 次）` : "")) : null,
-              h("span", null, h("b", null, "运行"), h(Mono, null, view.run_id)))),
+              h("span", null, h("b", null, "运行"), h(Mono, null, view.run_id))),
+            h("div", { className: "eg-meta eg-facts" }, runFacts(view).map((item) => h("span", { key: item }, item)))),
           h("div", { className: "eg-actions" },
             view.active ? h(Button, { onClick: stop }, "本代结束后停止") : null,
             view.active ? h(Button, { onClick: abort }, "立即中止") : null,
@@ -1013,59 +1082,55 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               ? h(Button, { onClick: finish, title: "以现在的在任版本作为最终版本结束运行，然后就能验证" }, "结束运行") : null,
             h(Button, { onClick: () => copy(view.run_id) }, "复制 ID"))),
         notice,
-        h(RunStats, { view }),
-        view.active ? h(LiveCard, { view, episodes, catalog, go }) : null,
-        h(RunSummary, { view, go, catalog }),
-        h(ScoreCard, { view, catalog, onPick: pick }),
-        h(LineageCard, { view, catalog, onPick: pick }),
-        h(Scoreboard, { view, catalog, names }),
-        h(GainChart, { view }),
-        h(Verification, { view, catalog, ask, act }),
-        h(Process, { view, catalog, go, focus }),
-        h(HarnessCard, { view, names }),
-        h(AdviceCard, { view, catalog }),
-        h(ConfigCard, { view, catalog }));
+        h("div", { className: "eg-sections", role: "tablist", "aria-label": "运行的各部分" }, RUN_SECTIONS.map(([value, label]) => h("button", {
+          key: value, type: "button", role: "tab", className: "eg-tab", "aria-selected": String(section === value),
+          "aria-current": section === value ? "page" : undefined, onClick: () => setSection(value) }, label))),
+        // every section stays mounted (hidden when not chosen), so opened generations and scroll targets survive a switch
+        h("div", { hidden: section !== "overview" },
+          view.active ? h(LiveCard, { view, catalog, go }) : null,
+          h(RunSummary, { view, go }),
+          h(ScoreCard, { view, catalog, onPick: pick }),
+          h(Verification, { view, catalog, ask, act })),
+        h("div", { hidden: section !== "process" }, h(Process, { view, catalog, go, focus })),
+        h("div", { hidden: section !== "versions" },
+          h(LineageCard, { view, catalog, onPick: pick }),
+          h(Scoreboard, { view, catalog }),
+          h(HarnessCard, { view })),
+        h("div", { hidden: section !== "settings" }, h(ConfigCard, { view, catalog, go })));
     }
 
-    function RunStats({ view }) {
-      const rounds = view.rounds || [];
-      const finished = rounds.filter((round) => round.generation > 0 && round.finished).length;
-      const total = view.config?.generations ?? 0;
-      const episodes = rounds.flatMap((round) => round.episodes || []);
-      const failures = episodes.filter((item) => !SCORED.includes(item.status)).length;
-      const candidates = rounds.flatMap((round) => round.candidates || []);
-      const ran = candidates.filter((item) => !["invalid", "unchanged", "duplicate", "rejected"].includes(item.status)).length;
-      const sessions = [...episodes, ...rounds.map((round) => round.evolver).filter(Boolean)];
-      const used = sessions.reduce((sum, item) => sum + (item.tokens || 0), 0);
-      const metered = sessions.reduce((sum, item) => sum + (item.metered_tokens || 0), 0);
-      const start = timeOf(view.started_at);
-      const end = view.active || view.status === "running" ? Date.now() : timeOf(view.finished_at || view.updated_at);
-      return h("div", { className: "eg-stats" },
-        h(Stat, { label: "进度", value: `${finished} / ${total} 代`, sub: rounds[0]?.finished ? "基线已完成" : "基线进行中",
-          progress: view.status === "running" && total ? finished / total : undefined }),
-        h(Stat, { label: "采纳", value: `${(view.adoptions || []).length} 次`,
-          sub: (view.adoptions || []).map((item) => `第 ${item.generation} 代 ${item.name}`).join("、") || "还没有" }),
-        h(Stat, { label: "候选", value: `${candidates.length} 个`, sub: `${ran} 个通过检查并运行` }),
-        h(Stat, { label: "回合", value: `${episodes.length} 个`, sub: failures ? h("span", { className: "eg-bad" }, `${failures} 个故障或中断`) : "全部正常结束" }),
-        h(Stat, { label: "Token", value: tokens(used), sub: metered ? `计费 ${tokens(metered)}（缓存按 1/10）` : "智能体与评审合计" }),
-        h(Stat, { label: "用时", value: duration(start !== null && end !== null ? (end - start) / 1000 : null),
-          sub: view.finished_at ? `结束于 ${when(view.finished_at)}` : "进行中" }));
-    }
-
-    function LiveCard({ view, episodes, catalog, go }) {
-      const live = (episodes || []).filter((item) => item.context?.evolution === view.run_id && item.status === "running");
+    /** What runs now: the current generation's episodes (polled while the run is active), with its progress. */
+    function LiveCard({ view, catalog, go }) {
+      const round = (view.rounds || [])[(view.rounds || []).length - 1];
+      const { data: episodes } = useResource(round ? Api.roundEpisodes(view.run_id, round.generation) : null, { interval: 8000 });
+      const since = timeOf(round?.started_at) ?? 0;
+      const mine = (episodes || []).filter((item) => (timeOf(item.started_at) ?? 0) >= since - 1000); // this attempt of the round
+      const live = mine.filter((item) => item.status === "running");
+      // one slot per version, task and replicate: an episode tried again after a provider failure counts once, at its end
+      const slot = (item) => [item.context?.role, item.context?.candidate, item.task_id, item.context?.replicate].join("|");
+      const busy = new Set(live.map(slot));
+      const done = new Set(mine.filter((item) => item.status !== "running").map(slot).filter((key) => !busy.has(key))).size;
+      const reviewing = Boolean(round?.generation) && (!round.evolver || round.evolver.rerun); // no episodes until it ends
+      const runnable = (round?.candidates || []).filter((candidate) => candidate.status === "proposed" || (candidate.digest && candidate.decision)).length;
+      const idle = Boolean(round?.generation) && !reviewing && !runnable; // no candidate can run: the loop runs no episodes
+      const total = round && !reviewing && !idle ? (view.suite?.train || []).length * (view.config?.repeats || 1) * (1 + runnable) : 0;
+      const quiet = reviewing ? "评审智能体正在读证据、写候选；它结束后回合才开始。" : idle ? "这一代没有可以运行的候选，不跑回合。" : "现在没有运行中的回合。";
       return h(Card, { title: "正在进行", hint: phaseOf(view) },
-        live.length ? h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "任务"), h("th", null, "版本"), h("th", null, "模型"), h("th", { className: "num" }, "已运行"), h("th", null, "回合"))),
-          h("tbody", null, live.map((item) => h("tr", { key: item.episode, className: "eg-click", onClick: () => go({ page: "episode", id: item.episode }) },
+        total ? h("div", { className: "eg-live" },
+          h("div", { className: "eg-progress" }, h("i", { style: { width: `${Math.min(100, (done / total) * 100)}%` } })),
+          h("span", null, `这一代 ${Math.min(done, total)} / ${total} 个回合已结束${live.length ? `，${live.length} 个正在运行` : ""}`
+            + `（同时最多 ${view.config?.concurrency ?? "?"} 个）`)) : null,
+        live.length ? h(Table, { head: ["任务", "版本", "模型", ["已运行", "num"], "回合"] },
+          live.map((item) => h("tr", { key: item.episode, className: "eg-click",
+            onClick: () => go({ page: "episode", id: item.episode, back: { page: "evolution", id: view.run_id } }) },
             h("td", null, h(TaskLabel, { catalog, id: item.task_id })),
-            h("td", null, `${ROLE[item.context?.role] || item.context?.role || ""}${item.context?.candidate ? ` ${item.context.candidate}` : ""}`),
+            h("td", null, roleText(item.context)),
             h("td", null, item.model || "–"),
             h("td", { className: "num" }, duration((Date.now() - (timeOf(item.started_at) || Date.now())) / 1000)),
-            h("td", null, h(Mono, null, item.episode))))))) : h("p", { className: "eg-hint" }, "现在没有运行中的回合。"));
+            h("td", null, h(Mono, null, item.episode))))) : hint(quiet));
     }
 
-    function Scoreboard({ view, catalog, names }) {
+    function Scoreboard({ view, catalog }) {
       const tasks = view.suite?.train || [];
       const table = new Map();
       for (const round of view.rounds || []) {
@@ -1078,46 +1143,33 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         }
       }
       if (!table.size) return null;
+      const start = table.get(view.seed?.digest);
+      const base = (task) => (start?.get(task) ? mean(start.get(task)) : null);
       const refs = [...new Set(Object.values(view.task_references || {}).flatMap((item) => Object.keys(item)))].filter((name) => name !== "naive");
-      const averagedRow = (key, label) => {
-        const byTask = view.ensembles?.[key];
-        if (!byTask || !Object.keys(byTask).length) return null;
-        const values = tasks.map((task) => byTask[task]?.score);
-        return h("tr", { key: `avg-${key}`, className: "eg-faint" }, h("td", null, label),
-          tasks.map((task) => {
-            const item = byTask[task];
-            return h("td", { key: task, className: "num", title: item ? `${item.n} 个回合的预报逐时刻平均；这些回合各自的平均 ${signed(item.mean, 3)}${item.left_out ? `；另有 ${item.left_out} 个回合缺预报，未计入` : ""}` : "" },
-              item ? h(Fragment, null, signed(item.score, 3), ` (${item.n})`) : "–");
+      return h(Card, { title: "各版本在每个训练任务上的成绩", hint: "隐藏期总技能（相对朴素基线，大于 0 更好）的各回合均值，括号里是回合数，悬停看每个回合。"
+        + "底色表示比起点版本在这个任务上高（绿）还是低（红）。对照行是宿主内置的方法在同一批起点上的成绩。" },
+        h(Table, { head: ["版本", ...tasks.map((task) => taskHead(catalog, task)), ["平均", "num"]] },
+          [...table.entries()].map(([digest, byTask]) => {
+            const means = [];
+            return h("tr", { key: digest },
+              h("td", { style: { whiteSpace: "nowrap" } }, `${versionAlias(view, digest)} `, h(Mono, null, short(digest)),
+                digest === view.incumbent ? h(Fragment, null, " ", h(Tag, { tone: "success" }, "在任")) : null),
+              tasks.map((task) => {
+                const values = byTask.get(task) || [];
+                if (!values.length) return h("td", { key: task, className: "num eg-faint" }, "–");
+                const value = mean(values);
+                means.push(value);
+                return h("td", { key: task, className: "num", style: { background: isNum(base(task)) ? mix(value - base(task), 0.03) : undefined },
+                  title: values.map((item) => signed(item)).join("、") }, signed(value, 3), h("span", { className: "eg-faint" }, ` (${values.length})`));
+              }),
+              h("td", { className: "num" }, h("b", null, means.length === tasks.length ? signed(mean(means), 3) : "–")));
           }),
-          h("td", { className: "num" }, values.every(isNum) ? signed(mean(values), 3) : "–"));
-      };
-      return h(Card, { title: "训练任务上的隐藏期成绩", hint: "每个版本在每个训练任务上各回合的隐藏期总技能（相对朴素基线）均值，括号里是回合数。“平均各回合的预报”把几个回合的隐藏期预报逐时刻平均后计分（集成），只作参考，采纳仍按单个回合比较。参考行是宿主内置方法在同一批起点上的成绩。" },
-        h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "版本"), tasks.map((task) => h("th", { key: task, className: "num", title: task }, taskShort(catalog, task))), h("th", { className: "num" }, "平均"))),
-          h("tbody", null,
-            [...table.entries()].map(([digest, byTask]) => {
-              const means = [];
-              return h(Fragment, { key: digest },
-                h("tr", null,
-                  h("td", null, names.get(digest) || "", " ", h(Mono, null, short(digest)), digest === view.incumbent ? h(Fragment, null, " ", h(Tag, { tone: "success" }, "在任")) : null),
-                  tasks.map((task) => {
-                    const values = byTask.get(task) || [];
-                    if (!values.length) return h("td", { key: task, className: "num eg-faint" }, "–");
-                    const value = mean(values);
-                    means.push(value);
-                    return h("td", { key: task, className: "num", style: { background: mix(value, 0.3) }, title: values.map((item) => signed(item)).join("、") },
-                      signed(value, 3), h("span", { className: "eg-faint" }, ` (${values.length})`));
-                  }),
-                  h("td", { className: "num" }, h("b", null, signed(mean(means), 3)))),
-                averagedRow(digest, "　平均各回合的预报"));
-            }),
-            averagedRow("all", "全部回合的预报平均"),
-            refs.map((name) => {
-              const values = tasks.map((task) => view.task_references?.[task]?.[name]);
-              return h("tr", { key: `ref-${name}`, className: "eg-faint" }, h("td", null, `参考：宿主内置 ${name}`),
-                values.map((value, index) => h("td", { key: tasks[index], className: "num" }, signed(value, 3))),
-                h("td", { className: "num" }, signed(mean(values.filter(isNum)), 3)));
-            })))));
+          refs.map((name) => {
+            const values = tasks.map((task) => view.task_references?.[task]?.[name]);
+            return h("tr", { key: `ref-${name}`, className: "eg-faint" }, h("td", { title: `宿主内置的预报方法 ${name}` }, `对照：${REFERENCE_NAMES[name] || name}`),
+              values.map((value, index) => h("td", { key: tasks[index], className: "num" }, signed(value, 3))),
+              h("td", { className: "num" }, signed(mean(values.filter(isNum)), 3)));
+          })));
     }
 
     function niceTicks(lo, hi, count = 5) {
@@ -1129,60 +1181,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return { ticks, digits: Math.max(0, -Math.floor(Math.log10(step)) + (step / magnitude === 2.5 ? 1 : 0)) };
     }
 
-    function GainChart({ view }) {
-      const rows = [];
-      for (const round of view.rounds || []) {
-        for (const candidate of round.candidates || []) {
-          if (candidate.decision && isNum(candidate.decision.delta)) rows.push({ round, candidate, decision: candidate.decision });
-        }
-      }
-      if (!rows.length) return null;
-      const gate = view.gates?.min_delta;
-      const values = [0, ...(isNum(gate) ? [gate] : [])];
-      for (const { decision } of rows) values.push(decision.delta, ...decision.interval.filter(isNum));
-      let lo = Math.min(...values);
-      let hi = Math.max(...values);
-      const span = Math.max(hi - lo, 0.004);
-      lo -= span * 0.08;
-      hi += span * 0.08;
-      const x = (value) => ((value - lo) / (hi - lo)) * 100;
-      const { ticks, digits } = niceTicks(lo, hi);
-      const tasks = (view.suite?.train || []).length;
-      const bases = new Set(rows.map(({ decision }) => decision.basis).filter(Boolean)); // as each comparison ran
-      const ranked = bases.size ? bases.has("tasks_signed_rank") : tasks >= 3 && view.gates?.test === "signed_rank";
-      const tInterval = bases.size ? bases.has("tasks_t") : tasks >= 3;
-      const basis = ranked ? "各任务增益的符号秩区间（只看各任务变好还是变差、变化大小排第几，一个任务上特别大的增益不会把它拉宽）"
-        : bases.size > 1 ? "各任务增益的 t 区间（可比的训练任务少于 3 个的那几代用分层自助区间）"
-          : tInterval ? "各任务增益的 t 区间" : "分层自助区间（依次重抽任务、回合和天；任务少于 3 个时只反映任务内的随机差异）";
-      return h(Card, { title: "各代候选的增益", hint: `候选 − 在任：训练任务上的平均总技能增益（点），与${basis}，多个候选时区间按 Bonferroni 加宽。采纳门槛：增益大于 ${signed(gate, 3)}、区间下限大于 0（单侧检验）、没有任务可信变差超过 ${signed(view.gates?.task_cap, 3)}。` },
-        h("div", { className: "eg-forest" },
-          rows.flatMap(({ round, candidate, decision }) => {
-            const [low, high] = decision.interval;
-            const adopted = candidate.status === "adopted";
-            return [
-              h("div", { key: `l${round.generation}${candidate.name}` }, `第 ${round.generation} 代 ${candidate.name}`),
-              h("div", { key: `t${round.generation}${candidate.name}`, className: "eg-track", "data-adopted": String(adopted) },
-                h("i", { className: "zero", style: { left: `${x(0)}%` } }),
-                isNum(gate) ? h("i", { className: "gate", style: { left: `${x(gate)}%` } }) : null,
-                h("i", { className: "ci", style: { left: `${x(low)}%`, width: `${Math.max(0.5, x(high) - x(low))}%` } }),
-                h("i", { className: "dot", style: { left: `${x(decision.delta)}%` }, title: `增益 ${signed(decision.delta)}` })),
-              h("div", { key: `v${round.generation}${candidate.name}` }, h("b", { className: toneClass(decision.delta) }, signed(decision.delta)),
-                ` [${signed(low)}, ${signed(high)}]`, adopted ? h("span", { className: "eg-good" }, " · 采纳") : null),
-            ];
-          }),
-          h("div", { key: "axis-l" }),
-          h("div", { key: "axis", className: "eg-axis" }, ticks.map((tick) => h("span", { key: tick, style: { left: `${x(tick)}%` } }, signed(tick, digits)))),
-          h("div", { key: "axis-r" })));
-    }
-
     function VersionsTable({ body, field, catalog }) {
       const versions = body.versions || {};
       const labels = ["seed", "final"].filter((label) => versions[label]);
       const tasks = [...new Set(labels.flatMap((label) => Object.keys(versions[label][field] || {})))].sort();
-      return h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-        h("thead", null, h("tr", null, h("th", null, "任务"), labels.map((label) => h("th", { key: label, className: "num" }, label === "seed" ? "起点" : "最终")),
-          labels.length > 1 ? h("th", { className: "num" }, "最终 − 起点") : null, h("th", null, "回合"))),
-        h("tbody", null, tasks.map((task) => {
+      return h(Table, { head: ["任务", ...labels.map((label) => [label === "seed" ? "起点" : "最终", "num"]), ...(labels.length > 1 ? [["最终 − 起点", "num"]] : []), "回合"] },
+        tasks.map((task) => {
           const entries = labels.map((label) => versions[label][field]?.[task] || {});
           const scores = entries.map((entry) => entry.score);
           const change = labels.length > 1 && isNum(scores[0]) && isNum(scores[1]) ? scores[1] - scores[0] : null;
@@ -1190,7 +1194,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             scores.map((value, index) => h("td", { key: labels[index], className: `num ${toneClass(value)}` }, signed(value, 3))),
             labels.length > 1 ? h("td", { className: `num ${toneClass(change)}` }, signed(change, 3)) : null,
             h("td", { className: "eg-faint" }, entries.map((entry) => entry.episode ? `${short(entry.episode)}${entry.reused ? "（复用）" : ""}` : "").filter(Boolean).join("、")));
-        }))));
+        }));
     }
 
     function Verification({ view, catalog, ask, act }) {
@@ -1220,17 +1224,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           hint: sealed.validation ? "最后一道检验，每个版本每个任务只评一次" : "须在 validation 之后",
           button: h(Button, { variant: "primary", disabled: !finished || busy || !sealed.validation, onClick: () => run("sealed", "final_test") }, "评测 final_test") },
       ];
-      const intervalKind = view.gates?.test === "signed_rank"
-        ? "任务多到符号秩检验能下结论时是各任务增益的符号秩区间，例如封存时期的全部任务；不够多时，3 个及以上任务用 t 区间，更少用分层自助区间"
-        : "3 个及以上任务时是各任务增益的 t 区间";
       const live = view.active || (view.status === "running" && !view.stale);
-      return h(Card, { title: "独立验证", hint: finished ? `最终版本相对起点版本的提升，还要在进化中没见过的任务和更晚的时期上各验证一次。区间的算法和采纳门槛相同（${intervalKind}）；每个版本在每个任务上只有一个结果，所以不做单任务否决。`
+      return h(Card, { title: "独立验证", hint: finished ? "最终版本相对起点版本的提升，还要在进化中没见过的任务和更晚的时期上各验证一次。"
+        + `区间的算法和采纳门槛相同（${view.gates?.test === "signed_rank" ? "任务太少时改用 t 区间或分层自助区间" : "任务少于 3 个时改用分层自助区间"}）；`
+        + "每个版本在每个任务上只有一个结果，所以不做单任务否决。"
         : live ? "运行完成后可以验证。" : "运行还没有结束：要验证现在的在任版本，先点上面的「结束运行」（结束后不能再继续）；也可以继续运行，跑完再验证。",
         actions: busy ? h(Tag, { tone: "info" }, "验证进行中") : null },
-      h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-        h("thead", null, h("tr", null, h("th", null, "检验"), h("th", { className: "num" }, "起点"), h("th", { className: "num" }, "最终"),
-          h("th", { className: "num" }, "最终 − 起点"), h("th", null, "95% 区间 → 结论"))),
-        h("tbody", null, rows.map((row) => {
+      h(Table, { head: ["检验", ["起点", "num"], ["最终", "num"], ["最终 − 起点", "num"], "95% 区间 → 结论"] },
+        rows.map((row) => {
           if (!row.body) {
             return h("tr", { key: row.key }, h("td", null, row.label), h("td", { colSpan: 3, className: "eg-faint" }, row.hint), h("td", null, row.button));
           }
@@ -1248,7 +1249,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               row.key === "holdout" && unfinished.length ? h("div", { style: { marginTop: "6px" } },
                 h("span", { className: "eg-bad" }, `${unfinished.length} 个任务没有成绩 `),
                 h(Button, { disabled: busy, onClick: () => run("holdout") }, "补跑")) : null));
-        })))),
+        })),
       rows.filter((row) => row.body).map((row) => h(Details, { key: row.key, summary: `${row.label}：逐任务成绩` },
         h(VersionsTable, { body: row.body, field: row.field, catalog }))),
       h(AdoptionChecks, { view, ask, act, busy, live }));
@@ -1284,13 +1285,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       };
       return h("div", { className: "eg-subsection" },
         h("h3", null, "各次采纳的复核"),
-        h("p", { className: "eg-hint" }, "每次采纳都是在训练任务的隐藏期上选出来的小提升，选得多了，一部分可能只是碰上了隐藏期的运气。"
-          + "所以每次采纳后，宿主把被采纳的候选和被它替换的版本提交过的程序，在训练任务更晚、谁都没看过的封存时期 validation 上再评一次。"
-          + "每个版本每个任务在这个时期只评一次：被替换的版本以前被采纳时评过，就用那次的结果。评审智能体看不到这些结果，它们只给人判断这次进化。"),
-        h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "采纳"), h("th", { className: "num" }, "采纳时（隐藏期）"),
-            h("th", { className: "num" }, "复核（validation）"), h("th", null, "区间"), h("th", { className: "num" }, "更好的任务"))),
-          h("tbody", null, adoptions.map((item) => {
+        hint("每次采纳都是在训练任务的隐藏期上选出来的小提升，选得多了，一部分可能只是碰上了隐藏期的运气。"
+          + "所以被采纳的候选和被它替换的版本提交过的程序，还要在训练任务更晚、谁都没看过的封存时期 validation 上再评一次"
+          + "（每个版本每个任务只评一次，评过的直接复用）。评审智能体看不到这些结果，它们只给人判断这次进化。"),
+        h(Table, { head: ["采纳", ["采纳时（隐藏期）", "num"], ["复核（validation）", "num"], "区间", ["更好的任务", "num"]] },
+          adoptions.map((item) => {
             const check = checks.get(item.generation);
             const decision = check?.decision;
             const { better, total } = tasksBetter(decision);
@@ -1304,7 +1303,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
                   h("td", { className: "num" }, `${better} / ${total}`))
                 : h("td", { colSpan: 3, className: check?.error ? "eg-bad" : "eg-faint" },
                   check?.error ? `没有完成：${String(check.error).slice(0, 120)}` : check ? "没有可比较的任务" : live ? "运行会在这一代之后复核" : "还没有复核"));
-          })))),
+          })),
         pending.length && !live ? h("div", { style: { marginTop: "8px" } },
           h(Button, { disabled: busy, onClick: run }, `复核 ${pending.length} 次采纳`)) : null);
     }
@@ -1391,21 +1390,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const nodes = new Map();
       const edges = [];
       const add = (node) => nodes.set(node.id, node);
-      const alias = (digest) => { // which version the trunk holds: the seed, or the candidate adopted
-        if (digest === view.seed?.digest) return "起点";
-        for (const round of rounds) {
-          const found = (round.candidates || []).find((candidate) => candidate.digest === digest);
-          if (found) return `g${round.generation}${found.name}`;
-        }
-        return "";
-      };
       const level = versionLevels(view);
       const origin = seedOrigin(view);
       rounds.forEach((round, index) => {
         const score = versionMean(round, round.incumbent);
-        const seed = round.incumbent === view.seed?.digest;
         add({ id: `t${index}`, kind: "trunk", x: colX(index), y: rowY(0), tone: "neutral",
-          title: round.generation === 0 ? `起点：${origin}` : `在任：${seed ? "起点" : alias(round.incumbent) || short(round.incumbent).slice(0, 6)}`,
+          title: round.generation === 0 ? `起点：${origin}` : `在任：${versionAlias(view, round.incumbent)}`,
           sub: isNum(score) ? [{ text: `这一代回合均分 ${signed(score, 3)}` }] : [{ text: short(round.incumbent).slice(0, 6) }],
           tip: `${round.generation === 0 ? "起点版本" : "这一代开始时的在任版本（当前在用的版本）"} ${short(round.incumbent)}`
             + (round.generation === 0 && (view.ancestry || [])[0] ? `：${day(view.ancestry[0].started_at)} 那次运行（${view.ancestry[0].run_id}）采纳的候选` : "")
@@ -1417,7 +1407,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const changed = view.incumbent !== view.seed?.digest;
       const finalScore = level(view.incumbent);
       add({ id: `t${end}`, kind: "trunk", x: colX(end), y: rowY(0), tone: done && changed ? "success" : "neutral",
-        title: `${done ? "最终" : "现在"}：${changed ? alias(view.incumbent) || short(view.incumbent).slice(0, 6) : "仍是起点"}`,
+        title: `${done ? "最终" : "现在"}：${changed ? versionAlias(view, view.incumbent) : "仍是起点"}`,
         sub: [{ text: `${changed ? "换了新版本" : "没有换版本"}${isNum(finalScore) ? ` · ${signed(finalScore, 3)}` : ""}` }],
         tip: `${done ? "进化结束时" : "现在"}的在任版本 ${short(view.incumbent)}${isNum(finalScore) ? `\n成绩 ${signed(finalScore, 3)}：它作为在任版本的全部回合在各训练任务上的平均` : ""}` });
       for (let index = 0; index < end; index += 1) edges.push({ kind: "trunk", from: `t${index}`, to: `t${index + 1}` });
@@ -1472,9 +1462,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const width = colX(end) + G.node + G.left;
       const height = rowY(rows) + G.height + 6;
       const order = { trunk: 0, fork: 1, external: 2, base: 3, adopt: 4 };
-      // scaled down to the card's width rather than cut off behind a scrollbar; never drawn larger than its size
+      // scaled down to the card's width, but not below 80% so its text stays readable (a wider graph scrolls);
+      // never drawn larger than its size
       return h("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "进化谱系图",
-        style: { width: "100%", maxWidth: `${width}px`, height: "auto" } },
+        style: { width: "100%", minWidth: `${Math.round(width * 0.8)}px`, maxWidth: `${width}px`, height: "auto" } },
         heads.map((item) => h("text", { key: `h${item.x}`, x: item.x + 2, y: 14, className: "head" }, item.text)),
         [...edges].sort((a, b) => order[a.kind] - order[b.kind]).map((edge, index) => {
           const d = path(edge);
@@ -1511,7 +1502,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       for (const round of view.rounds || []) {
         for (const candidate of round.candidates || []) kinds.add(candidate.base?.digest ? "base" : "fork");
       }
-      return h(Card, { title: "版本从哪里来", hint: "每一列是一代。最上面一行是在任版本（当前在用的版本）：一路平着连下去，表示一直没有换。下面是这一代评审改出的候选，连线指向它是在哪个版本上改的。候选被采纳时，有一条绿线连到下一代的在任版本。点一个版本，跳到下面那一代的过程。" },
+      return h(Card, { title: "版本从哪里来", hint: "每一列是一代。最上面一行是在任版本（当前在用的版本）：一路平着连下去，表示一直没有换。下面是这一代评审改出的候选，连线指向它是在哪个版本上改的。候选被采纳时，有一条绿线连到下一代的在任版本。点一个版本，跳到「每一代」里那一代的过程。" },
         h("div", { className: "eg-graph" }, h(Lineage, { view, catalog, onPick })),
         h("div", { className: "eg-legend eg-graph" },
           item(h(Line, { kind: "trunk" }), "在任版本延续到下一代"),
@@ -1520,7 +1511,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           item(h(Line, { kind: "adopt" }), "采纳：成为下一代的在任"),
           item(h(Swatch, { tone: "adopted" }), "采纳"),
           item(h(Swatch, { tone: "danger" }), "没通过检查，没运行")),
-        h("p", { className: "eg-hint" }, "“比在任高 0.016 · 在误差内”：候选的平均成绩比在任版本高 0.016，但这个差别比误差范围小，分不清是真的更好还是运气。"
+        hint("“比在任高 0.016 · 在误差内”：候选的平均成绩比在任版本高 0.016，但这个差别比误差范围小，分不清是真的更好还是运气。"
           + "只有“可信地更好”且高得足够多的候选才会被采纳。"));
     }
 
@@ -1532,8 +1523,37 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return ["保留在任", "neutral"];
     }
 
+    /** A generation in one line: what came of it, in numbers (and why its best candidate was not adopted). */
+    function roundLine(view, round, tries, catalog) {
+      const parts = [];
+      const compared = (round.candidates || []).filter((candidate) => isNum(candidate.decision?.delta));
+      const describe = (candidate) => {
+        const { better, total } = tasksBetter(candidate.decision);
+        return `${signed(candidate.decision.delta, 4)}（${total} 个任务里 ${better} 个更好）`;
+      };
+      if (round.generation === 0) {
+        const score = versionMean(round, round.incumbent);
+        parts.push(`起点 ${short(round.incumbent).slice(0, 6)}`, isNum(score) ? `均分 ${signed(score, 3)}` : null);
+      } else if (round.adopted) {
+        const chosen = compared.find((candidate) => candidate.name === round.adopted);
+        parts.push(chosen ? `比在任 ${describe(chosen)}` : null);
+        const check = round.sealed_check?.error ? null : round.sealed_check?.decision;
+        if (check) parts.push(`封存期复核 ${signed(check.delta, 3)}`);
+      } else if (compared.length) {
+        const best = compared.reduce((top, candidate) => (candidate.decision.delta > top.decision.delta ? candidate : top));
+        parts.push(`最好的候选 ${best.name} ${describe(best)}：${reasonText(catalog, best.decision.reason)}`);
+      } else if ((round.candidates || []).length) {
+        const counts = {};
+        for (const candidate of round.candidates) counts[candidate.status] = (counts[candidate.status] || 0) + 1;
+        parts.push(Object.entries(counts).map(([status, count]) => `${count} 个${(CAND_STATUS[status] || [status])[0]}`).join("、"));
+      }
+      parts.push(`${(round.episodes || []).length} 个回合`, round.evolver ? `评审 ${duration(round.evolver.seconds)}` : null);
+      if (tries > 1) parts.push(`跑了 ${tries} 次（前 ${tries - 1} 次被中断，不算数）`);
+      return parts.filter(Boolean).join(" · ");
+    }
+
     function Process({ view, catalog, go, focus }) {
-      const rounds = view.rounds || [];
+      const rounds = lastAttempts(view); // a generation run again after an interruption: the attempt that counts
       const [open, setOpen] = useState(() => new Set([rounds.length - 1]));
       useEffect(() => setOpen((old) => (old.has(rounds.length - 1) ? old : new Set([...old, rounds.length - 1]))), [rounds.length]);
       useEffect(() => {
@@ -1558,14 +1578,15 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         else next.delete(index);
         return next;
       });
-      return h(Card, { title: "每一代的过程", hint: "每一代按顺序：评审读了什么、找到什么问题；候选从哪里出发、改了什么、为什么；宿主的检查；候选和在任版本在各训练任务上的回合；比较和决定。" },
-        rounds.map((round, index) => h(GenerationStory, { key: `${round.generation}-${round.started_at}`, view, round, index, catalog, go,
+      const tries = (generation) => (view.rounds || []).filter((item) => item.generation === generation).length;
+      return h(Card, { title: "每一代的过程", hint: "每一行是一代，点开按顺序看：评审读了什么、找到什么问题；候选从哪里出发、改了什么、为什么；宿主的检查；候选和在任版本在各训练任务上的回合；比较和决定。" },
+        rounds.map((round, index) => h(GenerationStory, { key: round.generation, view, round, index, catalog, go, tries: tries(round.generation),
           open: open.has(index), onToggle: toggle, focus: focus?.generation === round.generation ? focus : null })));
     }
 
-    function GenerationStory({ view, round, index, catalog, go, open, onToggle, focus }) {
+    function GenerationStory({ view, round, index, catalog, go, open, onToggle, focus, tries }) {
       const [text, tone] = roundOutcome(view, round);
-      const scores = (round.episodes || []).filter((item) => isNum(item.score)).map((item) => item.score);
+      const line = roundLine(view, round, tries, catalog);
       const back = { page: "evolution", id: view.run_id, focus: { generation: round.generation } };
       const steps = round.generation === 0 ? [
         ["起点版本在每个训练任务上运行", h(EpisodeGrid, { view, round, catalog, go, back })],
@@ -1574,14 +1595,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         ["评审：读证据，找问题", h(EvolverStep, { view, round, go, back })],
         ["候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
         ["回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back })],
-        ["比较：候选 − 在任", h(DecisionStep, { view, round, catalog })],
-        ["结果", h(Outcome, { view, round })],
+        ["比较（候选 − 在任）与结果", h(Fragment, null, h(DecisionStep, { view, round, catalog }), h(Outcome, { view, round }))],
       ];
       return h("details", { id: `eg-gen-${index}`, className: "eg-round", open, onToggle: (event) => onToggle(index, event.currentTarget.open) },
         h("summary", null, h("span", { className: "eg-round-no" }, `第 ${round.generation} 代`), h(Tag, { tone }, text),
-          h("span", { className: "eg-round-sum" }, [`在任 ${short(round.incumbent)}`, round.generation ? `${(round.candidates || []).length} 个候选` : null,
-            `${(round.episodes || []).length} 个回合`, scores.length ? `回合平均 ${signed(mean(scores), 3)}` : null,
-            round.evolver ? `评审 ${duration(round.evolver.seconds)}` : null].filter(Boolean).join(" · "))),
+          h("span", { className: "eg-round-sum", title: line }, line)),
         open ? h("div", { className: "eg-round-body eg-steps" }, steps.map(([title, body], i) => h("div", { key: title, className: "eg-story" },
           h("span", { className: "eg-story-no" }, i + 1), h("h3", null, title), h("div", { className: "eg-story-body" }, body)))) : null);
     }
@@ -1591,34 +1609,25 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const recorded = Boolean(evolver?.trajectory?.dir);
       const { data: session, error } = useResource(recorded ? Api.evolverSession(view.run_id, round.generation, false) : null);
       if (!evolver) {
-        return h("p", { className: "eg-hint" }, view.active && !round.finished ? "评审智能体正在阅读证据、编写候选…" : "这一代没有评审记录。");
+        return hint(view.active && !round.finished ? "评审智能体正在阅读证据、编写候选…" : "这一代没有评审记录。");
       }
       const page = () => go({ page: "evolver", id: `${view.run_id}|${round.generation}`, back });
-      const then = evolver.rerun ? "所以这一代不算数：等模型服务能回复后，这一代重新评审。" : "所以这一代不算数：运行停下，继续时这一代重跑。";
-      const failed = evolver.status === "error" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话出错："), evolver.error || "")
-        : evolver.status === "infra_failed" && evolver.stalled ? h(Alert, { tone: "danger" }, h("b", null, "模型服务故障让评审会话没法工作："),
-          `${isNum(evolver.stalled_seconds) ? `${Math.round(evolver.stalled_seconds)} 秒` : "大半时间"}都在等失败的模型调用，也没有留下能比较的候选，`
-          + `${then}${evolver.upstream_error ? `最后一次失败：${evolver.upstream_error}` : ""}`)
-          : evolver.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "评审会话没有得到模型回复："), evolver.upstream_error || "服务故障",
-            evolver.rerun ? "。等模型服务能回复后，这一代重新评审。" : null) : null;
+      const trouble = sessionTrouble(evolver);
       const earlier = (round.earlier_evolvers || []).filter((item) => item.rerun).length;
-      const redone = earlier && !evolver.rerun ? h("p", { className: "eg-hint" }, `这一代的第一次评审会话被模型服务故障打断，下面是服务恢复后重新做的评审（之前那次用了 ${duration(round.earlier_evolvers[0].seconds)}）。`) : null;
+      const redone = earlier && !evolver.rerun ? hint(`这一代的第一次评审会话被模型服务故障打断，下面是服务恢复后重新做的评审（之前那次用了 ${duration(round.earlier_evolvers[0].seconds)}）。`) : null;
       const steps = recorded && session?.recorded !== false; // a session whose model never answered leaves no steps
       const final = String(evolver.final_text || "").trim();
       return h(Fragment, null,
         h("div", { className: "eg-story-sub" }, [evolver.status === "finished" ? null : SESSION_STATUS[evolver.status]?.[0] || evolver.status,
           duration(evolver.seconds), evolver.tokens ? `${tokens(evolver.tokens)} token` : null, `${evolver.llm_calls ?? "–"} 次模型调用`,
           session?.turns ? `${session.turns} 步` : null, evolver.continuations ? `含 ${evolver.continuations} 段续跑` : null].filter(Boolean).join(" · "),
-        steps ? h(Fragment, null, " · ", h("a", { href: "#", onClick: (event) => {
-          event.preventDefault();
-          page();
-        } }, "看评审的每一步 →")) : null),
-        failed,
+        steps ? h(Fragment, null, " · ", h(Link, { onClick: page }, "看评审的每一步 →")) : null),
+        trouble ? h(Alert, { tone: "danger" }, h("b", null, trouble[0]), trouble[1]) : null,
         redone,
         error ? h(Alert, { tone: "warning" }, `读不到评审会话：${error.message}`) : null,
         session?.recorded ? h(Reads, { reads: session.reads, go, back, label: "看过的材料（按第一次看的先后；悬停看是第几步）" })
-          : session ? h("p", { className: "eg-hint" }, "没有存下这次会话的模型调用，看不到它读了什么。")
-            : recorded && !error ? h("p", { className: "eg-hint" }, "正在读取评审会话…") : null,
+          : session ? hint("没有存下这次会话的模型调用，看不到它读了什么。")
+            : recorded && !error ? hint("正在读取评审会话…") : null,
         final ? h(Fragment, null, h("div", { className: "eg-label" }, "评审的判断（会话最后的回复）"),
           h(Clamp, { height: 280 }, h(Markdown, { text: final }))) : null,
         (round.notes || []).length ? h(Fragment, null, h("div", { className: "eg-label" }, "评审记下的笔记（以后各代的证据里会出现）"),
@@ -1665,14 +1674,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         label ? h("div", { className: "eg-label" }, label) : null,
         items.length ? h("dl", { className: "eg-reads" }, [...groups.entries()].flatMap(([name, list]) => [
           h("dt", { key: `t${name}` }, name), h("dd", { key: `d${name}` }, list.map(chip))]))
-          : h("p", { className: "eg-hint" }, "会话里没有读工作区文件的记录。"),
+          : hint("会话里没有读工作区文件的记录。"),
         items.length && !transcripts ? h("p", { className: "eg-hint eg-warn" }, "没有打开任何回合的会话记录（evidence/episodes/…/transcript.md）。") : null);
     }
 
     function CandidatesStep({ view, round, index, catalog, focus }) {
       const candidates = round.candidates || [];
       if (!candidates.length) {
-        return h("p", { className: "eg-hint" }, round.evolver ? "评审没有留下候选。" : "评审会话结束后出现。");
+        return hint(round.evolver ? "评审没有留下候选。" : "评审会话结束后出现。");
       }
       return candidates.map((candidate) => h(CandidateStory, { key: candidate.name, view, round, index, candidate, catalog,
         focused: focus?.name === candidate.name }));
@@ -1694,16 +1703,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           .map(([key, text]) => h("button", { key, type: "button", "aria-pressed": String(against === key), onClick: () => setAgainst(key) }, text))))
         : "改了什么（相对在任版本）"),
       error ? h(Alert, { tone: "warning" }, `读不到两个版本的差异：${error.message}`)
-        : !changes ? h("p", { className: "eg-hint" }, "正在读取…")
+        : !changes ? hint("正在读取…")
           : changes.length ? h(Fragment, null,
             h("div", { className: "eg-chips" }, changes.map((item) => h("span", { key: item.path, className: "eg-chip" }, item.path, " ",
               h("span", { className: "eg-good" }, `+${item.added ?? 0}`), h("span", { className: "eg-bad" }, `${MINUS}${item.removed ?? 0}`)))),
             h(Details, { key: against, summary: `看改动（${changes.length} 个文件）` },
               changes.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` }))))
-            : h("p", { className: "eg-hint" }, fromBase ? "和出发的版本相同。" : "没有改动。"),
+            : hint(fromBase ? "和出发的版本相同。" : "没有改动。"),
       h("div", { className: "eg-label" }, "提案：为什么这样改（评审写的）"),
       written(candidate.proposal) ? h(Clamp, { height: 200 }, h(Markdown, { text: candidate.proposal }))
-        : h("p", { className: "eg-hint" }, "没有写提案（只有宿主给的空模板）。"),
+        : hint("没有写提案（只有宿主给的空模板）。"),
       h(CheckView, { candidate, catalog }));
     }
 
@@ -1718,21 +1727,19 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const warnings = candidate.warnings || [];
       let body;
       if (tasks.length) {
-        body = h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "训练任务"), h("th", { className: "num" }, "候选的模板"), h("th", { className: "num" }, "在任的模板"),
-            h("th", { className: "num" }, "差"))),
-          h("tbody", null, tasks.map(([task, item]) => {
+        body = h(Table, { head: ["训练任务", ["候选的模板", "num"], ["在任的模板", "num"], ["差", "num"]] },
+          tasks.map(([task, item]) => {
             const change = item.status === "ok" && isNum(item.score) && isNum(item.incumbent_score) ? item.score - item.incumbent_score : null;
             return h("tr", { key: task }, h("td", null, h(TaskLabel, { catalog, id: task })),
               h("td", { className: "num" }, item.status === "ok" ? signed(item.score, 3) : h("span", { className: "eg-bad" }, item.status)),
               h("td", { className: "num" }, signed(item.incumbent_score, 3)),
               h("td", { className: `num ${toneClass(change)}` }, signed(change, 3)));
-          }))));
+          }));
       } else if (smoke) {
-        body = h("p", { className: "eg-hint" }, `模板试运行：${smoke.status}，本地 ${signed(smoke.score, 3)}`
+        body = hint(`模板试运行：${smoke.status}，本地 ${signed(smoke.score, 3)}`
           + `${isNum(smoke.incumbent_score) ? `（在任的模板 ${signed(smoke.incumbent_score, 3)}）` : ""}，覆盖率 ${Math.round((smoke.coverage || 0) * 100)}%`);
       } else if (candidate.status !== "invalid") {
-        body = h("p", { className: "eg-hint" }, "模板代码没有改动，不需要试运行。");
+        body = hint("模板代码没有改动，不需要试运行。");
       }
       return h(Fragment, null,
         h("div", { className: "eg-label" }, "宿主的检查：能否加载、是否超限、有没有任务的专有名称；模板改了就在本地检验期上实际运行（不是隐藏期）"),
@@ -1757,7 +1764,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const tasks = view.suite?.train || [];
       const entries = round.episodes || [];
       if (!entries.length) {
-        return h("p", { className: "eg-hint" }, !round.finished && view.active ? "回合正在运行（见上面的「正在进行」），全部结束后出现在这里。" : "这一代没有回合记录。");
+        return hint(!round.finished && view.active ? "回合正在运行（见「概览」里的「正在进行」），全部结束后出现在这里。" : "这一代没有回合记录。");
       }
       const earlier = earlierIncumbent(view, round);
       const rows = [{ key: "incumbent", label: round.generation === 0 ? "起点版本" : "在任", match: (entry) => entry.role === "incumbent" }];
@@ -1766,46 +1773,38 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           rows.push({ key: candidate.name, label: `候选 ${candidate.name}`, match: (entry) => entry.role === "candidate" && entry.candidate === candidate.name });
         }
       }
+      const scores = (list) => list.filter((entry) => SCORED.includes(entry.status) && isNum(entry.score)).map((entry) => entry.score);
+      const bases = new Map(tasks.map((task) => [task, mean(scores([...entries, ...earlier].filter((entry) => entry.role === "incumbent" && entry.task === task)))]));
       const chip = (entry, faded) => {
         const ok = SCORED.includes(entry.status) && isNum(entry.score);
+        const base = round.generation ? bases.get(entry.task) : null; // the colour: above or below the incumbent's mean
         return h("button", { key: entry.episode || `${entry.task}-${entry.replicate}-${entry.generation ?? ""}`, type: "button", className: "eg-score",
-          disabled: !entry.episode, style: { background: ok ? mix(entry.score, 0.3) : undefined, opacity: faded ? 0.5 : undefined },
-          title: `${entry.episode || ""}${faded ? `：第 ${entry.generation} 代的在任回合，比较时一并计入` : ""}\n`
-            + `${EP_STATUS[entry.status]?.[0] || entry.status} · ${tokens(entry.tokens)} token · ${duration(entry.seconds)}`,
+          disabled: !entry.episode, style: { background: ok && isNum(base) ? mix(entry.score - base, 0.03) : undefined, opacity: faded ? 0.5 : undefined },
+          title: `${entry.episode || "回合没能开始"}${faded ? `：第 ${entry.generation} 代的在任回合，比较时一并计入` : ""}\n`
+            + `${EP_STATUS[entry.status]?.[0] || entry.status} · ${tokens(entry.tokens)} token · ${duration(entry.seconds)}`
+            + `${entry.error ? `\n${String(entry.error).slice(0, 300)}` : ""}`,
           onClick: () => go({ page: "episode", id: entry.episode, back }) },
         ok ? signed(entry.score, 3) : h("span", { className: "eg-bad" }, EP_STATUS[entry.status]?.[0] || entry.status));
       };
       const pooled = earlier.length ? Math.round((earlier.length + entries.filter((entry) => entry.role === "incumbent").length) / Math.max(1, tasks.length)) : 0;
       return h(Fragment, null,
-        h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "版本"), tasks.map((task) => h("th", { key: task, title: task }, taskShort(catalog, task))),
-            h("th", { className: "num", title: "各任务回合均值的平均（在任一行含淡色的早先回合）" }, "平均"))),
-          h("tbody", null, rows.map((row) => {
+        h(Table, { head: ["版本", ...tasks.map((task) => taskHead(catalog, task, "")), ["平均", "num", "各任务回合均值的平均（在任一行含淡色的早先回合）"]] },
+          rows.map((row) => {
             const means = [];
             return h("tr", { key: row.key }, h("td", { style: { whiteSpace: "nowrap" } }, row.label),
               tasks.map((task) => {
                 const own = entries.filter((entry) => row.match(entry) && entry.task === task);
                 const before = row.key === "incumbent" ? earlier.filter((entry) => entry.task === task) : [];
-                const values = [...own, ...before].filter((entry) => SCORED.includes(entry.status) && isNum(entry.score)).map((entry) => entry.score);
+                const values = scores([...own, ...before]);
                 if (values.length) means.push(mean(values));
                 return h("td", { key: task }, h("div", { className: "eg-cell-chips" }, own.map((entry) => chip(entry, false)), before.map((entry) => chip(entry, true))));
               }),
               h("td", { className: "num" }, h("b", null, means.length === tasks.length ? signed(mean(means), 3) : "–")));
-          })))),
-        h("p", { className: "eg-hint" }, "每个格子是一个回合的隐藏期总技能（相对朴素基线，大于 0 更好），点开看那个回合。"
+          })),
+        hint("每个格子是一个回合的隐藏期总技能（相对朴素基线，大于 0 更好），点开看那个回合（悬停看状态、token 和用时）。"
+          + (round.generation ? "底色表示比在任版本在这个任务上的均值高（绿）还是低（红）。" : "")
           + (earlier.length ? `淡色是在任版本在之前各代跑过的回合（专家意见相同），比较时和本代的一起算，每个任务约 ${pooled} 个。` : "")
-          + (round.generation ? "同一个版本的几个回合之间差别很大，所以要多跑几次、在多个任务上比较。" : "")),
-        h(Details, { summary: `逐个回合（${entries.length} 个）` }, h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "版本"), h("th", null, "任务"), h("th", null, "状态"), h("th", { className: "num" }, "隐藏期总分"),
-            h("th", { className: "num" }, "Token"), h("th", null, "回合"))),
-          h("tbody", null, entries.map((entry, i) => h("tr", { key: entry.episode || i, className: entry.episode ? "eg-click" : "",
-            onClick: entry.episode ? () => go({ page: "episode", id: entry.episode, back }) : undefined },
-          h("td", null, entry.role === "incumbent" ? (round.generation === 0 ? "起点版本" : "在任") : `候选 ${entry.candidate}`),
-          h("td", null, h(TaskLabel, { catalog, id: entry.task })),
-          h("td", null, h(StatusTag, { map: EP_STATUS, keyName: entry.status })),
-          h("td", { className: `num ${toneClass(entry.score)}` }, signed(entry.score)),
-          h("td", { className: "num" }, tokens(entry.tokens)),
-          h("td", null, entry.episode ? h(Mono, null, entry.episode) : entry.error || ""))))))));
+          + (round.generation ? "同一个版本的几个回合之间差别很大，所以要多跑几次、在多个任务上比较。" : "")));
     }
 
     /** Why a comparison came out as it did, in words. */
@@ -1835,7 +1834,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function DecisionStep({ view, round, catalog }) {
       const compared = (round.candidates || []).filter((candidate) => candidate.decision);
       if (!compared.length) {
-        return h("p", { className: "eg-hint" }, round.finished ? "没有候选进入比较。" : view.active ? "回合全部结束后比较。" : "这一代没有完成比较。");
+        return hint(round.finished ? "没有候选进入比较。" : view.active ? "回合全部结束后比较。" : unfinishedText(view));
       }
       const gate = view.gates?.min_delta;
       const values = [0, ...(isNum(gate) ? [gate] : [])];
@@ -1882,13 +1881,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h("div", { className: "eg-verdict" }, verdict(decision, view.gates, catalog)));
       });
       return h(Fragment, null, blocks,
-        h("p", { className: "eg-hint" }, `每个任务一行：候选回合的均值 − 在任回合的均值，点是增益，横条是 ${taskLevel}% 区间（悬停看两边的均值和回合数）。`
+        hint(`每个任务一行：候选回合的均值 − 在任回合的均值，点是增益，横条是 ${taskLevel}% 区间（悬停看两边的均值和回合数）。`
           + `“平均”一行是 ${level}% 区间${compared.length > 1 ? "（按这一代的候选数加宽）" : ""}。竖线是 0，虚线是实用门槛 ${signed(gate, 3)}。`
           + "采纳要同时满足：平均增益超过门槛、区间下限大于 0、没有任务可信变差。"));
     }
 
+    /** A generation that did not finish: run again on resume, or left out when the run was ended there. */
+    const unfinishedText = (view) => (view.status === "finished" ? "运行在这一代完成之前结束了，这一代不算数。" : "这一代没有完成；继续运行时会重跑这一代。");
+
     function Outcome({ view, round }) {
-      if (!round.finished) return h("p", { className: "eg-hint" }, view.active ? "这一代还在进行。" : "这一代没有完成；继续运行时会重跑这一代。");
+      if (!round.finished) return round.generation ? null : hint(view.active ? "这一代还在进行。" : unfinishedText(view));
       if (round.generation === 0) {
         return h("p", null, `起点版本 ${short(round.incumbent)} 在各训练任务上的均分 ${signed(versionMean(round, round.incumbent), 3)}。`
           + "这些回合是第 1 代比较时在任版本的成绩；之后每一代，在任版本还会和候选同时再跑。");
@@ -1897,7 +1899,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         const check = checkText(round.sealed_check);
         return h(Fragment, null, h("p", null, h("b", { className: "eg-good" }, `采纳候选 ${round.adopted}：`),
           `从下一代起，在任版本由 ${short(round.incumbent)} 换成 ${short(round.incumbent_after)}。`),
-        check ? h("p", { className: "eg-hint" }, check) : null);
+        check ? hint(check) : null);
       }
       if (round.outcome === "no_candidates") return h("p", null, `没有可以运行的候选，在任版本仍是 ${short(round.incumbent)}。`);
       return h("p", null, `没有候选被采纳，在任版本仍是 ${short(round.incumbent)}。`
@@ -1972,41 +1974,28 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return `从 ${signed(from, 3)} 到 ${signed(to, 3)}（差别在误差内）`;
     }
 
-    function spread(values, sign) {
-      const lo = Math.min(...values);
-      const hi = Math.max(...values);
-      const text = (a, b) => (Math.abs(a - b) < 5e-4 ? `${sign}${plain(a, 3)}` : `${sign}${plain(a, 3)}～${sign}${plain(b, 3)}`);
-      return text(lo, hi);
+    const NOT_ADOPTED = [["passed", "也通过了门槛（同一代只采纳增益最大的一个）"], ["veto", "有训练任务可信地变差（一票否决）"],
+      ["small", "可信地更好但高得不够多（没超过门槛）"], ["noise", "在误差内（分不清好坏）"], ["below", "可信地更差"]];
+
+    /** The compared candidates that were not adopted, in one sentence: why, and on how many tasks they were better. */
+    function notAdoptedText(rest, adoptions) {
+      const kind = (item) => (item.candidate.status === "passed" ? "passed" : item.side === "below" ? "below"
+        : String(item.decision.reason || "").startsWith("task_regression") ? "veto" : item.side === "above" ? "small" : "noise");
+      const counts = {};
+      for (const item of rest) counts[kind(item)] = (counts[kind(item)] || 0) + 1;
+      const listed = NOT_ADOPTED.filter(([name]) => counts[name]);
+      const many = rest.length > 1;
+      const head = adoptions ? `另外 ${rest.length} 个候选没有被采纳`
+        : `${new Set(rest.map((item) => item.round.generation)).size} 代共 ${rest.length} 个候选进入比较，${many ? "没有一个" : "没有"}被采纳`;
+      const why = listed.length === 1 ? `，${many ? "都" : ""}${listed[0][1]}` : `：${listed.map(([name, text]) => `${counts[name]} 个${text}`).join("，")}`;
+      const better = rest.map((item) => tasksBetter(item.decision));
+      const [lo, hi] = [Math.min(...better.map((item) => item.better)), Math.max(...better.map((item) => item.better))];
+      return `${head}${why}；${many ? "它们" : "它"}在 ${Math.max(...better.map((item) => item.total))} 个训练任务里有 ${lo === hi ? lo : `${lo}～${hi}`} 个更好。`;
     }
 
-    /** Whether every comparison listed was decided by the signed-rank gate. */
-    function rankedOnly(items) {
-      return items.length > 0 && items.every((item) => item.decision.basis === "tasks_signed_rank" && (item.decision.tasks || []).length);
-    }
-
-    /** Why signed-rank comparisons within the uncertainty were not adopted: how many tasks were better, the tasks
-     * worse for every candidate, and a mean gain carried by one task. Starts with "。" like the other tails. */
-    function rankTail(items, catalog) {
-      const better = items.map((item) => item.decision.tasks.filter((task) => task.delta > 0).length);
-      const lo = Math.min(...better);
-      const hi = Math.max(...better);
-      const n = items[0].decision.tasks.length;
-      let text = `。按符号秩检验，候选要在几乎每个训练任务上都更好才算可信；${items.length > 1 ? "它们" : "它"}在 ${n} 个任务里只有 ${lo === hi ? lo : `${lo}～${hi}`} 个更好`;
-      const names = items[0].decision.tasks.map((task) => task.task);
-      const worse = names.filter((name) => items.every((item) => item.decision.tasks.some((task) => task.task === name && task.delta < 0)));
-      if (worse.length) {
-        const values = items.flatMap((item) => item.decision.tasks.filter((task) => worse.includes(task.task)).map((task) => task.delta));
-        text += `，${worse.map((name) => taskShort(catalog, name)).join("、")} 上${items.length > 1 ? "每个候选" : ""}都更差（${signed(Math.min(...values), 3)}${values.length > 1 ? `～${signed(Math.max(...values), 3)}` : ""}）`;
-      }
-      const tops = items.map((item) => item.decision.tasks.reduce((best, task) => (task.delta > best.delta ? task : best)));
-      const carried = tops.every((top, index) => top.task === tops[0].task && top.delta > 0
-        && top.delta > items[index].decision.tasks.reduce((sum, task) => sum + task.delta, 0) / 2);
-      if (carried) text += `。平均增益主要来自 ${taskShort(catalog, tops[0].task)} 一个任务（${spread(tops.map((top) => top.delta), "+")}）`;
-      return `${text}。`;
-    }
-
-    /** The run in plain words: what it does, where it started, what came out, what that means, how to read a score. */
-    function RunSummary({ view, go, catalog }) {
+    /** The run in plain words: what came out and what that means; what it does, where it started and how to read a
+     * score are folded away. */
+    function RunSummary({ view, go }) {
       const rounds = lastAttempts(view);
       const tasks = view.suite?.train || [];
       const config = view.config || {};
@@ -2020,10 +2009,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const live = key === "running" || key === "elsewhere";
       const finalScore = level(view.incumbent);
       const done = rounds.filter((round) => round.generation > 0 && round.finished).length;
-      const link = (step) => h("a", { href: "#", onClick: (event) => {
-        event.preventDefault();
-        go({ page: "evolution", id: step.run_id });
-      } }, step.run_id);
+      const link = (step) => h(Link, { onClick: () => go({ page: "evolution", id: step.run_id }) }, step.run_id);
 
       let headline;
       if (live) headline = `正在进行：${phaseOf(view)}。`;
@@ -2082,71 +2068,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         const parts = adopted.map(({ round, candidate, before, after, decision }) => `第 ${round.generation} 代采纳了候选 ${candidate.name}：`
           + `训练任务上的成绩${move(before, after, decision.interval)}，提升了 ${plain(decision.delta, 3)}（这个提升的误差范围 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]，整段在 0 以上）。`
           + held(round));
-        if (rest.length) {
-          const deltas = rest.map((item) => item.decision.delta);
-          const halves = rest.map((item) => (item.decision.interval[1] - item.decision.interval[0]) / 2);
-          const kinds = { worse: 0, noise: 0, small: 0, veto: 0, passed: 0 };
-          for (const item of rest) {
-            if (item.candidate.status === "passed") kinds.passed += 1; // passed every gate; one candidate a generation is adopted
-            else if (item.side === "below") kinds.worse += 1;
-            else if (String(item.decision.reason || "").startsWith("task_regression")) kinds.veto += 1;
-            else if (item.side === "above") kinds.small += 1;
-            else kinds.noise += 1;
-          }
-          const gain = deltas.every((value) => value > 0) ? `它们比在任版本平均高 ${spread(deltas, "")}`
-            : deltas.every((value) => value < 0) ? `它们比在任版本平均低 ${spread(deltas.map((value) => -value), "")}`
-              : `它们减去在任版本的平均成绩，在 ${signed(Math.min(...deltas), 3)} 到 ${signed(Math.max(...deltas), 3)} 之间`;
-          const head = adopted.length ? `另外 ${rest.length} 个候选没有被采纳` : `${new Set(rest.map((item) => item.round.generation)).size} 代共 ${rest.length} 个候选进入比较，${rest.length > 1 ? "都" : ""}没有被采纳`;
-          let tail;
-          if (kinds.noise === rest.length && rankedOnly(rest)) tail = rankTail(rest, catalog);
-          else if (kinds.noise === rest.length) tail = `。但比较的误差范围约 ${spread(halves, "±")}，比这个差别还大，分不清是真的更好还是运气。`;
-          else {
-            tail = `。其中 ${[kinds.worse ? `${kinds.worse} 个可信地更差` : "", kinds.noise ? `${kinds.noise} 个在误差内（分不清好坏）` : "",
-              kinds.small ? `${kinds.small} 个可信地更好，但高得不够多（没超过门槛 ${signed(view.gates?.min_delta, 3)}）` : "",
-              kinds.veto ? `${kinds.veto} 个有训练任务可信地变差（一票否决）` : "",
-              kinds.passed ? `${kinds.passed} 个也通过了门槛，但同一代只采纳增益最大的一个` : ""].filter(Boolean).join("，")}。`;
-          }
-          parts.push(`${head}。${gain}${tail}`);
-        }
+        if (rest.length) parts.push(notAdoptedText(rest, adopted.length));
         parts.push(`${endWord}${adopted.length ? `是 ${versionAlias(view, view.incumbent)}` : "仍是起点"}。`);
         result = parts.join("");
       }
 
       let next = "";
-      const noise = rest.filter((item) => item.side === "noise");
-      if (finished && !adopted.length && compared.length && noise.length === compared.length && rankedOnly(noise)) {
-        next = "这些候选在一部分训练任务上更好、在另一部分更差，还不是一致的改进。符号秩检验只看是否几乎每个任务都更好，不看平均高多少，"
-          + "所以一个任务上的大增益不会让它们通过；要被采纳，候选需要在现在变差的任务上至少不变差。";
-      } else if (finished && !adopted.length && compared.length && noise.length === compared.length && noise.filter((item) => item.decision.delta > 0).length * 2 >= noise.length) {
-        const suites = catalog?.suites || [];
-        const k = config.candidates;
-        const here = suites.find((item) => item.id === view.suite?.id);
-        const sameTasks = (item) => item.train.length === tasks.length && tasks.every((task) => item.train.includes(task));
-        const ranked = suites.filter((item) => item.id !== here?.id && sameTasks(item) && rankRule(item, k))
-          .sort((a, b) => Number(b.recommended) - Number(a.recommended))[0];
-        // better on every training task and above that suite's practical gate: only the t interval's width held it back
-        const unanimous = !ranked ? [] : noise.filter((item) => item.decision.basis === "tasks_t" && (item.decision.tasks || []).length >= 3
-          && item.decision.tasks.every((task) => task.delta > 0) && item.decision.delta > (ranked.gates?.min_delta ?? 0));
-        const wider = suites.filter((item) => item.train.length > tasks.length && (gateWidth(item, k) || rankRule(item, k)))
-          .sort((a, b) => Number(b.recommended) - Number(a.recommended))[0];
-        if (unanimous.length && ranked) {
-          const first = unanimous[0].decision.tasks;
-          const top = first.reduce((best, task) => (task.delta > best.delta ? task : best), first[0]);
-          next = `${unanimous.map((item) => `第 ${item.round.generation} 代的候选 ${item.candidate.name}`).join("、")} 在全部 ${tasks.length} 个训练任务上都比在任版本好，`
-            + `没过门槛是因为 t 区间按各任务增益之间的差别来算：一个任务上特别大的增益（${taskShort(catalog, top.task)} 上 ${signed(top.delta, 3)}）把区间拉宽了。`
-            + `「${ranked.title}」的训练任务和这次相同，改用符号秩检验，只看各任务是变好还是变差、变化大小排第几。${k} 个候选时，要 ${rankRule(ranked, k)}，平均增益又超过门槛，才采纳；`
-            + "这样的结果在那里会通过。这几个候选在相同的训练任务上比较过，在那里不会原样再跑，但评审员可以从它们出发改出新候选。";
-        } else {
-          next = `这些候选也许确实好一点，但差别小到 ${tasks.length} 个训练任务、每个版本各跑 ${config.repeats ?? "几"} 次还分辨不出来。`;
-          if (wider) {
-            next += `要分清，需要更多训练任务：「${wider.title}」有 ${wider.train.length} 个训练任务，每个版本每个任务 ${wider.repeats} 个回合时`
-              + `每代回合数${wider.train.length * wider.repeats === tasks.length * (config.repeats || 1) ? "和这次相同" : "不同"}，`
-              + (gateWidth(wider, k) && gateWidth(here, k)
-                ? `采纳区间约为这次的 ${Math.round((gateWidth(wider, k) / gateWidth(here, k)) * 100)}%。`
-                : `按符号秩检验采纳：${k} 个候选时，要 ${rankRule(wider, k)}，平均增益又超过门槛，才算可信。`)
-              + "在这样的任务组上开始的运行可以把这里没过门槛的候选原样再比较一次。";
-          } else next += "要分清，需要更多训练任务；同一任务多跑几次只减小回合间的随机差异。";
-        }
+      if (finished && !adopted.length && compared.length && compared.every((item) => item.side === "noise" && item.candidate.status !== "passed"
+        && !String(item.decision.reason || "").startsWith("task_regression"))) {
+        next = "这些候选还算不上一致的改进：它们和在任版本的差别比误差范围小，或者在一部分训练任务上更好、另一部分更差。"
+          + "没过门槛的候选留在存档里，以后的评审可以在它们上面接着改；要分清更小的差别，需要更多训练任务。";
       } else if (adopted.length && finished) {
         const holdout = view.verification?.holdout;
         const sealed = view.verification?.sealed?.final_test || view.verification?.sealed?.validation;
@@ -2165,13 +2096,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         ? `比如${finished ? "最终" : "在任"}版本的 ${signed(finalScore, 3)}，大约是误差比朴素预报${finalScore > 0 ? "低" : "高"} ${Math.round(Math.abs(finalScore) * 100)}%；` : "")
         + "0 是和朴素预报一样好，负数是更差。朴素预报是照搬现在的值，或上一个周期同一时刻的值（取更准的一个）。所有成绩都在研究智能体看不到的“隐藏期”上计算。";
 
-      return h(Card, { title: "这次进化在做什么、结果如何" }, h("div", { className: "eg-summary" },
+      return h(Card, { title: "结论" }, h("div", { className: "eg-summary" },
         h("div", { className: "eg-summary-head" }, headline),
-        h("p", null, h("b", null, "在做什么　"), what),
-        h("p", null, h("b", null, "从哪里开始　"), ...start),
         h("p", null, h("b", null, live ? "到目前为止　" : "结果　"), result),
         next ? h("p", null, h("b", null, "这说明什么　"), next) : null,
-        h("p", { className: "eg-read" }, h("b", null, "怎么读成绩　"), read)));
+        h(Details, { summary: "背景：这次在做什么、从哪里开始、成绩怎么读" },
+          h("p", null, h("b", null, "在做什么　"), what),
+          h("p", null, h("b", null, "从哪里开始　"), ...start),
+          h("p", { className: "eg-read" }, h("b", null, "怎么读成绩　"), read))));
     }
 
     const S = { width: 960, height: 290, left: 54, right: 184, top: 26, bottom: 46 };
@@ -2227,8 +2159,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const { ticks, digits } = niceTicks(lo, hi, 4);
       const plotH = S.height - S.top - S.bottom;
       const y = (value) => S.top + (1 - (value - lo) / (hi - lo)) * plotH;
-      const plotW = S.width - S.left - S.right;
       const total = columns.reduce((sum, column) => sum + column.weight, 0);
+      const width = Math.max(S.width, S.left + S.right + Math.round(total * 84)); // a long run: wider, and it scrolls
+      const plotW = width - S.left - S.right;
       let cursor = S.left;
       for (const column of columns) {
         column.x0 = cursor;
@@ -2281,8 +2214,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           onClick: column.kind === "round" ? () => onPick({ generation: column.round.generation }) : undefined },
         h("title", null, `${column.kind === "end" ? (view.status === "finished" ? "最终版本" : "现在在任的版本") : `第 ${column.round.generation} 代的在任版本`}：`
           + `${alias === "起点" ? `起点（${seedOrigin(view)}）` : alias} ${short(column.digest)}\n成绩 ${signed(column.level, 3)}：它作为在任版本的全部回合在各训练任务上的平均`)));
-        if (changed && column.kind === "round") {
-          parts.push(h("text", { key: `sl${index}`, x: column.x0 + 4, y: y(column.level) - 7, className: "strong" }, `${alias} ${signed(column.level, 3)}`));
+        if (changed && column.kind === "round") { // after an adoption only the name: the column's candidates sit beside it
+          parts.push(h("text", { key: `sl${index}`, x: column.x0 + 4, y: y(column.level) - 7, className: "strong" },
+            column.round.generation ? alias : `${alias} ${signed(column.level, 3)}`));
         }
         if (previous && previous.digest !== column.digest) {
           const chosen = (previous.points || []).find((point) => point.candidate.digest === column.digest);
@@ -2323,12 +2257,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         const head = column.kind === "before" ? `此前 ${day(column.step.started_at)}` : column.kind === "end" ? "结果" : `第 ${column.round.generation} 代`;
         const sub = column.kind === "before" ? `运行 ${runShort(column.step.run_id)}` : column.kind === "end" ? "" : roundOutcome(view, column.round)[0];
         parts.push(h("text", { key: `x${index}`, x: column.cx, y: S.height - S.bottom + 20, textAnchor: "middle", className: "strong" }, head));
-        if (sub) parts.push(h("text", { key: `xs${index}`, x: column.cx, y: S.height - S.bottom + 36, textAnchor: "middle" }, sub));
+        if (sub) {
+          parts.push(h("text", { key: `xs${index}`, x: column.cx, y: S.height - S.bottom + 36, textAnchor: "middle" },
+            h("title", null, sub), fit(sub, column.x1 - column.x0 - 6, 11.5)));
+        }
         if (index && column.kind !== columns[index - 1].kind && columns[index - 1].kind === "before") {
           parts.push(h("line", { key: `sep${index}`, className: "sep", x1: column.x0, x2: column.x0, y1: S.top - 10, y2: S.height - S.bottom + 4 }));
         }
       });
-      return h("svg", { viewBox: `0 0 ${S.width} ${S.height}`, role: "img", "aria-label": "各代成绩的变化" }, parts);
+      return h("svg", { viewBox: `0 0 ${width} ${S.height}`, role: "img", "aria-label": "各代成绩的变化",
+        style: { minWidth: `${Math.round(width * 0.8)}px` } }, parts);
     }
 
     function ScoreCard({ view, catalog, onPick }) {
@@ -2336,7 +2274,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const level = versionLevels(view);
       if (!lastAttempts(view).some((round) => isNum(level(round.incumbent)))) return null; // nothing scored yet
       const icon = (body) => h("svg", { width: 28, height: 14, "aria-hidden": "true" }, body);
-      return h(Card, { title: "成绩怎样变化", hint: "横线是在任版本（当前在用的版本）的成绩：平着表示没有换版本，往上跳一次就是换上了更好的版本。每个圆点是一个候选，竖线是它和在任版本之差的误差范围。点一个候选，跳到下面那一代的过程。" },
+      return h(Card, { title: "成绩怎样变化", hint: "横线是在任版本（当前在用的版本）的成绩：平着表示没有换版本，往上跳一次就是换上了更好的版本。每个圆点是一个候选，竖线是它和在任版本之差的误差范围。点一个候选，看那一代的过程。" },
         h("div", { className: "eg-chart" }, chart),
         h("div", { className: "eg-legend eg-chart" },
           h("span", null, icon(h("line", { className: "trunk", x1: 1, x2: 27, y1: 7, y2: 7 })), "在任版本的成绩"),
@@ -2348,11 +2286,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             "整段在下方：可信地更差"),
           h("span", null, icon(h("line", { className: "adopt", x1: 1, x2: 27, y1: 12, y2: 2 })), "采纳"),
           (view.ancestry || []).length ? h("span", null, icon(h("line", { className: "before", x1: 1, x2: 27, y1: 12, y2: 2 })), "此前的运行（起点是怎么来的）") : null,
-          h("span", null, icon(h("line", { className: "ref", x1: 1, x2: 27, y1: 7, y2: 7 })), "对照：宿主内置的预报方法（不参与进化）")),
-        h("p", { className: "eg-hint" }, "在任版本每一代都会和候选一起重新跑，回合越积越多，横线的高度就是它全部回合的平均。下面「版本从哪里来」里的“这一代回合均分”只算那一代的回合，所以同一个版本在各代会略有不同。"));
+          h("span", null, icon(h("line", { className: "ref", x1: 1, x2: 27, y1: 7, y2: 7 })), "对照：宿主内置的预报方法（不参与进化）")));
     }
 
-    function HarnessCard({ view, names }) {
+    function HarnessCard({ view }) {
       const [open, setOpen] = useState(false);
       const [tab, setTab] = useState("diff");
       const changed = view.incumbent && view.incumbent !== view.seed?.digest;
@@ -2362,14 +2299,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const texts = harness?.texts || {};
       let body = null;
       if (error) body = h(Alert, { tone: "warning" }, `读不到这个版本：${error.message}`);
-      else if (!harness) body = h("p", { className: "eg-hint" }, "正在读取…");
-      else if (tab === "diff") body = !changed ? h("p", { className: "eg-hint" }, "在任版本就是起点版本。") : !diff ? h("p", { className: "eg-hint" }, "正在读取…")
-        : diff.length ? diff.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` })) : h("p", { className: "eg-hint" }, "没有差异。");
+      else if (!harness) body = hint("正在读取…");
+      else if (tab === "diff") body = !changed ? hint("在任版本就是起点版本。") : !diff ? hint("正在读取…")
+        : diff.length ? diff.map((item) => h(Diff, { key: item.path, patch: item.patch || `${item.status} ${item.path}` })) : hint("没有差异。");
       else if (tab === "instructions") body = h(Markdown, { text: texts["instructions.md"] || "（没有 instructions.md）" });
       else if (tab === "lessons") body = h(Markdown, { text: texts["memory/lessons.md"] || "（还没有经验记录）" });
       else if (tab === "agent") body = h("pre", { className: "eg-pre" }, texts["harness.toml"] || JSON.stringify(harness.agent || {}, null, 2));
       else body = h("div", { className: "eg-chips" }, (harness.files || []).map((file) => h("span", { key: file, className: "eg-chip eg-mono" }, file)));
-      return h(Card, { title: "在任 Harness", hint: `${names.get(view.incumbent) || ""} ${short(view.incumbent)}：智能体的指令、技能、代码库模板、经验和 DSH 设置。`,
+      return h(Card, { title: "在任 Harness", hint: `${versionAlias(view, view.incumbent)} ${short(view.incumbent)}：智能体的指令、技能、代码库模板、经验和 DSH 设置。`,
         actions: h(Button, { onClick: () => setOpen(!open) }, open ? "收起" : "查看内容") },
       open ? h(Fragment, null,
         h("div", { className: "eg-tabs", style: { margin: "0 0 10px" } }, tabs.map(([id, label]) => h("button", {
@@ -2377,58 +2314,31 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         body) : null);
     }
 
-    function AdviceCard({ view, catalog }) {
-      const datasets = [...new Set((view.suite?.train || []).map((task) => taskInfo(catalog, task)?.dataset).filter(Boolean))];
-      const [scope, setScope] = useState("*");
-      const [text, setText] = useState("");
-      const [busy, setBusy] = useState(false);
-      const save = async () => {
-        if (!text.trim()) return toast("请先写下建议", "danger");
-        setBusy(true);
-        try {
-          await api(Api.expertNote, { body: { scope, text: text.trim() } });
-          setText("");
-          toast("已保存；之后的回合和下一代评审会读到它");
-        } catch (failure) {
-          toast(`保存失败：${failure.message}`, "danger");
-        }
-        setBusy(false);
-      };
-      return h(Card, { title: "专家建议", hint: "给方向性的提示，不必实时：写入账本后，之后开始的回合会在 data/expert.md 里读到，下一代的评审智能体也会看到。" },
-        h("div", { className: "eg-form", style: { gridTemplateColumns: "220px 1fr" } },
-          h("label", { className: "eg-field" }, h("span", null, "适用范围"),
-            h("select", { className: "eg-input", value: scope, onChange: (event) => setScope(event.target.value) },
-              h("option", { value: "*" }, "全部任务"), datasets.map((item) => h("option", { key: item, value: item }, item)))),
-          h("label", { className: "eg-field" }, h("span", null, "建议"),
-            h("textarea", { className: "eg-input", rows: 2, value: text, placeholder: "例如：夜间通风关闭时，CO₂ 主要由补光下的光合吸收决定", onChange: (event) => setText(event.target.value) }))),
-        h("div", { className: "eg-actions", style: { marginTop: "10px" } }, h(Button, { variant: "primary", disabled: busy, onClick: save }, "保存建议")));
-    }
-
-    function ConfigCard({ view, catalog }) {
+    /** The run's settings; advice for its agents is written on the 专家 page (one form for every run). */
+    function ConfigCard({ view, catalog, go }) {
       const config = view.config || {};
-      const gates = view.gates || {};
-      return h(Card, { title: "运行配置" }, h(Details, { summary: "展开" }, h(KV, { pairs: [
-        ["代数 × 每代候选", `${config.generations} × ${config.candidates}`],
-        ["每个版本每个任务的回合", String(config.repeats ?? "–")],
-        ["回合预算", `${config.minutes} 分钟，${Number(config.tokens || 0).toLocaleString()} 计费 token`],
-        ["内循环模型", config.model || "由 Harness 决定"],
-        ["评审智能体", `${config.evolver_model}，${config.evolver_minutes} 分钟，${Number(config.evolver_tokens || 0).toLocaleString()} 计费 token`],
-        ["并发 / 重试", `${config.concurrency} / ${config.retries}`],
-        ["门槛", `平均增益 > ${gates.min_delta}，${Math.round((gates.confidence || 0) * 100)}% 区间下限 > 0，任务损失上限 ${gates.task_cap}`],
-        ["训练任务", (view.suite?.train || []).map((task) => taskShort(catalog, task)).join("、")],
-        ["任务组", h(Mono, null, config.suite || "")],
-        ["ecogym", view.ecogym || "–"],
-      ] })));
+      return h(Card, { title: "运行配置", actions: h(Button, { onClick: () => go({ tab: "expert", page: null }) }, "写专家建议") },
+        h(KV, { pairs: [
+          ["代数 × 每代候选", `${config.generations} × ${config.candidates}`],
+          ["每个版本每个任务的回合", String(config.repeats ?? "–")],
+          ["回合预算", `${config.minutes} 分钟，${Number(config.tokens || 0).toLocaleString()} 计费 token`],
+          ["内循环模型", config.model || "由 Harness 决定"],
+          ["评审智能体", `${config.evolver_model}，${config.evolver_minutes} 分钟，${Number(config.evolver_tokens || 0).toLocaleString()} 计费 token`],
+          ["并发 / 重试", `${config.concurrency} / ${config.retries}`],
+          ["模型服务故障时", `${!isNum(config.outage_minutes) ? "–" : config.outage_minutes > 0 ? `最多等 ${config.outage_minutes} 分钟` : "不等"}`
+            + `${config.auto_resume ? "；停下后后端自动继续" : ""}`],
+          ["采纳后自动复核", config.check_adoptions ? "每次采纳后在训练任务的封存时期 validation 上复核" : "不复核（可以在「概览」的独立验证里补做）"],
+          ["采纳门槛", gateText(view.gates)],
+          ["训练任务", (view.suite?.train || []).map((task) => taskShort(catalog, task)).join("、")],
+          ["任务组", h(Mono, null, config.suite || "")],
+          ["ecogym", view.ecogym || "–"],
+        ] }),
+        h("p", { className: "eg-hint", style: { marginBottom: 0 } }, "专家建议写进账本后，之后开始的回合会在 data/expert.md 里读到，下一代的评审智能体也会看到。"));
     }
 
     /* ---- new evolution -------------------------------------------------------------------------------------- */
 
     const SAVED = "ecogym.new-evolution";
-
-    /** Half-width of a suite's adoption interval per unit spread of the task gains, for k candidates a round. */
-    function gateWidth(suite, k) {
-      return suite?.interval_per_sd?.[String(Math.min(6, Math.max(1, Number(k) || 1)))] ?? null;
-    }
 
     /** The critical count of a signed-rank suite for k candidates a round (−1: the test cannot pass); null otherwise. */
     function rankCritical(suite, k) {
@@ -2445,36 +2355,21 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         : `${n} 个训练任务全部更好，或者变差的只是变化最小的一两个（把各任务的变化按大小从小到大排名，变差任务的名次加起来不超过 ${c}）`;
     }
 
-    /** What a suite's design means for the adoption gate (with r episodes per version and task), and what the
-     * recommended suite would change. */
-    function designText(suite, recommended, k, r) {
-      const width = gateWidth(suite, k);
+    /** What a suite's design means for the adoption gate, with k candidates a round and r episodes per version and task. */
+    function designText(suite, k, r) {
       const rule = rankRule(suite, k);
       const repeats = Number(r) || suite.repeats || 2;
-      let text = `按每个版本每个训练任务 ${suite.repeats ?? 2} 个回合设计。`;
+      const head = `按每个版本每个训练任务 ${suite.repeats ?? 2} 个回合设计。`;
       if (rule) {
-        text += `采纳看各训练任务是否一致地变好（符号秩检验）：${k || 1} 个候选时，${rule}，平均增益也超过门槛，才算可信。`
-          + "它只看各任务是变好还是变差、变化大小排第几，所以一个任务上特别大的增益（比如在任版本在那里出错、候选修好了）不会像 t 区间那样把区间拉宽；"
-          + "反过来，一个任务的变差比别处的增益还明显时就通不过。";
-        text += repeats >= 2 ? `每个版本每个任务有 ${repeats} 个回合，所以还要没有任务可信地变差超过 ${plain(suite.gates?.task_cap ?? 0.03, 2)}（单任务否决）。`
-          : "每个版本每个任务只有 1 个回合时，单任务否决不起作用。";
-      } else if (rankCritical(suite, k) !== null) {
-        text += `${k || 1} 个候选时，这个任务组的训练任务太少，符号秩检验通不过；请减少每代的候选数。`;
-      } else if (width) {
-        text += `${k || 1} 个候选时，采纳区间的半宽约是各训练任务增益之间标准差的 ${width.toFixed(2)} 倍。`
-          + "在一个已经不错的版本附近，各任务增益的差别主要来自任务本身（同一版本的回合差别很小），"
-          + "所以训练任务越多，越小的增益也能确认；同一任务多跑几次帮助不大。";
-      } else text += "训练任务少于 3 个时，区间只反映任务内的随机差异，算不上真正的检验。";
-      if (recommended && recommended.id !== suite.id) {
-        const here = suite.train.length * (suite.repeats ?? 2);
-        const there = recommended.train.length * (recommended.repeats ?? 2);
-        const cost = there === here ? "和这里相同" : there > here ? `是这里的 ${(there / here).toFixed(1)} 倍` : `是这里的 ${Math.round((there / here) * 100)}%`;
-        const other = gateWidth(recommended, k);
-        const head = ` 推荐「${recommended.title}」：${recommended.train.length} 个训练任务、每个 ${recommended.repeats ?? 2} 个回合，每代的回合数${cost}，`;
-        if (rankRule(recommended, k)) text += `${head}按符号秩检验采纳，一个任务上特别大的增益不会让一致变好的候选通不过。`;
-        else if (width && other) text += `${head}区间约为这里的 ${Math.round((other / width) * 100)}%。`;
+        return `${head}采纳看各训练任务是否一致地变好（符号秩检验）：${k || 1} 个候选时，${rule}，平均增益也超过门槛，才算可信。`
+          + "它只看各任务是变好还是变差、变化大小排第几，所以一个任务上特别大的增益不会单独决定结果；反过来，一个任务的变差比别处的增益还明显时就通不过。"
+          + (repeats >= 2 ? `每个版本每个任务有 ${repeats} 个回合，所以还要没有任务可信地变差超过 ${plain(suite.gates?.task_cap ?? 0.03, 2)}（单任务否决）。`
+            : "每个版本每个任务只有 1 个回合时，单任务否决不起作用。");
       }
-      return text;
+      if (rankCritical(suite, k) !== null) return `${head}${k || 1} 个候选时，这个任务组的训练任务太少，符号秩检验通不过；请减少每代的候选数。`;
+      if (suite.train.length < 3) return `${head}训练任务少于 3 个时，区间只反映任务内的随机差异，算不上真正的检验。`;
+      return `${head}采纳看各训练任务增益的 t 区间：区间下限大于 0、平均增益也超过门槛，才算可信。在一个已经不错的版本附近，`
+        + "各任务增益的差别主要来自任务本身，所以训练任务越多，越小的增益也能确认；同一任务多跑几次帮助不大。";
     }
     function NewEvolution({ go, catalog, catalogError }) {
       if (!catalog) return h(CatalogPending, { error: catalogError, text: "正在读取任务组…" });
@@ -2554,50 +2449,60 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           setBusy(false);
         }
       };
+      const checked = (key) => values[key] === true || values[key] === "true";
+      const check = (key, label) => h("label", { className: "eg-check", key },
+        h("input", { type: "checkbox", checked: checked(key), onChange: (event) => setValues((old) => ({ ...old, [key]: event.target.checked })) }), label);
+      const estimate = `最多 ${episodes} 个回合和 ${g} 次评审会话，约 ${hours.toFixed(1)} 小时，计费 token 上限约 ${(budget / 1e6).toFixed(0)}M。`;
       return h("form", { onSubmit: submit },
         h("button", { type: "button", className: "eg-back", onClick: () => go({ page: null }) }, "← 全部进化运行"),
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "新建 Harness 进化"),
-          h("p", null, "第 0 代先让起点 Harness 在每个训练任务上运行。之后每一代，评审智能体阅读各回合的成绩、轨迹、笔记和以往候选，提出若干候选 Harness；候选与在任版本在每个训练任务上同时运行，只有在多任务配对比较中可信地变好才会被采纳。"))),
-        h(Card, { title: "任务组", hint: suite ? `训练任务 ${n} 个：${suite.train.map((task) => taskShort(catalog, task)).join("、")}；留出任务 ${suite.holdout_tasks} 个，只在验证时运行。` : "没有可用的任务组。" },
-          h("div", { className: "eg-form", style: { gridTemplateColumns: "minmax(0, 560px)" } }, h("label", { className: "eg-field" }, h("span", null, "任务组"),
-            h("select", { className: "eg-input", value: values.suite, onChange: set("suite") }, suites.map((item) => h("option", { key: item.id, value: item.id },
-              `${item.title}（${item.id}）${item.recommended ? " · 推荐" : ""}`))))),
-          suite ? h("p", { className: "eg-hint" }, designText(suite, recommended, k, r)) : null,
-          suite?.notes ? h("p", { className: "eg-hint", style: { whiteSpace: "pre-wrap" } }, suite.notes) : null),
-        h(Card, { title: "起点与预算" }, h("div", { className: "eg-form" },
-          field("harness", "起点 Harness", { autoComplete: "off" }, "seed，或已保存版本的摘要前缀"),
-          field("generations", "代数", { type: "number", min: 1, max: 20, step: 1 }),
-          field("candidates", "每代候选数", { type: "number", min: 1, max: 6, step: 1 }, "多个候选时置信度按 Bonferroni 调整"),
-          field("repeats", "每个版本每个任务的回合数", { type: "number", min: 1, max: 5, step: 1 }, "多跑几次能看清回合间的随机差异"),
-          field("minutes", "每个回合的分钟数", { type: "number", min: 1, step: 1 }),
-          field("tokens", "每个回合的计费 token", { type: "number", min: 10000, step: 10000 }, "命中缓存的输入 token 按 1/10 计"),
-          field("concurrency", "同时运行的回合", { type: "number", min: 1, max: 16, step: 1 }))),
-        h(Card, { title: "模型（API）", hint: modelsHint },
+        h(PageHead, { title: "新建 Harness 进化", text: "第 0 代先让起点 Harness 在每个训练任务上跑一遍，作为基线。之后每一代，评审智能体读完成绩和过程，改出几个候选；候选和在任版本在每个训练任务上同时跑，只有可信地更好才换上。运行在后台进行，关闭页面不影响。" }),
+        h(Card, { title: "1. 进化什么", hint: suite ? `训练任务 ${n} 个：${suite.train.map((task) => taskShort(catalog, task)).join("、")}；留出任务 ${suite.holdout_tasks} 个，只在最后验证时运行。` : "没有可用的任务组。" },
+          h("div", { className: "eg-form" },
+            h("label", { className: "eg-field", style: { gridColumn: "span 2" } }, h("span", null, "任务组"),
+              h("select", { className: "eg-input", value: values.suite, onChange: set("suite") }, suites.map((item) => h("option", { key: item.id, value: item.id },
+                `${item.title}（${item.id}）${item.recommended ? " · 推荐" : ""}`)))),
+            field("harness", "起点 Harness", { autoComplete: "off" }, "seed（自带的初始版本），或以前采纳的版本的摘要前缀"),
+            h("label", { className: "eg-field", style: { gridColumn: "1 / -1" } }, h("span", null, "标签（可选）"),
+              h("input", { className: "eg-input", maxLength: 200, value: values.label, onChange: set("label"), placeholder: "说明这次运行，例如：温室任务组，10 代 × 2 个候选，低负载" }))),
+          suite ? h(Details, { summary: "这个任务组怎样决定采纳" }, hint(designText(suite, k, r)),
+            suite.notes ? h("p", { className: "eg-hint", style: { whiteSpace: "pre-wrap" } }, suite.notes) : null) : null),
+        h(Card, { title: "2. 进化多久、多快" },
+          h("div", { className: "eg-form" },
+            field("generations", "代数", { type: "number", min: 1, max: 30, step: 1 }, "代数越多，找到改进的机会越多"),
+            field("candidates", "每代候选数", { type: "number", min: 1, max: 6, step: 1 }, "多个候选时门槛按 Bonferroni 加严")),
+          h("div", { className: "eg-field", style: { marginTop: "14px" } }, h("span", null, "电脑负载：同时运行几个回合"),
+            h("div", { className: "eg-actions" }, LOADS.map(([count, name, note]) => h(Button, { key: count, variant: c === count ? "primary" : "outline",
+              onClick: () => setValues((old) => ({ ...old, concurrency: String(count) })) }, `${name}（${count} 个）${note ? ` · ${note}` : ""}`))),
+            h("small", null, "每个回合都在本机运行智能体的实验和程序评分。同时运行越多，结束得越快、电脑也越热；模型调用在提供方，不占本机。")),
+          h("p", { className: "eg-hint", style: { marginBottom: 0 } }, estimate)),
+        h(Card, { title: "3. 用哪个模型", hint: modelsHint },
           h("div", { className: "eg-form", style: { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" } },
-            h(ModelSelect, { label: "内循环智能体的模型", value: values.model, onChange: set("model"), routes,
+            h(ModelSelect, { label: "研究智能体（解任务）", value: values.model, onChange: set("model"), routes,
               empty: `由 Harness 决定（起点版本用 ${catalog?.harness_model || "DeepSeek"}）`,
               note: "固定后，每个回合都用这个模型；不固定时由各版本 Harness 的 [agent] 决定（只能是 DeepSeek 模型）。" }),
-            h(ModelSelect, { label: "评审智能体的模型", value: values.evolver_model, onChange: set("evolver_model"), routes,
+            h(ModelSelect, { label: "评审智能体（改 Harness）", value: values.evolver_model, onChange: set("evolver_model"), routes,
               note: "每一代读证据、写候选的评审会话用这个模型。" })),
           catalog?.models?.error ? h(Alert, { tone: "warning" }, `读取 DSH 的模型设置失败：${catalog.models.error}`) : null),
-        h(Card, { title: "评审智能体" }, h("div", { className: "eg-form" },
-          field("evolver_minutes", "每代评审分钟数", { type: "number", min: 1, step: 1 }),
-          field("evolver_tokens", "每代评审计费 token", { type: "number", min: 10000, step: 10000 }))),
-        h(Card, { title: "模型服务出故障时", hint: "回合或评审拿不到模型回复时，先发一个很小的测试请求：服务还能回复，就照常重试；不能回复，就是服务故障，这时不开始新回合，每分钟试一次，恢复后接着运行，被打断的回合重跑、不算失败。" },
-          h("div", { className: "eg-form" },
-            field("outage_minutes", "最多等待的分钟数", { type: "number", min: 0, step: 10 }, "等满还没恢复，运行停下（可以继续）；0 = 不等，像以前一样直接停下"),
-            h("label", { className: "eg-check", style: { alignSelf: "center" } },
-              h("input", { type: "checkbox", checked: values.auto_resume === true || values.auto_resume === "true",
-                onChange: (event) => setValues((old) => ({ ...old, auto_resume: event.target.checked })) }),
-              "自动继续：服务恢复后，或后端（DSH）重启后，后端自己接着运行"))),
-        h(Card, null, h("div", { className: "eg-form", style: { gridTemplateColumns: "1fr" } },
-          h("label", { className: "eg-field" }, h("span", null, "标签"), h("input", { className: "eg-input", maxLength: 200, value: values.label, onChange: set("label"), placeholder: "说明这次运行，例如：温室任务组，3 代 × 2 个候选" }))),
-          h("p", { className: "eg-hint" }, `最多 ${episodes} 个回合和 ${g} 次评审会话，约 ${hours.toFixed(1)} 小时，计费 token 上限约 ${(budget / 1e6).toFixed(0)}M。运行在后台进行，关闭页面不影响；DSH 退出时会停在最后完成的代，之后可以继续${values.auto_resume === true || values.auto_resume === "true" ? "（勾选了自动继续：DSH 再启动后自己接着运行）" : ""}。`)),
+        h(Card, null, h(Details, { summary: "高级设置：回合与评审的预算、服务故障时怎么办、复核" },
+          h("div", { className: "eg-form", style: { marginTop: "10px" } },
+            field("repeats", "每个版本每个任务的回合数", { type: "number", min: 1, max: 5, step: 1 }, "多跑几次能看清回合间的随机差异"),
+            field("minutes", "每个回合的分钟数", { type: "number", min: 1, step: 1 }, "按机器醒着的时间计"),
+            field("tokens", "每个回合的计费 token", { type: "number", min: 10000, step: 10000 }, "命中缓存的输入 token 按 1/10 计"),
+            field("concurrency", "同时运行的回合", { type: "number", min: 1, max: 16, step: 1 }),
+            field("evolver_minutes", "每代评审分钟数", { type: "number", min: 1, step: 1 }),
+            field("evolver_tokens", "每代评审计费 token", { type: "number", min: 10000, step: 10000 }),
+            field("outage_minutes", "模型服务故障时最多等几分钟", { type: "number", min: 0, step: 10 }, "测试请求也没有回复时不开始新回合、每分钟试一次；等满还没恢复，运行停下；0 = 不等")),
+          h("div", { className: "eg-checks" },
+            check("auto_resume", "自动继续：服务恢复后，或后端（DSH）重启后，后端自己接着运行"),
+            check("check_adoptions", "每次采纳后，在训练任务更晚的封存时期上复核一次（只重评程序，评审看不到结果）")))),
         problem ? h(Alert, { tone: "danger" }, problem) : null,
         h("div", { className: "eg-actions", style: { marginTop: "16px" } },
           h(Button, { variant: "primary", disabled: busy, onClick: () => submit() }, busy ? "正在启动…" : "开始进化"),
-          h(Button, { onClick: () => go({ page: null }) }, "取消")));
+          h(Button, { onClick: () => go({ page: null }) }, "取消"),
+          h("span", { className: "eg-hint" }, `${estimate}${checked("auto_resume") ? "停下后会自动继续。" : ""}`)));
     }
+
+    const LOADS = [[2, "低", "适合笔记本、长时间运行"], [3, "中", ""], [6, "高", "最快、最热"]];
 
     /* ---- episodes ------------------------------------------------------------------------------------------ */
 
@@ -2605,22 +2510,19 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const { data, error } = useResource(Api.episodes, { interval: 8000 });
       const items = data || [];
       return h(Fragment, null,
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "回合"),
-          h("p", null, "一个回合是 DSH 智能体在隔离工作区里独立解一个任务的完整过程：读数据、查资料、写代码、做实验、提交预测程序，再由宿主在隐藏时期上逐时刻打分。完整轨迹都会保存。"))),
+        h(PageHead, { title: "回合", text: "一个回合是 DSH 智能体在隔离工作区里独立解一个任务的完整过程：读数据、查资料、写代码、做实验、提交预测程序，再由宿主在隐藏时期上逐时刻打分。完整轨迹都会保存。" }),
         error ? h(Alert, { tone: "danger" }, `读取失败：${error.message}`) : null,
         data && !items.length ? h(Empty, { title: "还没有回合", text: "进化运行和验证会产生回合，也可以用 ecogym episode run 单独运行。" }) : null,
-        items.length ? h(Card, null, h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "任务"), h("th", null, "来源"), h("th", null, "状态"), h("th", { className: "num" }, "隐藏期总分"),
-            h("th", { className: "num" }, "本地最好"), h("th", null, "模型"), h("th", { className: "num" }, "Token"), h("th", null, "开始"))),
-          h("tbody", null, items.map((item) => h("tr", { key: item.episode, className: "eg-click", onClick: () => go({ page: "episode", id: item.episode }) },
+        items.length ? h(Card, null, h(Table, { head: ["任务", "来源", "状态", ["隐藏期总分", "num"], ["本地最好", "num"], "模型", ["Token", "num"], "开始"] },
+          items.map((item) => h("tr", { key: item.episode, className: "eg-click", onClick: () => go({ page: "episode", id: item.episode }) },
             h("td", null, h(TaskLabel, { catalog, id: item.task_id })),
-            h("td", null, item.context?.role ? `${ROLE[item.context.role] || item.context.role}${item.context.candidate ? ` ${item.context.candidate}` : ""}${item.context.generation !== undefined ? ` · 第 ${item.context.generation} 代` : ""}` : "单独运行"),
+            h("td", null, item.context?.role ? `${roleText(item.context)}${item.context.generation !== undefined ? ` · 第 ${item.context.generation} 代` : ""}` : "单独运行"),
             h("td", null, h(StatusTag, { map: EP_STATUS, keyName: epKey(item) })),
-            h("td", { className: `num ${toneClass(item.score)}` }, signed(item.score)),
+            h("td", { className: `num ${toneClass(item.score, 4)}` }, signed(item.score)),
             h("td", { className: "num" }, signed(item.best_local)),
             h("td", null, item.model || "–"),
             h("td", { className: "num" }, tokens(item.tokens)),
-            h("td", null, when(item.started_at)))))))) : null);
+            h("td", null, when(item.started_at)))))) : null);
     }
 
     function CellMatrix({ task, cells }) {
@@ -2652,7 +2554,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       }, [record]);
       useTick(running && Boolean(record));
       if (error && !record) return h(Alert, { tone: "danger" }, `无法读取回合 ${id}：${error.message}`);
-      if (!record) return h("p", { className: "eg-hint" }, "正在读取回合…");
+      if (!record) return hint("正在读取回合…");
       const task = taskInfo(catalog, record.task_id);
       const scored = record.scored;
       const finished = record.finished || {};
@@ -2673,20 +2575,18 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             h("span", null, h("b", null, "Harness"), h(Mono, null, short(record.harness?.digest)), ` ${record.harness?.name || ""}`),
             h("span", null, h("b", null, "模型"), record.model || "–"),
             h("span", null, h("b", null, "开始"), when(record.started_at, true)),
-            context.evolution ? h("span", null, h("b", null, "来自"), h("a", { href: "#", onClick: (event) => {
-              event.preventDefault();
-              go({ tab: "evolutions", page: "evolution", id: context.evolution });
-            } }, context.evolution), ` ${ROLE[context.role] || context.role || ""}${context.candidate ? ` ${context.candidate}` : ""}`) : null)),
+            context.evolution ? h("span", null, h("b", null, "来自"),
+              h(Link, { onClick: () => go({ tab: "evolutions", page: "evolution", id: context.evolution }) }, context.evolution), ` ${roleText(context)}`) : null)),
         h("div", { className: "eg-actions" }, h(Button, { onClick: () => copy(record.episode) }, "复制 ID"))),
         record.status === "infra_failed" && finished.stalled ? h(Alert, { tone: "danger" }, h("b", null, "模型服务故障拖住了智能体："),
-          `失败的模型调用让智能体有 ${isNum(finished.stalled_seconds) ? `${Math.round(finished.stalled_seconds)} 秒` : "大半时间"}没法工作（本回合共 ${isNum(record.minutes) ? `${record.minutes * 60} 秒` : "几分钟"}；`
+          `失败的模型调用让智能体有 ${stalledFor(finished)}没法工作（本回合共 ${isNum(record.minutes) ? `${record.minutes * 60} 秒` : "几分钟"}；`
           + "包括调用一直失败、会话提前结束后剩下的时间），超过一半，所以记为服务故障：成绩照常给出，但不计为 Harness 的成绩；"
           + `进化运行还有重试次数时会重跑这个回合。${finished.upstream_error ? `最后一次失败：${finished.upstream_error}` : ""}`)
           : record.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "模型服务没有回复："),
             finished.upstream_error || "没有一次模型调用得到回复（服务故障，不计为 Harness 的成绩）") : null,
         scored?.errors?.length ? h(Alert, { tone: "warning" }, h("b", null, "程序在隐藏期上的错误："), scored.errors.slice(0, 3).join("；")) : null,
         h("div", { className: "eg-stats" },
-          h(Stat, { label: "隐藏期总分", value: scored ? h("span", { className: toneClass(scored.score) }, signed(scored.score)) : "–",
+          h(Stat, { label: "隐藏期总分", value: scored ? h("span", { className: toneClass(scored.score, 4) }, signed(scored.score)) : "–",
             sub: scored ? `95% 区间 [${signed(scored.interval?.[0])}, ${signed(scored.interval?.[1])}] · ${scored.origins} 个起点` : "运行结束后计算" }),
           h(Stat, { label: "最好的本地成绩", value: Number.isFinite(best) ? signed(best) : "–", sub: isNum(record.start?.local?.score)
             ? `已接受的提交；起始程序 ${signed(record.start.local.score)}` : "本地检验期，已接受的提交" }),
@@ -2698,15 +2598,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             ? `状态 ${finished.status}${finished.asleep_seconds >= 60 ? `；其中休眠 ${duration(finished.asleep_seconds)}，不计入时限` : ""}` : "进行中" })),
         scored ? h(Card, { title: "隐藏期逐格技能", hint: `宿主用隐藏时期之前的全部数据拟合提交的程序，再逐个时间步送入新观测、在每个计分起点要求预报；技能相对朴素基线，大于 0 更好。同一批起点上的参考：${refs || "–"}` },
           h(CellMatrix, { task, cells: scored.cells })) : null,
-        timeline.length ? h(Card, { title: "时间线", hint: "智能体在本地检验期上的检验和提交（隐藏期成绩只在结束后计算）。" }, h("div", { className: "eg-table-wrap" }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", { className: "num" }, "分钟"), h("th", null, "动作"), h("th", { className: "num" }, "本地总分"), h("th", null, "状态"), h("th", null, "说明"))),
-          h("tbody", null, timeline.map(([action, item], index) => h("tr", { key: index },
+        timeline.length ? h(Card, { title: "时间线", hint: "智能体在本地检验期上的检验和提交（隐藏期成绩只在结束后计算）。" },
+          h(Table, { head: [["分钟", "num"], "动作", ["本地总分", "num"], "状态", "说明"] }, timeline.map(([action, item], index) => h("tr", { key: index },
             h("td", { className: "num" }, start !== null && timeOf(item.at) !== null ? ((timeOf(item.at) - start) / 60000).toFixed(1) : "–"),
             h("td", null, action, action === "提交" ? h(Fragment, null, " ", !item.accepted ? h(Tag, { tone: "danger" }, "未接受")
               : item.replaces_start === false ? h(Tag, { tone: "neutral" }, "已接受，不替换模板") : h(Tag, { tone: "success" }, "已接受")) : null),
-            h("td", { className: `num ${toneClass(item.local?.score)}` }, signed(item.local?.score)),
+            h("td", { className: `num ${toneClass(item.local?.score, 4)}` }, signed(item.local?.score)),
             h("td", null, item.local?.status || ""),
-            h("td", null, item.note || ""))))))) : null,
+            h("td", null, item.note || ""))))) : null,
         (record.notes || []).length ? h(Card, { title: "智能体的笔记", hint: "回合中记下的发现；导出训练数据时进入经验库。" },
           record.notes.map((note, index) => h("div", { key: index, className: "eg-note" }, h("span", { className: "eg-chip" }, note.kind), " ", note.text,
             (note.sources || []).length ? h("div", { className: "eg-faint" }, `来源：${note.sources.join("；")}`) : null))) : null,
@@ -2714,8 +2613,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         finished.final_text ? h(Card, { title: "智能体的最终回复" }, h(Markdown, { text: finished.final_text })) : null,
         Object.keys(activity.tool_calls || {}).length ? h(Card, { title: "工具使用" },
           h("div", { className: "eg-chips" }, Object.entries(activity.tool_calls).map(([name, count]) => h("span", { key: name, className: "eg-chip" }, `${name.replace(/^mcp__ecogym__/, "ecogym.")} ${count}`))),
-          (activity.web_queries || []).length ? h("p", { className: "eg-hint" }, `网页搜索：${activity.web_queries.slice(0, 20).join("；")}`) : null,
-          h("p", { className: "eg-hint" }, `子智能体 ${activity.subagents || 0} 个 · 轨迹 `, h(Mono, null, finished.trajectory?.dir || "–"))) : null,
+          (activity.web_queries || []).length ? hint(`网页搜索：${activity.web_queries.slice(0, 20).join("；")}`) : null,
+          hint(`子智能体 ${activity.subagents || 0} 个 · 轨迹 `, h(Mono, null, finished.trajectory?.dir || "–"))) : null,
         h(TranscriptCard, { record }));
     }
 
@@ -2819,7 +2718,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     /** A recorded session (``episodes.transcripts``) step by step; ``flash`` marks the step jumped to. */
     function SessionSteps({ threads, flash }) {
-      if (!(threads || []).length) return h("p", { className: "eg-hint" }, "没有存下这个会话的模型调用记录。");
+      if (!(threads || []).length) return hint("没有存下这个会话的模型调用记录。");
       return threads.map((thread, index) => {
         const results = new Map();
         const blocks = [];
@@ -2893,13 +2792,25 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     }
 
     function Actions({ items, onStep, catalog }) {
-      if (!(items || []).length) return h("p", { className: "eg-hint" }, "没有记录到宿主工具的调用或候选文件的改动。");
+      if (!(items || []).length) return hint("没有记录到宿主工具的调用或候选文件的改动。");
       return h("div", null, items.map((item, index) => h("div", { key: index, className: "eg-act" },
         h("button", { type: "button", className: "eg-where", onClick: () => onStep(item.where) }, whereText(item.where)),
         h("div", { className: "eg-act-main" }, item.kind === "tool" ? h(ToolAction, { item, catalog }) : h(WriteAction, { item })))));
     }
 
     const SESSION_STATUS = { ...EP_STATUS, error: ["出错", "danger", "error"] };
+    /** How long failed model calls kept a session (an episode or an evolver session) from working. */
+    const stalledFor = (item) => (isNum(item.stalled_seconds) ? `${Math.round(item.stalled_seconds)} 秒` : "大半时间");
+
+    /** Why an evolver session did not end normally, as [title, text]; null when it did. */
+    function sessionTrouble(session) {
+      const then = session.rerun ? "这一代不算数，等模型服务能回复后重新评审。" : "这一代不算数：运行停下，继续时这一代重跑。";
+      if (session.status === "error") return ["评审会话出错：", session.error || ""];
+      if (session.status !== "infra_failed") return null;
+      if (!session.stalled) return ["评审会话没有得到模型回复：", `${session.upstream_error || "服务故障"}。${then}`];
+      return ["模型服务故障让评审会话没法工作：", `${stalledFor(session)}都在等失败的模型调用，也没有留下能比较的候选。${then}`
+        + `${session.upstream_error ? `最后一次失败：${session.upstream_error}` : ""}`];
+    }
 
     function EvolverPage({ id, go, catalog, back }) {
       const text = String(id || "");
@@ -2919,8 +2830,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const toRun = back || { page: "evolution", id: run, focus: { generation: Number(generation) } };
       const returning = h("button", { className: "eg-back", onClick: () => go(toRun) }, `← 返回运行的第 ${generation} 代`);
       if (error && !data) return h(Fragment, null, returning, h(Alert, { tone: "danger" }, `读不到评审会话：${error.message}`));
-      if (!data) return h(Fragment, null, returning, h("p", { className: "eg-hint" }, "正在读取评审会话…"));
+      if (!data) return h(Fragment, null, returning, hint("正在读取评审会话…"));
       const session = data.session || {};
+      const trouble = sessionTrouble(session);
       const calls = session.activity?.tool_calls || {};
       const used = Object.values(calls).reduce((sum, count) => sum + count, 0);
       return h(Fragment, null, returning,
@@ -2928,15 +2840,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h("div", { className: "eg-title-line" }, h("h1", null, `第 ${data.generation} 代的评审会话`), h(StatusTag, { map: SESSION_STATUS, keyName: session.status })),
           h("p", null, "评审智能体在自己的工作区里读证据、在候选目录里改 Harness，用宿主的工具检查。下面依次是它看过的材料、关键动作、产出的候选、最后的总结和完整的每一步。"),
           h("div", { className: "eg-meta" },
-            h("span", null, h("b", null, "运行"), h("a", { href: "#", onClick: (event) => {
-              event.preventDefault();
-              go(toRun);
-            } }, data.run_id)),
+            h("span", null, h("b", null, "运行"), h(Link, { onClick: () => go(toRun) }, data.run_id)),
             h("span", null, h("b", null, "这一代的在任"), h(Mono, null, short(data.incumbent))),
             h("span", null, h("b", null, "开始"), when(data.started_at, true))))),
-        session.status === "error" || session.status === "infra_failed" ? h(Alert, { tone: "danger" }, h("b", null, "会话没有正常结束："),
-          session.stalled ? `模型服务故障：${isNum(session.stalled_seconds) ? `${Math.round(session.stalled_seconds)} 秒` : "大半时间"}都在等失败的模型调用，也没有留下能比较的候选，这一代运行停下、继续时重跑。${session.upstream_error ? `最后一次失败：${session.upstream_error}` : ""}`
-            : session.error || session.upstream_error || session.status) : null,
+        trouble ? h(Alert, { tone: "danger" }, h("b", null, trouble[0]), trouble[1]) : null,
         h("div", { className: "eg-stats" },
           h(Stat, { label: "用时", value: duration(session.seconds) }),
           h(Stat, { label: "Token", value: tokens(session.tokens), sub: session.metered_tokens ? `计费 ${tokens(session.metered_tokens)}` : "" }),
@@ -2952,7 +2859,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         (data.candidates || []).length ? data.candidates.map((candidate) => h("div", { key: candidate.name, className: "eg-note" },
           h("b", null, `候选 ${candidate.name}`), " ", h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }), " ", h(Mono, null, short(candidate.digest)),
           h("span", { className: "eg-faint" }, candidate.base?.label ? ` · 从存档 ${candidate.base.label} 出发` : " · 从在任版本出发"),
-          candidate.summary ? h("div", null, candidate.summary) : null)) : h("p", { className: "eg-hint" }, "没有候选。")),
+          candidate.summary ? h("div", null, candidate.summary) : null)) : hint("没有候选。")),
         data.final_text ? h(Card, { title: "评审的总结（会话最后的回复）" }, h(Markdown, { text: data.final_text })) : null,
         (data.notes || []).length ? h(Card, { title: "记下的笔记", hint: "以后各代的评审在证据里会读到。" },
           data.notes.map((note, index) => h("div", { key: index, className: "eg-note" }, h("span", { className: "eg-chip" }, NOTE_KIND[note.kind] || note.kind), " ", note.text))) : null,
@@ -2967,7 +2874,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const { data, error } = useResource(shown ? Api.episodeTranscript(record.episode) : null);
       let body = null;
       if (shown) {
-        body = error ? h(Alert, { tone: "warning" }, `读不到会话记录：${error.message}`) : !data ? h("p", { className: "eg-hint" }, "正在读取会话记录…")
+        body = error ? h(Alert, { tone: "warning" }, `读不到会话记录：${error.message}`) : !data ? hint("正在读取会话记录…")
           : h(SessionSteps, { threads: data.threads });
       }
       return h(Card, { title: "会话记录", hint: running ? "回合结束后可以看到智能体每一步的思考、工具调用和结果。"
@@ -3001,8 +2908,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const source = (item) => item.task_id ? `回合 ${item.run_id} · ${taskShort(catalog, item.task_id)}` : `进化运行 ${item.run_id} 的评审智能体`;
       const scopes = ["*", ...(catalog?.datasets || []), ...(catalog?.tasks || []).map((task) => task.id)];
       return h(Fragment, null,
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "专家参与"),
-          h("p", null, "智能体遇到需要领域判断的问题会留言，然后继续工作，不等待回答。专家的回答和主动给出的提示写入账本；之后匹配任务的回合会在 data/expert.md 里读到，评审智能体在证据里也能看到。"))),
+        h(PageHead, { title: "专家参与", text: "智能体遇到需要领域判断的问题会留言，然后继续工作，不等待回答。专家的回答和主动给出的提示写入账本；之后匹配任务的回合会在 data/expert.md 里读到，评审智能体在证据里也能看到。" }),
         error ? h(Alert, { tone: "danger" }, `读取失败：${error.message}`) : null,
         h(Card, { title: `待回答（${open.length}）` }, open.length ? open.map((item) => h("div", { key: item.id, className: "eg-note" },
           h("div", { className: "eg-faint" }, `${when(item.at)} · ${source(item)}`),
@@ -3014,7 +2920,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             } }),
           h("div", { className: "eg-actions", style: { marginTop: "8px" } }, h(Button, { variant: "primary", disabled: !(answers[item.id] || "").trim(),
             onClick: () => send(Api.expertAnswer, { question: item.id, text: answers[item.id].trim() }, () => setAnswers((old) => ({ ...old, [item.id]: "" }))) }, "提交回答"),
-          item.task_id ? h(Button, { onClick: () => go({ tab: "episodes", page: "episode", id: item.run_id }) }, "查看回合") : null))) : h("p", { className: "eg-hint" }, "现在没有待回答的问题。")),
+          item.task_id ? h(Button, { onClick: () => go({ tab: "episodes", page: "episode", id: item.run_id }) }, "查看回合") : null))) : hint("现在没有待回答的问题。")),
         h(Card, { title: "主动提示", hint: "不必等问题：给某个数据集或任务写下领域知识，之后的回合都会读到。" },
           h("div", { className: "eg-form" },
             h("label", { className: "eg-field" }, h("span", null, "适用范围"), h("select", { className: "eg-input", value: note.scope, onChange: (event) => editNote("scope", event) },
@@ -3037,7 +2943,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function ExportPreview({ id }) {
       const { data, error } = useResource(Api.exportDetail(id));
       if (error) return h(Alert, { tone: "warning" }, error.message);
-      if (!data) return h("p", { className: "eg-hint" }, "正在读取…");
+      if (!data) return hint("正在读取…");
       const sft = data.sft_preview;
       const pair = data.preference_preview;
       return h(Fragment, null,
@@ -3079,8 +2985,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       };
       const COUNT = [["sft", "SFT 线程"], ["preferences", "偏好对"], ["episodes", "回合"], ["notes", "笔记"], ["sessions", "会话"]];
       return h(Fragment, null,
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "训练数据"),
-          h("p", null, "每个回合和评审会话的完整模型调用都保存在轨迹里。导出时按对话线程重建成多轮 SFT 样本（含推理和工具调用），同一任务上隐藏期成绩可信地拉开差距的两个回合组成偏好对；笔记汇成经验库。"))),
+        h(PageHead, { title: "训练数据", text: "每个回合和评审会话的完整模型调用都保存在轨迹里。导出时按对话线程重建成多轮 SFT 样本（含推理和工具调用），同一任务上隐藏期成绩可信地拉开差距的两个回合组成偏好对；笔记汇成经验库。" }),
         h(Card, { title: "导出", hint: "写到账本旁的 exports/ 目录：sft.jsonl、preferences.jsonl、episodes.jsonl、notes.jsonl 和 manifest.json。工作区路径会替换成 /workspace，凭据不会进入数据。" },
           h("div", { className: "eg-form" },
             h("label", { className: "eg-field" }, h("span", null, "SFT 的隐藏期总分须高于"), h("input", { className: "eg-input", value: options.min_score, onChange: option("min_score", (input) => input.value) }), h("small", null, "0 = 朴素基线；留空则不按分数过滤。只收有被接受提交的回合")),
@@ -3097,23 +3002,29 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         item.error ? h(Alert, { tone: "danger" }, item.error) : null,
         item.counts ? h("div", { className: "eg-stats" }, COUNT.map(([key, label]) => h(Stat, { key, label, value: String(item.counts[key] ?? 0) }))) : null,
         item.files ? h("div", { className: "eg-chips" }, Object.entries(item.files).map(([name, size]) => h("span", { key: name, className: "eg-chip eg-mono" }, `${name} ${bytes(size)}`))) : null,
-        item.skipped && Object.keys(item.skipped).length ? h("p", { className: "eg-hint" }, `跳过：${Object.entries(item.skipped).map(([reason, count]) => `${reason} ${count}`).join("；")}`) : null,
-        item.path ? h("p", { className: "eg-hint" }, h(Mono, null, item.path)) : null,
+        item.skipped && Object.keys(item.skipped).length ? hint(`跳过：${Object.entries(item.skipped).map(([reason, count]) => `${reason} ${count}`).join("；")}`) : null,
+        item.path ? hint(h(Mono, null, item.path)) : null,
         preview === item.id ? h(ExportPreview, { id: item.id }) : null)));
     }
 
     /* ---- tasks --------------------------------------------------------------------------------------------- */
 
+    /** A suite's adoption gate in words (the suite's ``gates``; also shown with a run's settings). */
+    function gateText(gates) {
+      if (!gates) return "–";
+      const interval = gates.test === "signed_rank" ? "各任务增益的符号秩区间（Wilcoxon 符号秩检验的 Hodges–Lehmann 区间）" : "各任务增益的 t 区间";
+      return `平均增益大于 ${gates.min_delta}；区间下限大于 0（3 个及以上训练任务时是${interval}，置信度 ${Math.round((gates.confidence || 0) * 100)}%，多个候选时按 Bonferroni 调整）；没有任务的损失超过 ${gates.task_cap} 且它自己的区间整体低于 0（两个版本在这个任务上都至少有 2 个回合时才判断）。`;
+    }
+
     function TasksPage({ catalog, catalogError }) {
       if (!catalog) return h(CatalogPending, { error: catalogError });
       return h(Fragment, null,
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "任务"),
-          h("p", null, "任务组把同一类预测任务分成训练任务（进化时使用）和留出任务（只在验证时运行）。每个任务给定数据集、预测目标和时距；宿主保管隐藏时期和封存时期，按逐时刻预报打分。新领域的接入方法见 docs/new-domain.md。"))),
+        h(PageHead, { title: "任务", text: "任务组把同一类预测任务分成训练任务（进化时使用）和留出任务（只在验证时运行）。每个任务给定数据集、预测目标和时距；宿主保管隐藏时期和封存时期，按逐时刻预报打分。新领域的接入方法见 docs/new-domain.md。" }),
         (catalog.suites || []).map((suite) => h(Card, { key: suite.id, title: suite.title, hint: suite.id },
           h(KV, { pairs: [
             ["训练任务", suite.train.map((task) => taskShort(catalog, task)).join("、")],
             ["留出任务", `${suite.holdout_tasks} 个`],
-            ["采纳门槛", `平均增益 > ${suite.gates?.min_delta}，${Math.round((suite.gates?.confidence || 0) * 100)}% 区间下限 > 0，任务损失上限 ${suite.gates?.task_cap}`],
+            ["采纳门槛", gateText(suite.gates)],
           ] }), suite.notes ? h("p", { className: "eg-hint", style: { whiteSpace: "pre-wrap" } }, suite.notes) : null)),
         (catalog.tasks || []).map((task) => h(Card, { key: task.id, title: task.title, hint: task.id },
           h(KV, { pairs: [
@@ -3127,20 +3038,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     /* ---- about: what the project does and how the parts fit ---------------------------------------------------- */
 
-    const FLOW = [
-      ["任务与数据", "任务卡给定数据集、预测目标和时距。数据按时间切成几段（见下），智能体只拿到隐藏期之前的部分。"],
-      ["回合", "一个 DSH 智能体按一版 Harness 独立解一个任务：看数据、查资料、写预测程序，用本地检验挑版本，然后提交。"],
-      ["裁判", "宿主在智能体看不到的隐藏期上逐时刻运行被评分的程序，算出每格相对朴素基线的技能。被评分的是最后一次在本地明显好过起始程序（模板）的提交，没有就是模板本身。"],
-      ["评审", "评审智能体读所有回合的成绩、代码、笔记和会话记录，以往的候选和训练任务都在本次之内的以往运行，从在任版本或任何存档的以往版本出发写出下一代的候选 Harness，宿主逐个检查。"],
-      ["比较与采纳", "候选和在任版本在每个训练任务上各跑几个回合，做多任务配对比较；通过门槛的候选成为新的在任版本。"],
-      ["独立验证", "进化结束后，起点和最终版本在留出隔间和更晚的封存时期上各验证一次。"],
-    ];
     const STAGE_INFO = {
-      calibration_fit: ["拟合期", "visible", "智能体可见"],
-      calibration_uq: ["本地检验期", "local", "智能体可见；evaluate_local 和 submit 在这里打分"],
-      model_selection: ["隐藏期", "hidden", "只有宿主能看到；比较 Harness 版本只用这一段的成绩"],
-      validation: ["封存 validation", "sealed", "进化中没有人看过；验证时每个版本每个任务只评一次"],
-      final_test: ["封存 final_test", "sealed", "同上，必须在 validation 之后"],
+      calibration_fit: ["拟合期", "visible", "智能体可见，用来拟合它的程序"],
+      calibration_uq: ["本地检验期", "local", "智能体可见：evaluate_local 和 submit 在这里打分，智能体用它在回合里挑版本"],
+      model_selection: ["隐藏期", "hidden", "只有宿主能看到：被评分的程序用它之前的全部行拟合，再逐时刻预报；比较 Harness 版本只用这个成绩"],
+      validation: ["封存 validation", "sealed", "进化中谁都没看过：独立验证和各次采纳的复核用它，每个版本每个任务只评一次"],
+      final_test: ["封存 final_test", "sealed", "最后一道检验，在 validation 之后，每个版本每个任务只评一次"],
     };
     const EPISODE_FACTS = [
       ["工作区", "TASK.md（目标、评分、接口、时限、预算），AGENTS.md（Harness 的说明和经验），data/（可见数据、列说明、领域背景、专家意见），submission/（Harness 的起始代码）"],
@@ -3151,21 +3054,6 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       ["续跑", "智能体在剩余时间超过四分之一时就结束的，宿主开一段新会话请它继续（最多 3 段）；一段续跑既没有检验也没有提交就停"],
       ["结束后", "裁判在隐藏期上评分；模型调用、工具调用、工作区和 DSH 会话存进轨迹，之后可以导出为训练数据"],
     ];
-    const PAGES = [
-      ["evolutions", "进化", "运行列表；运行页有进度和用量、正在运行的回合、成绩表、增益图、独立验证、各代详情和在任 Harness"],
-      ["new", "新建进化", "选任务组、起点 Harness、代数、候选数、每个版本的回合数、预算和模型"],
-      ["episodes", "回合", "全部回合；单个回合的逐格技能、本地检验与提交的时间线、笔记、最终回复和工具使用"],
-      ["expert", "专家", "回答智能体提给专家的问题，或主动写下领域提示；之后的回合和评审都会读到"],
-      ["data", "训练数据", "把回合和评审会话导出为多轮 SFT 线程和偏好对"],
-      ["tasks", "任务", "任务组的训练与留出任务、采纳门槛，各任务的数据集、目标和时距"],
-    ];
-    const TIERS = [
-      ["浏览器：生态进化面板", "lib/client.js", "React，用 DSH 的组件和主题。页面按需轮询接口（3–30 秒一次，运行中的更频繁），目录只读一次；面板调用的全部接口列在 client.js 的 Api 表里。"],
-      ["DSH 网页服务：插件宿主端", "lib/index.js", "随 DSH 启动和停止 ecogym 服务，崩溃后自动重启；同源代理 /api/ecogym/*：先过 DSH 的登录检查，再换上服务令牌转发。_status 和 _restart 由它自己回答。"],
-      ["ecogym 服务（Python，只监听本机）", "service.py", "ROUTES 表把每个接口对应到一个方法。页面看到的视图都在请求时从账本折叠出来，进化、验证和导出在服务的后台线程里运行。"],
-      ["进化循环、回合与裁判、导出", "evolution/、episodes/", "回合和评审会话是沙箱里的 DSH 无界面会话，经本机模型网关调用模型提供方；裁判在宿主上运行提交的程序并打分。"],
-      ["存储", "$ECOGYM_HOME", "账本 ledger.sqlite3（只追加的事件，所有状态都能从它重算）、Harness 库、轨迹、训练数据导出。"],
-    ];
     const TERMS = [
       ["Harness", "智能体带进每个任务的全部内容：说明、技能、起始代码库、经验和 DSH 设置。进化的就是它。"],
       ["回合", "一个智能体按一版 Harness 独立解一个任务的一次运行。"],
@@ -3173,90 +3061,66 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       ["代", "一次评审，加上候选和在任版本在每个训练任务上的回合，再加一次比较。第 0 代只跑起点版本。"],
       ["训练任务 / 留出任务", "进化中比较版本用的任务 / 评审看不到、只在最终验证时运行的任务。"],
       ["技能", "每格 = (RMSE基线 − RMSE) / max(RMSE, RMSE基线)；总分是逐格加权平均，0 等于朴素基线。"],
-      ["平均各回合的预报", "同一版本几个回合的隐藏期预报逐时刻平均后的成绩，只作参考，不进入门槛。"],
+      ["隐藏期 / 封存时期", "隐藏期：智能体看不到、宿主用来比较版本的一段时间。封存时期：更晚的一段，智能体和评审都看不到，只用来验证（最终验证和各次采纳的复核），每个版本每个任务只评一次。"],
+      ["采纳门槛", "候选比在任版本平均高得足够多（默认 0.005），各训练任务增益的区间整段在 0 以上，而且没有任务可信地变差太多，才换上；各任务组的完整规则在「任务」页。"],
       ["账本", "只追加的事件记录；运行中断后从它恢复，面板上的每个数字都从它算出。"],
       ["SFT 线程 / 偏好对", "从回合轨迹导出的多轮训练样本 / 同一任务上成绩可信地不同的两个回合。"],
     ];
 
-    function gateText(gates) {
-      if (!gates) return "";
-      const interval = gates.test === "signed_rank" ? "各任务增益的符号秩区间（Wilcoxon 符号秩检验的 Hodges–Lehmann 区间）" : "各任务增益的 t 区间";
-      return `平均增益大于 ${gates.min_delta}；区间下限大于 0（3 个及以上训练任务时是${interval}，置信度 ${Math.round((gates.confidence || 0) * 100)}%，多个候选时按 Bonferroni 调整）；没有任务的损失超过 ${gates.task_cap} 且它自己的区间整体低于 0（两个版本在这个任务上都至少有 2 个回合时才判断）。`;
-    }
-
     function Timeline({ task }) {
       const { data, error } = useResource(task ? Api.stages(task) : null);
       if (error) return h(Alert, { tone: "warning" }, `读不到时间分段：${error.message}`);
-      if (!data) return h("p", { className: "eg-hint" }, "正在读取…");
+      if (!data) return hint("正在读取…");
       const total = data.days || 1;
+      const info = (item) => STAGE_INFO[item.stage] || [item.stage, "visible", ""];
       return h(Fragment, null,
         h("div", { className: "eg-timeline", role: "img", "aria-label": "时间分段" }, data.stages.map((item) => {
-          const [label, kind] = STAGE_INFO[item.stage] || [item.stage, "visible"];
+          const [label, kind] = info(item);
           return h("div", { key: item.stage, className: "eg-seg", "data-kind": kind, title: `${label}：${item.start} → ${item.end}`,
             style: { left: `${(item.from_days / total) * 100}%`, width: `${(item.days / total) * 100}%` } }, label);
         })),
-        h("div", { className: "eg-table-wrap", style: { marginTop: "8px" } }, h("table", { className: "eg-table" },
-          h("thead", null, h("tr", null, h("th", null, "时期"), h("th", null, "时间"), h("th", { className: "num" }, "天数"), h("th", null, "谁能看到"))),
-          h("tbody", null, data.stages.map((item) => {
-            const [label, kind, who] = STAGE_INFO[item.stage] || [item.stage, "visible", ""];
-            return h("tr", { key: item.stage },
-              h("td", null, h("span", { className: "eg-swatch", "data-kind": kind }), label),
-              h("td", null, h(Mono, null, `${item.start.replace("T", " ")} → ${item.end.replace("T", " ")}`)),
-              h("td", { className: "num" }, plain(item.days, 1)), h("td", null, who));
-          })))),
-        h("p", { className: "eg-hint" }, "相邻两段之间留出一小段间隔（embargo），预报时距不会跨进下一段。智能体的数据文件到隐藏期开始前为止；裁判评隐藏期时用它之前的全部行拟合，再逐个时间步送入新观测。"));
+        h(Table, { head: ["时期", "时间", ["天数", "num"], "谁能看到、做什么用"], style: { marginTop: "8px" } }, data.stages.map((item) => {
+          const [label, kind, who] = info(item);
+          return h("tr", { key: item.stage },
+            h("td", { style: { whiteSpace: "nowrap" } }, h("span", { className: "eg-swatch", "data-kind": kind }), label),
+            h("td", { style: { whiteSpace: "nowrap" } }, h(Mono, null, `${item.start.replace("T", " ").slice(0, 16)} → ${item.end.replace("T", " ").slice(0, 16)}`)),
+            h("td", { className: "num" }, plain(item.days, 1)), h("td", null, who));
+        })),
+        hint("相邻两段之间留出一小段间隔（embargo），预报时距不会跨进下一段。智能体的数据文件到隐藏期开始前为止；裁判评隐藏期时用它之前的全部行拟合，再逐个时间步送入新观测。"));
     }
 
-    function AboutPage({ go, catalog, catalogError }) {
-      const suites = catalog?.suites || [];
-      const tasks = [...new Set(suites.flatMap((suite) => suite.train))];
+    function AboutPage({ catalog, catalogError }) {
+      const tasks = [...new Set((catalog?.suites || []).flatMap((suite) => suite.train))];
       const [task, setTask] = useState(null);
-      const [suiteId, setSuiteId] = useState(null);
-      const { data: routes } = useResource(Api.routes);
       if (!catalog) return h(CatalogPending, { error: catalogError });
       const shown = task || tasks[0];
-      const suite = suites.find((item) => item.id === suiteId) || suites[0];
-      const groups = [...new Set((routes || []).map((route) => route.group))];
       return h(Fragment, null,
-        h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, "介绍"),
-          h("p", null, "ecogym 让大模型研究智能体在生态预测任务上自己做研究：看数据、查资料、写预测程序、检验和提交。它带进任务的工作方式（Harness）由评审智能体根据成绩和完整轨迹不断改进，只有在多任务比较中可信地变好才被采纳。过程中积累可复用的知识（技能、代码库、经验、专家意见）和完整的轨迹，轨迹可以导出为训练数据。DSH 本身不改，打分全部由宿主上的确定性代码完成，不交给大模型。"))),
-        h(Card, { title: "整体流程", hint: "第 2–5 步每一代重复一次；最后一代结束后做第 6 步。" },
-          h("div", { className: "eg-flow" }, FLOW.map(([title, text], index) => h("div", { key: title, className: "eg-step" },
+        h(PageHead, { title: "介绍", text: "ecogym 让大模型研究智能体在生态预测任务上自己做研究：看数据、查资料、写预测程序、检验和提交。它带进任务的工作方式（Harness）由评审智能体根据成绩和完整轨迹不断改进，只有在多任务比较中可信地变好才被采纳。过程中积累可复用的知识（技能、代码库、经验、专家意见）和完整的轨迹，轨迹可以导出为训练数据。DSH 本身不改，打分全部由宿主上的确定性代码完成，不交给大模型。" }),
+        h(Card, { title: "整体流程", hint: "第 1–4 步每一代重复一次（第 0 代只让起点版本跑第 1、2 步，作为基线）；最后一代结束后做第 5 步。" },
+          h("div", { className: "eg-flow" }, FLOW.map(([title, , text], index) => h("div", { key: title, className: "eg-step" },
             h("b", null, h("i", null, index + 1), title), h("p", null, text))))),
-        h(Card, { title: "数据怎么切、谁能看到", hint: "每个任务的数据按时间切成五段；下面是一个训练任务的实际分段。",
+        h(Card, { title: "术语" }, h(KV, { pairs: TERMS })),
+        h(Card, { title: "数据怎么切、谁能看到", hint: "任务卡给定数据集、预测目标和时距。每个任务的数据按时间切成五段，智能体只拿到隐藏期之前的部分；下面是一个训练任务的实际分段。",
           actions: tasks.length > 1 ? h("select", { className: "eg-input", style: { width: "auto" }, value: shown, onChange: (event) => setTask(event.target.value) },
             tasks.map((id) => h("option", { key: id, value: id }, taskShort(catalog, id)))) : null },
-          shown ? h(Timeline, { task: shown }) : h("p", { className: "eg-hint" }, "还没有任务组。")),
-        h(Card, { title: "三层评测", hint: "智能体能看到的检验和决定版本去留的检验是分开的。" },
-          h("div", { className: "eg-layers" },
-            h("div", { className: "eg-panel" }, h("h3", null, "1. 本地检验"), h("p", { className: "eg-hint" }, "智能体自己调用：用本地检验期之前的行拟合，在本地检验期上按裁判的规则打分，用来在回合里挑版本。")),
-            h("div", { className: "eg-panel" }, h("h3", null, "2. 隐藏期"), h("p", { className: "eg-hint" }, "宿主打分，智能体看不到：被评分的程序（最后一次在本地明显好过模板的提交，没有就是模板）用隐藏期之前的全部行拟合，再逐时刻预报隐藏期。比较 Harness 版本只用这个成绩。")),
-            h("div", { className: "eg-panel" }, h("h3", null, "3. 独立验证"), h("p", { className: "eg-hint" }, "进化结束后各一次：起点和最终版本在留出隔间上各跑一个回合，它们的程序在封存时期上重新评分。"))),
-          suite ? h("div", { style: { marginTop: "12px" } },
-            h("div", { className: "eg-actions" }, h("b", null, "采纳门槛"), suites.length > 1 ? h("select", { className: "eg-input", style: { width: "auto" }, value: suite.id,
-              onChange: (event) => setSuiteId(event.target.value) }, suites.map((item) => h("option", { key: item.id, value: item.id }, item.title))) : h("span", { className: "eg-faint" }, suite.title)),
-            h("p", { className: "eg-hint" }, `${gateText(suite.gates)} 这个任务组有 ${suite.train.length} 个训练任务、${suite.holdout_tasks} 个留出任务。`)) : null),
+          shown ? h(Timeline, { task: shown }) : hint("还没有任务组。")),
         h(Card, { title: "一个回合里有什么" }, h(KV, { pairs: EPISODE_FACTS })),
-        h(Card, { title: "面板各页" }, h("div", { className: "eg-list" }, PAGES.map(([tab, title, text]) => h("button", { key: tab, className: "eg-row",
-          onClick: () => go(tab === "new" ? { tab: "evolutions", page: "new" } : { tab, page: null }) },
-          h("span", { className: "eg-row-main" }, h("div", { className: "eg-row-title" }, title), h("div", { className: "eg-row-meta" }, text)))))),
-        h(Card, { title: "前后端怎么配合", hint: "从上到下是一次请求经过的各层。关闭页面不影响运行；重启后端时，进化停在最后一个完成的代，之后可以继续。" },
-          h("div", { className: "eg-stack" }, TIERS.map(([title, file, text], index) => h(Fragment, { key: title },
-            index ? h("div", { className: "eg-tier-arrow", "aria-hidden": "true" }, "↓") : null,
-            h("div", { className: "eg-tier" }, h("div", { className: "eg-tier-head" }, h("b", null, title), h(Mono, null, file)), h("p", null, text))))),
-          routes ? h(Details, { summary: `服务的全部接口（${routes.length} 个，来自 GET /api/routes）` },
-            h("div", { className: "eg-table-wrap", style: { marginTop: "8px" } }, h("table", { className: "eg-table" },
-              h("thead", null, h("tr", null, h("th", null, "分组"), h("th", null, "方法"), h("th", null, "路径"), h("th", null, "作用"))),
-              h("tbody", null, groups.flatMap((group) => routes.filter((route) => route.group === group).map((route) => h("tr", { key: `${route.method} ${route.path}` },
-                h("td", { className: "eg-faint" }, group), h("td", null, h(Mono, null, route.method)), h("td", null, h(Mono, null, route.path)), h("td", null, route.text))))))),
-            h("p", { className: "eg-hint" }, "浏览器经 DSH 访问时路径前缀是 /api/ecogym/（代理去掉 ecogym 再转发）。“方法竞技”一组面板不调用，留给直接使用服务的程序；命令行不经服务，直接运行方法竞技。")) : null),
-        h(Card, { title: "术语" }, h(KV, { pairs: TERMS })));
+        h("p", { className: "eg-hint", style: { marginTop: "16px" } }, "关闭页面不影响运行；重启后端时，进化停在最后一个完成的代，之后可以继续（勾选了自动继续的运行会自己继续）。"
+          + "面板、DSH 插件、ecogym 服务和账本怎么配合，见 docs/architecture.md；服务的全部接口可以从 GET /api/routes 读到。"));
     }
 
     /* ---- panel ----------------------------------------------------------------------------------------------- */
 
-    // Top-bar pages. A page inside a tab (a run, an episode, the new-evolution form) is nav.page with nav.id.
-    const TABS = [["evolutions", "进化"], ["episodes", "回合"], ["expert", "专家"], ["data", "训练数据"], ["tasks", "任务"], ["about", "介绍"]];
+    // Top-bar pages, with what each is for (its tooltip). A page inside a tab (a run, an episode, the new-evolution
+    // form) is nav.page with nav.id.
+    const TABS = [
+      ["evolutions", "进化", "进化运行；一次运行分四部分看：概览、每一代、版本与成绩、设置"],
+      ["episodes", "回合", "全部回合：逐格技能、本地检验与提交、笔记、会话记录"],
+      ["expert", "专家", "回答智能体提给专家的问题，或主动写下领域提示；之后的回合和评审都会读到"],
+      ["data", "训练数据", "把回合和评审会话导出为多轮 SFT 线程和偏好对"],
+      ["tasks", "任务", "任务组的训练与留出任务、采纳门槛，各任务的数据集、目标和时距"],
+      ["about", "介绍", "这个项目在做什么：流程、术语、数据怎么切"],
+    ];
     let remembered = { tab: "evolutions", page: null, id: null };
 
     /** Keeps a page's error inside the panel (DSH would otherwise replace the whole main column). */
@@ -3317,16 +3181,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       else if (nav.tab === "expert") page = h(ExpertPage, { go, catalog });
       else if (nav.tab === "data") page = h(DataPage, null);
       else if (nav.tab === "tasks") page = h(TasksPage, { catalog, catalogError });
-      else if (nav.tab === "about") page = h(AboutPage, { go, catalog, catalogError });
-      else page = h(EvolutionList, { go, catalog });
+      else if (nav.tab === "about") page = h(AboutPage, { catalog, catalogError });
+      else page = h(EvolutionList, { go });
       const state = status.data?.state;
       const [pillText, pillDot] = ready ? ["后端运行中", "done"] : state === "starting" ? ["后端启动中", "ongoing"]
         : state === "exited" ? ["后端重启中", "warning"] : status.error ? ["插件未连接", "error"] : ["后端未运行", "error"];
       return h("div", { className: "eg" },
         h("header", { className: "eg-bar" },
           h("span", { className: "eg-brand" }, h(Leaf, { size: 18 }), "生态进化"),
-          h("nav", { className: "eg-tabs", "aria-label": "生态进化" }, TABS.map(([id, label]) => h("button", {
-            key: id, type: "button", className: "eg-tab", "aria-current": nav.tab === id && !nav.page ? "page" : undefined,
+          h("nav", { className: "eg-tabs", "aria-label": "生态进化" }, TABS.map(([id, label, tip]) => h("button", {
+            key: id, type: "button", className: "eg-tab", title: tip, "aria-current": nav.tab === id && !nav.page ? "page" : undefined,
             onClick: () => go({ tab: id, page: null }),
           }, label, id === "expert" && openQuestions ? h("span", { className: "eg-count" }, openQuestions) : null))),
           h("span", { className: "eg-spacer" }),

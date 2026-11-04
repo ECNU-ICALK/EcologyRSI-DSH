@@ -35,9 +35,10 @@ from ..evaluation.harness import Bench, Evaluation, StageData
 from ..protocol.views import SealedAccess
 from ..solvers.base import Genome
 from .agent import Cancelled
-from .sandbox import Runtime, confine, program_profile
+from .sandbox import Runtime, confine, program_profile, thread_limits
 
 RUNNER = "_ecogym_runner.py"
+JUDGE_THREADS = 2  # a judged program's numeric threads: fixed, so no score depends on how hot the machine may run
 EPOCH = np.datetime64("1899-12-30T00:00")
 STEP_UNITS = {"1h": "h", "1d": "D"}
 
@@ -202,7 +203,7 @@ def run_predictor(program_dir: Path, stream: Stream, spec: dict[str, Any], runti
     argv = confine(program_profile(program_dir, runtime), program_dir.parent / f"{program_dir.name}.sb",
                    [str(runtime.python), "-I", "-B", RUNNER])
     env = {"PATH": "/usr/bin:/bin", "HOME": str(program_dir), "TMPDIR": str(program_dir / "tmp"), "LANG": "en_US.UTF-8",
-           "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"}
+           "PYTHONHASHSEED": "0", **thread_limits(JUDGE_THREADS)}
     targets, horizons = spec["targets"], spec["horizons"]
     predicted = np.full((len(targets), len(horizons), stream.ask.size), np.nan)
     errors: list[str] = []

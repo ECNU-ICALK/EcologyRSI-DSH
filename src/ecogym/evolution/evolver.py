@@ -64,7 +64,7 @@ from ..episodes.agent import AgentSpec, Cancelled, make_gateway, run_agent
 from ..episodes.judge import Limits, judge_program, reference_scores
 from ..episodes.mcp import Tool, ToolError
 from ..episodes.runner import Events
-from ..episodes.sandbox import Runtime, discover_runtime, ecogym_home, scratch_root
+from ..episodes.sandbox import Runtime, check_workers, discover_runtime, ecogym_home, scratch_root
 from ..episodes.tools import REPLACE_MARGIN
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench
@@ -344,7 +344,7 @@ class EvolverTools:
         self._counter = 0
         self._incumbent_smoke: dict[str, dict[str, Any]] | None = None  # the incumbent template's checks, once
         self._incumbent_lock = threading.Lock()  # held while it is judged
-        self._screen_lock = threading.Lock()  # one screen_templates call at a time: each runs every task at once
+        self._screen_lock = threading.Lock()  # one screen_templates call at a time: each already judges several tasks
         self._screened = 0  # variants screened in this session
 
     def catalog(self) -> list[Tool]:
@@ -534,7 +534,8 @@ class EvolverTools:
         return result, staging
 
     def _judge_template(self, template: Path, folder: Path) -> dict[str, dict[str, Any]]:
-        """Judge reports of a template on every check task's local check, run side by side: task id -> report.
+        """Judge reports of a template on every check task's local check, ``check_workers()`` tasks at a time: task
+        id -> report.
 
         Only the first task's report decides whether the candidate may run; the others feed warnings, since a
         template can break on one task alone (the template adopted on 2026-11-01 forecast nonsense on one of the
@@ -550,7 +551,9 @@ class EvolverTools:
                                       cancel=self.cancel)
             return report
 
-        with ThreadPoolExecutor(max_workers=len(benches), thread_name_prefix="template-check") as pool:
+        # a few at a time, not all: eight programs fitting at once heat a laptop for little gain in time
+        with ThreadPoolExecutor(max_workers=min(len(benches), check_workers()), thread_name_prefix="template-check") \
+                as pool:
             reports = list(pool.map(one, range(len(benches))))
         return {bench.task.id: report for bench, report in zip(benches, reports, strict=True)}
 
