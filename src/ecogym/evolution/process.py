@@ -131,7 +131,7 @@ def _condensed(tool: str, data: dict[str, Any] | None, text: str) -> dict[str, A
     if tool == "reset_candidate":
         return {key: data.get(key) for key in ("name", "base", "digest", "summary")}
     if tool == "screen_templates":  # the per-task scores stay in the transcript
-        return {"incumbent_mean": data.get("incumbent_mean"), "left": data.get("left"),
+        return {"incumbent_mean": data.get("incumbent_mean"), "left": data.get("left"), "seconds": data.get("seconds"),
                 "variants": [{key: item.get(key) for key in ("name", "status", "mean", "gain", "better", "worse",
                                                               "worst", "problem") if item.get(key) is not None}
                              for item in data.get("variants") or [] if isinstance(item, dict)]}

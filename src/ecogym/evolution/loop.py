@@ -700,7 +700,8 @@ class Evolution:
                                       tasks=self.tasks, benches=self.benches, view=view, ledger_path=self.ledger_path,
                                       settings=settings, repeats=config.repeats, episode_minutes=config.minutes,
                                       episode_tokens=config.tokens, model=config.model, limits=config.limits,
-                                      expert_text=expert.render(advice) if advice else "", cancel=self.cancel)
+                                      expert_text=expert.render(advice) if advice else "", cancel=self.cancel,
+                                      workers=config.concurrency)  # template checks: the load chosen for episodes
             except (Cancelled, KeyboardInterrupt):
                 raise
             except Exception as error:  # a failed review costs one round, not the run

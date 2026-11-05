@@ -44,7 +44,9 @@ sharing 52 to 96 % of their added lines).
 from __future__ import annotations
 
 import contextlib
+import copy
 import difflib
+import hashlib
 import os
 import re
 import shutil
@@ -111,6 +113,17 @@ class EvolverSettings:
     model: str = "deepseek-v4-pro"
     reasoning_effort: str = "high"
     candidates: int = 2
+
+
+def template_digest(template: Path) -> str:
+    """Every file of a template directory (path and bytes, in order): what the judge copies and runs."""
+
+    sha = hashlib.sha256(b"ecogym.template/1\n")
+    for path in sorted(item for item in template.rglob("*") if item.is_file() and not item.is_symlink()):
+        data = path.read_bytes()
+        sha.update(f"{path.relative_to(template).as_posix()}\n{len(data)}\n".encode())
+        sha.update(data)
+    return sha.hexdigest()
 
 
 def copy_tree(source: Path, target: Path) -> None:
@@ -310,14 +323,16 @@ class EvolverTools:
                  usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
                  generation: int, cancel: threading.Event | None = None, pinned: bool = False,
                  others: Sequence[Bench] = (), archived: dict[str, Harness] | None = None,
-                 known: dict[str, str] | None = None) -> None:
+                 known: dict[str, str] | None = None, workers: int = 4) -> None:
         """``pinned``: the run fixes the episodes' model, so a candidate's ``[agent].model`` is never used.
 
         A changed template runs on ``smoke``'s local check (it must finish there) and on each of ``others``
-        (the other training tasks; problems there are warnings). ``archived`` are the versions a candidate may
-        be reset to (label -> harness); ``known`` the behavior digests the loop would not run again (-> label)."""
+        (the other training tasks; problems there are warnings), ``workers`` tasks at a time (``check_workers``).
+        ``archived`` are the versions a candidate may be reset to (label -> harness); ``known`` the behavior
+        digests the loop would not run again (-> label)."""
 
         self.root = root
+        self.workers = check_workers(workers)
         self.cancel = cancel
         self.pinned = pinned
         self._models: dict[str, str] = {}  # model reference -> why it cannot run ("" when it can)
@@ -346,6 +361,7 @@ class EvolverTools:
         self._incumbent_lock = threading.Lock()  # held while it is judged
         self._screen_lock = threading.Lock()  # one screen_templates call at a time: each already judges several tasks
         self._screened = 0  # variants screened in this session
+        self._judged: dict[str, dict[str, dict[str, Any]]] = {}  # template content digest -> its reports by task
 
     def catalog(self) -> list[Tool]:
         return [
@@ -353,8 +369,9 @@ class EvolverTools:
                  {"type": "object", "properties": {}}, self.task_info),
             Tool("check_candidate",
                  "按宿主的规则检查一个候选：能否加载、是否超出限制、是否含有训练任务的专有名称、相对在任版本改了哪些文件；"
-                 "模板代码有改动时，在一个训练任务的本地检验期上按裁判协议实际运行模板程序。最终运行哪些候选以宿主在会话结束后"
-                 "的同样检查为准。",
+                 "模板代码有改动时，在每个训练任务的本地检验期上按裁判协议实际运行模板程序（第一个任务上要正常完成，"
+                 "其他任务上的问题作为提醒）。模板和这次会话里检查或试过的某个模板完全相同时，直接用那次的结果。"
+                 "最终运行哪些候选以宿主在会话结束后的同样检查为准。",
                  {"type": "object", "required": ["name"],
                   "properties": {"name": {"type": "string", "enum": list(self.names)}}},
                  self.check_candidate),
@@ -362,7 +379,10 @@ class EvolverTools:
                  "批量试模板：variants/ 下每个目录是一个完整的 template/ 副本（含 predictor.py），"
                  "在每个训练任务的本地检验期上按裁判协议运行，和在任版本的模板比较，"
                  "返回每个变体的平均分、平均增益、更好和更差的任务数与各任务分数，按平均增益排序。"
-                 f"每次最多 {SCREEN_LIMIT} 个、每个会话最多 {SCREEN_TOTAL} 个，一次调用约一两分钟；"
+                 f"每次最多 {SCREEN_LIMIT} 个、每个会话最多 {SCREEN_TOTAL} 个。每个变体在每个训练任务上各运行一次，"
+                 f"同时运行 {self.workers} 个：模板每次运行要几秒到二十几秒，一次试 6 个变体可能要几分钟，"
+                 "结果里的 seconds 是这次用的时间，按它安排剩下的时间；"
+                 "内容和这次会话里试过的模板完全相同的变体不再运行。"
                  "只用本地检验期，不涉及隐藏期。用它在做成候选之前多试几个方向或参数，"
                  "再把选中的变体复制进候选的 template/。",
                  {"type": "object", "required": ["variants"],
@@ -534,12 +554,16 @@ class EvolverTools:
         return result, staging
 
     def _judge_template(self, template: Path, folder: Path) -> dict[str, dict[str, Any]]:
-        """Judge reports of a template on every check task's local check, ``check_workers()`` tasks at a time: task
+        """Judge reports of a template on every check task's local check, ``self.workers`` tasks at a time: task
         id -> report.
 
         Only the first task's report decides whether the candidate may run; the others feed warnings, since a
         template can break on one task alone (the template adopted on 2026-11-01 forecast nonsense on one of the
-        four training tasks, local skill −0.957, and scored +0.11 to +0.22 on every other task of its suite)."""
+        four training tasks, local skill −0.957, and scored +0.11 to +0.22 on every other task of its suite).
+
+        Reports are kept for the session by the template's content: a candidate checked again, or made from a
+        variant just screened, is not judged a second time (2026-11-05: a check of a slow template on eight tasks
+        took 45 s with four at a time, and the evolver checked templates it had screened minutes before)."""
 
         benches = [self.smoke, *self.others]
 
@@ -551,11 +575,20 @@ class EvolverTools:
                                       cancel=self.cancel)
             return report
 
+        key = template_digest(template)
+        with self._lock:
+            known = self._judged.get(key)
+        if known is not None:  # the same files were judged in this session: same programs, same tasks, same result
+            return copy.deepcopy(known)
         # a few at a time, not all: eight programs fitting at once heat a laptop for little gain in time
-        with ThreadPoolExecutor(max_workers=min(len(benches), check_workers()), thread_name_prefix="template-check") \
-                as pool:
+        workers = min(len(benches), self.workers)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="template-check") as pool:
             reports = list(pool.map(one, range(len(benches))))
-        return {bench.task.id: report for bench, report in zip(benches, reports, strict=True)}
+        result = {bench.task.id: report for bench, report in zip(benches, reports, strict=True)}
+        if all(report["status"] == "ok" for report in reports):  # a failure may be passing (a timeout): judge it again
+            with self._lock:
+                self._judged[key] = copy.deepcopy(result)
+        return result
 
     def incumbent_smoke(self) -> dict[str, dict[str, Any]]:
         """The incumbent's own template on the same local checks, by task (judged once per session; concurrent
@@ -620,6 +653,7 @@ class EvolverTools:
         bad = [name for name in names if not VARIANT_NAME.fullmatch(name)]
         if bad:
             raise ToolError(f"{bad[0]}: a variant is the name of a directory under variants/ (letters, digits, . _ -)")
+        started = time.monotonic()
         with self._screen_lock:
             if self._screened + len(names) > SCREEN_TOTAL:
                 left = SCREEN_TOTAL - self._screened
@@ -638,6 +672,7 @@ class EvolverTools:
         without = sorted(task for task, item in reference.items() if not isinstance(item.get("score"), float))
         return {"incumbent_mean": base, "tasks": [bench.task.id for bench in (self.smoke, *self.others)],
                 "variants": results, "left": SCREEN_TOTAL - self._screened,
+                "seconds": round(time.monotonic() - started, 1),
                 **({"incumbent_failed": without} if without else {}),
                 "note": "本地检验期比隐藏期短得多：以多个任务的平均增益和更好的任务数为准，"
                         "单个任务上的本地差别常常在隐藏期上不成立。选中的变体复制进 candidates/<名字>/template/，"
@@ -941,7 +976,7 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
 def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: SuiteSpec, tasks: Sequence[TaskSpec],
                 benches: dict[str, Bench], view: dict[str, Any], ledger_path: Path, settings: EvolverSettings,
                 repeats: int, episode_minutes: float, episode_tokens: int, model: str | None, limits: Limits,
-                expert_text: str = "", cancel: threading.Event | None = None) -> dict[str, Any]:
+                expert_text: str = "", cancel: threading.Event | None = None, workers: int = 4) -> dict[str, Any]:
     runtime = discover_runtime()
     tag = run_id.partition(":")[2] or run_id
     stamp = time.strftime("%Y%m%d%H%M%S")
@@ -986,7 +1021,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
                          others=[benches[task.id] for task in tasks[1:]], runtime=runtime, limits=limits,
                          forbidden=forbidden, deadline=deadline, usage=gateway.usage, event=events,
                          generation=generation, cancel=cancel, pinned=model is not None, archived=archived,
-                         known=known_versions(view, incumbent, prior))
+                         known=known_versions(view, incumbent, prior), workers=workers)
     agent = AgentSpec(model=settings.model, reasoning_effort=settings.reasoning_effort, web_search=True,
                       subagent_depth=1, parallel_tool_calls=10)
     follow_up = evolver_follow_up(deadline=deadline, minutes=settings.minutes, widest=evidence.get("widest"))

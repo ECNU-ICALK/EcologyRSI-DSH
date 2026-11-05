@@ -93,10 +93,12 @@ def thread_limits(count: int | None = None) -> dict[str, str]:
     return {name: value for name in THREAD_VARIABLES}
 
 
-def check_workers() -> int:
-    """How many training tasks a template check judges at the same time: ``ECOGYM_CHECK_WORKERS``, 4 by default."""
+def check_workers(default: int = 4) -> int:
+    """How many training tasks a template check judges at the same time: ``ECOGYM_CHECK_WORKERS`` when set, else
+    ``default``. An evolution run passes its concurrency, the load chosen for its episodes: at four at a time, a
+    low-load run's template checks still kept eight cores busy (2026-11-05)."""
 
-    return _count("ECOGYM_CHECK_WORKERS", 4)
+    return _count("ECOGYM_CHECK_WORKERS", max(1, default))
 
 
 def runtime_python() -> Path:

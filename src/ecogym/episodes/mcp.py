@@ -1,9 +1,16 @@
-"""A minimal MCP tool server over Streamable HTTP with plain JSON responses.
+"""A minimal MCP tool server over Streamable HTTP.
 
 Enough of MCP for DSH's client: ``initialize``, ``notifications/initialized``,
 ``tools/list``, ``tools/call`` and ``ping``; GET (server-initiated streams)
 answers 405. Every request needs ``Authorization: Bearer <token>``. Tool
 handlers run on the server's threads, so sub-agents can call concurrently.
+
+Replies are plain JSON, except a tool call from a client that accepts an event
+stream: it gets one at once, a comment line every ``KEEPALIVE_SECONDS`` while
+the tool runs, then the reply. DSH's client fetches with Node's defaults, which
+give up on a response whose headers take five minutes; a template screen can
+take longer (2026-11-05: 378 and 479 s, both reported to the evolver as "fetch
+failed", and the evolver spent its whole session waiting).
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from typing import Any
 from ..kernel.canonical import jsonable
 
 PROTOCOL_VERSION = "2025-06-18"
+KEEPALIVE_SECONDS = 15.0  # a streamed tool call sends a comment this often while it runs
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -152,11 +160,47 @@ def _handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
             if isinstance(message, list):
                 replies = [reply for item in message if (reply := server.dispatch(item)) is not None]
                 return self._reply(200, replies) if replies else self._reply(202)
+            if (isinstance(message, dict) and message.get("method") == "tools/call" and message.get("id") is not None
+                    and "text/event-stream" in (self.headers.get("Accept") or "")):
+                return self._stream(message)
             reply = server.dispatch(message)
             if reply is None:
                 return self._reply(202)
             headers = {"Mcp-Session-Id": server.session} if message.get("method") == "initialize" else None
             self._reply(200, reply, headers)
+
+        def _stream(self, message: dict[str, Any]) -> None:
+            """Answer a tool call as an event stream (chunked): comments while the tool runs, then the reply."""
+
+            done = threading.Event()
+            box: dict[str, Any] = {}
+
+            def work() -> None:
+                try:
+                    box["reply"] = server.dispatch(message)
+                finally:
+                    done.set()
+
+            threading.Thread(target=work, daemon=True, name="mcp-tool").start()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                while not done.wait(KEEPALIVE_SECONDS):
+                    self._chunk(b": working\n\n")
+                reply = box.get("reply") or {"jsonrpc": "2.0", "id": message.get("id"),
+                                             "error": {"code": -32603, "message": "the tool stopped without a reply"}}
+                self._chunk(f"event: message\ndata: {json.dumps(reply, ensure_ascii=False)}\n\n".encode())
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):  # the client went away; the tool finishes on its own
+                self.close_connection = True
+
+        def _chunk(self, data: bytes) -> None:
+            self.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
+            self.wfile.flush()
 
     return Handler
 

@@ -2769,7 +2769,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       }
       if (item.tool === "screen_templates") {
         const rows = result.variants || [];
-        return h(Fragment, null, head, `在本地检验期上试了 ${rows.length} 个模板变体（在任版本的模板平均 ${signed(result.incumbent_mean, 3)}）：`,
+        return h(Fragment, null, head, `在本地检验期上试了 ${rows.length} 个模板变体（在任版本的模板平均 ${signed(result.incumbent_mean, 3)}`
+          + `${isNum(result.seconds) ? `，用时 ${duration(result.seconds)}` : ""}）：`,
           h("div", { className: "eg-faint" }, rows.map((row) => (row.status === "ok"
             ? `${row.name} ${signed(row.gain, 4)}（${row.better} 个任务更好、${row.worse} 个更差）`
             : `${row.name} ${{ missing: "找不到", invalid: "不能用", failed: "没有正常完成" }[row.status] || row.status}${row.problem ? `：${row.problem}` : ""}`)).join("；")));
