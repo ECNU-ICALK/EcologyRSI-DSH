@@ -1,6 +1,6 @@
 {
   "name": "@ecogym/dsh-plugin",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "ecogym inside DeepSeek Harness: DSH starts the ecogym service and gets a 生态进化 panel",
   "private": true,
   "type": "module",

@@ -4,7 +4,7 @@
 
 DSH 内核不改：进化的只是 DSH 能加载的内容；打分由确定性的宿主代码完成，不交给 LLM。ecogym 本身是 DSH 的一个插件：启动 DSH 就启动了 ecogym，侧栏「生态进化」面板里查看和发起进化，面板的「介绍」页讲整个流程。
 
-> ecogym 0.3.5 · Python 3.11+ · 依赖 numpy · 智能体回合需要 macOS（沙箱）、DeepSeek Harness（`dsh`，已在 0.1.5-rc.2 上验证）和一个可用的模型提供方：DeepSeek 官方接口，或 DSH 设置里任一 `openai-completions` 提供方
+> ecogym 0.3.6 · Python 3.11+ · 依赖 numpy · 智能体回合需要 macOS（沙箱）、DeepSeek Harness（`dsh`，已在 0.1.5-rc.2 上验证）和一个可用的模型提供方：DeepSeek 官方接口，或 DSH 设置里任一 `openai-completions` 提供方
 
 [交付内容](#交付内容) · [快速开始](#快速开始) · [在 DSH 中使用](#在-dsh-中使用) · [内循环与外循环](#内循环与外循环) · [评测规则](#评测规则) · [实测](#当前参考成绩与实测) · [训练数据](#训练数据) · [方法竞技](#方法竞技参数级基线) · [代码结构](#代码结构) · [已知限制](#已知限制) · [设计文档](docs/evolution.md) · [前后端架构](docs/architecture.md) · [新增领域](docs/new-domain.md)
 

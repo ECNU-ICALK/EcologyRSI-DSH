@@ -96,6 +96,7 @@ NAMES = "abcdefghij"
 SCREEN_LIMIT = 12  # template variants screen_templates judges in one call
 SCREEN_TOTAL = 48  # ... and in one evolver session
 SCREEN_TIE = 0.0005  # a task's local change this small counts as neither better nor worse
+SCREEN_RESERVE = 180.0  # session seconds a screen leaves for writing and checking candidates after it returns
 VARIANT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 ARCHIVE_LIMIT = 24  # earlier candidates copied into the evolver's archive/
 SIMILAR_EDITS = 0.5  # two candidates sharing this share of their added lines get a warning
@@ -362,6 +363,7 @@ class EvolverTools:
         self._screen_lock = threading.Lock()  # one screen_templates call at a time: each already judges several tasks
         self._screened = 0  # variants screened in this session
         self._judged: dict[str, dict[str, dict[str, Any]]] = {}  # template content digest -> its reports by task
+        self._variant_seconds: list[float] = []  # how long each screened variant took (awake time)
 
     def catalog(self) -> list[Tool]:
         return [
@@ -641,7 +643,11 @@ class EvolverTools:
         check of a whole template takes seconds, and its mean over the training tasks predicts the hidden-period
         gain well (2026-11-04: correlation +0.86 over nine candidates), its per-task changes poorly (+0.21). So the
         evolver can try many directions or settings here and spend its candidates on the best. Only the local check
-        period is used: nothing here tells the hidden period's values. Calls run one at a time."""
+        period is used: nothing here tells the hidden period's values. Calls run one at a time.
+
+        A variant is not started when the session would have less than ``SCREEN_RESERVE`` seconds left after it
+        (its time taken as the slowest variant so far): on 2026-11-05 a screen started eight minutes before the
+        deadline ran past it twice, and both candidates stayed copies of the incumbent."""
 
         names = [str(item).strip().removeprefix("variants/").strip("/") for item in (variants or [])]
         if not names:
@@ -662,13 +668,22 @@ class EvolverTools:
             scores = [item["score"] for item in reference.values() if isinstance(item.get("score"), float)]
             base = float(sum(scores) / len(scores)) if scores else None
             results = []
-            for name in names:
+            for index, name in enumerate(names):
                 if self.cancel is not None and self.cancel.is_set():
                     raise Cancelled("the run was cancelled")
+                left = self.deadline - clock.now()
+                need = max(self._variant_seconds, default=0.0)  # the slowest variant judged so far this session
+                if left - need < SCREEN_RESERVE:  # results that come after the session ends help nobody
+                    problem = f"会话只剩 {left / 60:.1f} 分钟，来不及试它：先把已有的结果做成候选、检查候选"
+                    results += [{"name": skipped, "status": "skipped", "problem": problem} for skipped in names[index:]]
+                    break
+                began = clock.now()
                 results.append(self._screen_one(name, reference))
                 if results[-1]["status"] in ("ok", "failed"):  # judged: a missing or broken directory costs nothing
                     self._screened += 1
+                    self._variant_seconds.append(clock.now() - began)
         results.sort(key=lambda item: (item.get("gain") is None, -(item.get("gain") or 0.0)))
+        skipped = [item["name"] for item in results if item["status"] == "skipped"]
         without = sorted(task for task, item in reference.items() if not isinstance(item.get("score"), float))
         return {"incumbent_mean": base, "tasks": [bench.task.id for bench in (self.smoke, *self.others)],
                 "variants": results, "left": SCREEN_TOTAL - self._screened,
@@ -678,7 +693,9 @@ class EvolverTools:
                         "单个任务上的本地差别常常在隐藏期上不成立。选中的变体复制进 candidates/<名字>/template/，"
                         "再用 check_candidate 检查；最终由隐藏期上的比较决定。"
                         + ("在任版本的模板在 incumbent_failed 列出的任务上没有正常完成，增益只在其他任务上算。"
-                           if without else "")}
+                           if without else "")
+                        + (f"会话剩下的时间不够，{'、'.join(skipped)} 没有试（status 为 skipped，不计入次数）："
+                           "现在就把最好的结果做成候选，写好提案，用 check_candidate 检查。" if skipped else "")}
 
     def _screen_one(self, name: str, reference: dict[str, dict[str, Any]]) -> dict[str, Any]:
         source = self.work / "variants" / name

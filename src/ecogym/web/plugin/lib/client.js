@@ -2773,7 +2773,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           + `${isNum(result.seconds) ? `，用时 ${duration(result.seconds)}` : ""}）：`,
           h("div", { className: "eg-faint" }, rows.map((row) => (row.status === "ok"
             ? `${row.name} ${signed(row.gain, 4)}（${row.better} 个任务更好、${row.worse} 个更差）`
-            : `${row.name} ${{ missing: "找不到", invalid: "不能用", failed: "没有正常完成" }[row.status] || row.status}${row.problem ? `：${row.problem}` : ""}`)).join("；")));
+            : `${row.name} ${{ missing: "找不到", invalid: "不能用", failed: "没有正常完成", skipped: "没时间试" }[row.status] || row.status}`
+              + `${row.problem && row.status !== "skipped" ? `：${row.problem}` : ""}`)).join("；")));
       }
       if (item.tool === "task_info") {
         const states = Object.entries(result.candidates || {}).map(([name, state]) => `${name} ${typeof state === "string" ? "未检查" : state.ok ? "通过" : "没通过"}`);
