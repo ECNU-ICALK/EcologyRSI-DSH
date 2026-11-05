@@ -76,7 +76,7 @@ def ecogym_home() -> Path:
 
 
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-                    "NUMEXPR_NUM_THREADS")
+                    "NUMEXPR_NUM_THREADS", "LOKY_MAX_CPU_COUNT")
 
 
 def _count(name: str, default: int) -> int:
@@ -85,11 +85,13 @@ def _count(name: str, default: int) -> int:
 
 
 def thread_limits(count: int | None = None) -> dict[str, str]:
-    """Numeric-library threads of a sandboxed process: ``count``, else ``ECOGYM_THREADS`` (2 by default) for the
+    """Numeric-library threads of a sandboxed process: ``count``, else ``ECOGYM_THREADS`` (1 by default) for the
     agents' own experiments. Unlimited, each of several sessions at once used every core (2026-11-04: six episodes
-    at a time kept a 12-core laptop hot). The judge passes a fixed count, so a score never depends on the setting."""
+    at a time kept a 12-core laptop hot); with two, the small models fitted here ran slower than with one and used
+    3.6–4.6 times the CPU (2026-11-05). ``LOKY_MAX_CPU_COUNT`` caps joblib's workers (scikit-learn's ``n_jobs=-1``)
+    the same way. The judge passes a fixed count, so a score never depends on the setting."""
 
-    value = str(count or _count("ECOGYM_THREADS", 2))
+    value = str(count or _count("ECOGYM_THREADS", 1))
     return {name: value for name in THREAD_VARIABLES}
 
 

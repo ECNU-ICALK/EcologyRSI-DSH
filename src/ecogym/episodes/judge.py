@@ -38,7 +38,11 @@ from .agent import Cancelled
 from .sandbox import Runtime, confine, program_profile, thread_limits
 
 RUNNER = "_ecogym_runner.py"
-JUDGE_THREADS = 2  # a judged program's numeric threads: fixed, so no score depends on how hot the machine may run
+# A judged program's numeric threads: fixed, so no score depends on how hot the machine may run. One: these
+# programs fit small models, and with two a template's judging took 1.4–1.8 times as long and 3.6–4.6 times the
+# CPU (waiting OpenMP threads spin), for the same score to the last digit (2026-11-05, the 2fb9cb template, two
+# tasks judged twice each way).
+JUDGE_THREADS = 1
 EPOCH = np.datetime64("1899-12-30T00:00")
 STEP_UNITS = {"1h": "h", "1d": "D"}
 
