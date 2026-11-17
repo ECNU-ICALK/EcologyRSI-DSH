@@ -549,9 +549,9 @@ def sealed_plan(ledger: Ledger, view: dict[str, Any], suite: Any, stage: str
     final) on every task of the suite. Use its first plan if it already opened a training task, or the programs
     in its latest finished round; a version some run already judged on ``validation`` under the same conditions
     keeps that look and its programs (``_first_looks``). A holdout task uses its holdout episode. On
-    ``final_test``, use the programs judged on ``validation``. The (version, task) pairs without programs are listed with why: ``no_program``
-    (no scored episode on a training task: it will never have one), ``awaiting_holdout`` (holdout not verified,
-    or not scored there yet) and ``awaiting_validation``."""
+    ``final_test``, use the programs judged on ``validation``. The (version, task) pairs without programs are
+    listed with why: ``no_program`` (no scored episode on a training task: it will never have one),
+    ``awaiting_holdout`` (holdout not verified, or not scored there yet) and ``awaiting_validation``."""
 
     holdout = view["verification"]["holdout"] or {}
     validation = view["verification"]["sealed"].get("validation") or {}
