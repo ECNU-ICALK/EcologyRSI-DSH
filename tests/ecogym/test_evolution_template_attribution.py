@@ -97,6 +97,19 @@ class TemplateAttributionTests(unittest.TestCase):
         candidate_result = reused["arms"]["a"]["tasks"][self.task]["template"]
         self.assertEqual((candidate_result["source"], candidate_result["source_generation"]), ("prior_round", 1))
 
+        # the evolver's overview of the next round renders the complete diagnostic
+        run = "evo:render"
+        with Ledger(self.path) as ledger:
+            ledger.append(run, "evolve_started", {"seed": {"digest": "seed"}})
+            ledger.append(run, "round_started", {"generation": 1, "incumbent": "seed"})
+            ledger.append(run, "round_planned", {"id": "plan", "measurement": "measurement"})
+            ledger.append(run, "round_finished", {"incumbent": "seed"})
+            ledger.append(run, "template_attribution_checked", {"generation": 1, "round_plan": "plan", **result})
+        text = overview(self.evolution.view(run), {}, [self.task], {})
+        self.assertIn("匹配 2/2 个版本与任务组合", text)
+        self.assertIn("模板分差 +0.3000", text)
+        self.assertIn("相对各自模板的回合增益差 +0.2000", text)
+
     def test_conflicting_starts_are_flagged_and_arms_share_identical_template_replay(self):
         inc, candidate = self.harness("seed", "# same"), self.harness("candidate", "# same")
         jobs = [(inc, "incumbent", None), (candidate, "candidate", "a")]
