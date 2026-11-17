@@ -9,8 +9,12 @@ the record of every earlier candidate (changes, proposal, outcome) and the
 evolver's own lessons. Holdout tasks and sealed stages never appear (the
 loop passes only the training tasks' expert guidance). The hidden stage also
 decides adoption, so the evidence leaves out what would point straight at
-its values: the signed per-cell bias and the numbers in the predictor's
-error messages.
+its values: the signed per-cell bias and the text of the predictor's errors
+on the hidden stage. Those messages are written by the program while it reads
+hidden rows, so no filter can prove they carry none (a masked number survives
+as "line 23.5" or in base64): the evidence names only the error types from a
+fixed list and how often they occurred; the messages stay in the ledger for
+people.
 
 Three files follow published findings on what a harness proposer needs:
 
@@ -32,6 +36,8 @@ Three files follow published findings on what a harness proposer needs:
 
 from __future__ import annotations
 
+import builtins
+import collections
 import difflib
 import re
 from collections.abc import Iterable, Mapping, Sequence
@@ -49,7 +55,11 @@ from .fold import SCORED_STATUSES, fold
 
 FINAL_REPORT_LIMIT = 6000
 NOTE_LIMIT = 1200
-NUMBER = re.compile(r"(?<!line )(?<![\w.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+# the error types the evidence may name: Python's own exceptions and numpy's linear-algebra error; any other name
+# (a program may define a class called anything) reads as "其他错误"
+KNOWN_ERRORS = frozenset(name for name, value in vars(builtins).items()
+                         if isinstance(value, type) and issubclass(value, BaseException)) | {"LinAlgError"}
+ERROR_TYPE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?::|$)")
 TRANSCRIPT_LIMIT = 200_000  # characters of one episode's transcript
 TURN_LIMITS = {"prompt": 4000, "reasoning": 1500, "reply": 3000, "call": 2500, "result": 1800}
 FENCE = "~~~~~"
@@ -77,10 +87,16 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …（截断）"
 
 
-def _masked(text: str) -> str:
-    """A hidden-stage error message without its numbers (they may be hidden observations); line numbers stay."""
+def error_kinds(errors: Sequence[Any]) -> str:
+    """Hidden-stage errors as types from ``KNOWN_ERRORS`` and counts: never their messages, which the program wrote
+    while it read hidden rows."""
 
-    return NUMBER.sub("#", str(text))
+    counts: collections.Counter[str] = collections.Counter()
+    for error in errors:
+        found = ERROR_TYPE.match(str(error).strip())
+        name = found.group(1) if found else ""
+        counts[name if name in KNOWN_ERRORS else "其他错误"] += 1
+    return "、".join(f"{name} ×{count}" for name, count in counts.most_common())
 
 
 def episode_summary(record: dict[str, Any], *, role: str) -> str:
@@ -123,8 +139,10 @@ def episode_summary(record: dict[str, Any], *, role: str) -> str:
                           f"{_signed(local['score'], 4)}。它在隐藏期之前的全部数据上拟合时关掉了所有修正，"
                           "多半是启用门槛或回退条件在更长、更新的拟合数据上不再通过。"]
         if scored.get("errors"):
-            lines += ["", "程序错误（节选，数值已隐去）：",
-                      *[f"- `{_clip(_masked(error), 300)}`" for error in scored["errors"][:5]]]
+            first = "（只记了前 20 条）" if len(scored["errors"]) >= 20 else ""
+            lines += ["", f"程序在隐藏期上报错{first}：{error_kinds(scored['errors'])}。这里只给错误类型和次数："
+                          "错误信息是程序读着隐藏期的数据写的，可能带有隐藏期的数值，所以不给出。"
+                          "要看具体信息，在本地检验期上运行同一个程序（check_candidate、screen_templates）。"]
         lines.append("")
     timeline = sorted([("检验", item) for item in record["evaluations"]] + [("提交", item) for item in
                                                                              record["submissions"]],
@@ -217,6 +235,28 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
         lines += ["", "被评分的是最后一次被接受、且本地比起始程序（模板）高出足够多的提交，否则是模板本身。"
                       "按模板评分的回合：" + "；".join(f"{names.get(harness, '')} `{harness[:12]}` {done}/{total}"
                                                 for harness, (done, total) in kept.items()) + "。"]
+    measured = [round_ for round_ in view["rounds"] if round_["finished"] and round_.get("template_attribution")]
+    if measured:
+        round_ = measured[-1]
+        attribution = round_["template_attribution"]
+        lines += ["", f"## 第 {round_['generation']} 代的起始模板与提交表现", "",
+                  "固定模板和各回合提交在相同的开发期预测起点评分。回合超出模板的分差含候选选择与运行波动，"
+                  "仅作诊断。"]
+        if attribution.get("status") == "error":
+            lines.append("本代诊断未能完成。")
+        else:
+            lines.append(f"匹配 {attribution['matched_arm_tasks']}/{attribution['expected_arm_tasks']} "
+                         "个版本与任务组合。")
+            for name, comparison in attribution.get("comparisons", {}).items():
+                mean = comparison["mean_on_matched_tasks"]
+                lines.append(f"- 候选 {name} 的回合分差 {_signed(mean['episode_gain'], 4)}，其中模板分差 "
+                             f"{_signed(mean['template_gain'], 4)}，相对各自模板的回合增益差 "
+                             f"{_signed(mean['episode_over_template_gain'], 4)}。"
+                             f"匹配任务 {comparison['matched_tasks']}/{comparison['expected_tasks']}。")
+            for name, arm in attribution.get("arms", {}).items():
+                drift = [task for task, row in arm["tasks"].items() if row["template"]["status"] == "drift"]
+                if drift:
+                    lines.append(f"- {name} 的固定模板在 {', '.join(drift)} 产生不同预测，该处缺少稳定参考。")
     if incumbent in cells:
         keys = sorted({key for by_cell in cells[incumbent].values() for key in by_cell}, key=_cell_order)
         header = "| 格 | " + " | ".join(f"`{task}`" for task in tasks) + " |"
@@ -316,7 +356,8 @@ def archive(view: dict[str, Any], archived: Mapping[str, Any] | None = None) -> 
         if evolver.get("status") and evolver["status"] not in ("finished", "timeout"):
             lines += [f"评审会话状态：{evolver['status']} {evolver.get('error', '')}", ""]
         for candidate in round_["candidates"]:
-            lines.append(f"### 候选 {candidate['name']} `{candidate.get('digest', '')[:12]}` —— {candidate['status']}")
+            version = (candidate.get("digest") or "无有效版本")[:12]
+            lines.append(f"### 候选 {candidate['name']} `{version}` —— {candidate['status']}")
             if candidate.get("summary"):
                 lines.append(f"- 摘要：{_clip(candidate['summary'], 600)}")
             changes = candidate.get("changes") or []
@@ -534,6 +575,7 @@ def related_runs(ledger: Ledger, view: dict[str, Any]) -> list[dict[str, Any]]:
     out: that task may be one of this run's holdout tasks."""
 
     train = set((view.get("suite") or {}).get("train") or [])
+    mode = (view.get("config") or {}).get("method_research", "internal")
     found = []
     for run_id in reversed(ledger.runs(first="evolve_started")):
         if not train or run_id == view["run_id"]:
@@ -542,6 +584,10 @@ def related_runs(ledger: Ledger, view: dict[str, Any]) -> list[dict[str, Any]]:
             other = fold(ledger.events(run_id))
         except (ValueError, KeyError):
             continue
+        other_mode = (other.get("config") or {}).get("method_research", "internal")
+        if other_mode != "internal" and (mode != other_mode or
+                                         view.get("method_registry_digest") != other.get("method_registry_digest")):
+            continue  # a supplied source must not leak into a run set up for blind discovery
         theirs = set((other.get("suite") or {}).get("train") or [])
         if theirs and theirs <= train:
             found.append(other)

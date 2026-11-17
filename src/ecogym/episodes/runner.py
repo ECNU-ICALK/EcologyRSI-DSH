@@ -34,7 +34,8 @@ during its session or its judging (``cancel``) is recorded as
 
 from __future__ import annotations
 
-import subprocess
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -50,11 +51,20 @@ from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger
 from ..task.spec import task_spec
 from . import expert
-from .agent import AgentSpec, make_gateway, run_agent
-from .judge import Limits, file_digest, judge_program, missing, reference_scores, report_of, save_predictions
+from .agent import AgentSpec, Cancelled, make_gateway, run_agent
+from .judge import (
+    JUDGE_PROTOCOL,
+    Limits,
+    file_digest,
+    judge_program,
+    missing,
+    reference_scores,
+    report_of,
+    save_predictions,
+)
 from .mcp import ToolError
 from .sandbox import discover_runtime, ecogym_home, scratch_root
-from .tools import REPLACE_MARGIN, EpisodeTools, snapshot, starting_program
+from .tools import BEST_LOCAL_SELECTION, REPLACE_MARGIN, EpisodeTools, selection_rule_text, snapshot, starting_program
 from .workspace import LOCAL_STAGE, SCORED_STAGE, export_visible, task_brief
 
 EVENT_KINDS = frozenset({"episode_started", "episode_evaluated", "episode_submitted", "episode_note",
@@ -91,7 +101,7 @@ def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
             f"这是同一个回合的第 {n + 1} 段会话。上一段会话已经结束，但这个回合还剩约 {left / 60:.0f} 分钟"
             f"（共 {minutes:g} 分钟）。工作区里的文件和提交都还在，用 task_info 查看。{state}",
             "请继续改进：先读 TASK.md 和 submission/ 回顾已经做过的事，再找在拟合期内部多个滚动窗口上都稳定的改进；"
-            f"只有确实更好时才 submit（评分用最后一次被接受、且本地比起始程序高至少 {REPLACE_MARGIN} 的提交）。"
+            f"只有确实更好时才 submit。{selection_rule_text(tools.selection_policy)}"
             "截止前留出时间收尾，写最终回复。",
             "", "上一段会话的最终回复（节选）：", "", reply.strip()[-2500:] or "（没有）",
         ])
@@ -111,6 +121,7 @@ class EpisodeConfig:
     limits: Limits = field(default_factory=Limits)
     context: dict[str, Any] = field(default_factory=dict)  # who ran it: evolution run, round, role, candidate
     expert_until: int | None = None  # expert guidance recorded up to this ledger sequence number (None: all)
+    local_selection: str = BEST_LOCAL_SELECTION
 
 
 class Events:
@@ -129,8 +140,8 @@ class Events:
             ledger.append(self.run_id, kind, body)
 
 
-def _final_program(tools: EpisodeTools, root: Path) -> dict[str, Any] | None:
-    """The latest accepted submission that replaces the starting program, else the starting program; with no
+def _final_program(tools: EpisodeTools, root: Path, programs: Path) -> dict[str, Any] | None:
+    """The submission selected by the local policy, else the starting program; with no
     starting program (a harness without a template), a snapshot of the current submission/ directory."""
 
     final = tools.final()
@@ -138,7 +149,7 @@ def _final_program(tools: EpisodeTools, root: Path) -> dict[str, Any] | None:
         return final
     if tools.start is not None:
         return tools.start
-    fallback = root / "submissions" / "final-fallback" / "program"
+    fallback = programs / "submissions" / "final-fallback" / "program"
     fallback.mkdir(parents=True, exist_ok=True)
     try:
         return {"n": None, "digest": snapshot(root / "work" / "submission", fallback), "program": str(fallback),
@@ -149,16 +160,28 @@ def _final_program(tools: EpisodeTools, root: Path) -> dict[str, Any] | None:
 
 def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None = None,
                 cancel: threading.Event | None = None) -> dict[str, Any]:
+    episode_id = f"ep:{uuid.uuid4().hex[:12]}"
+    scratch = scratch_root()
+    root = scratch / episode_id.replace(":", "-")
+    try:
+        # The agent can write anywhere in its episode directory. The judge and archive both use snapshots
+        # from this sibling directory, which is outside the sandbox's allowed paths.
+        with tempfile.TemporaryDirectory(prefix="episode-programs-", dir=scratch) as saved:
+            return _run_episode(config, ledger_path, episode_id, root, Path(saved), bench=bench, cancel=cancel)
+    finally:
+        if not config.keep:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root: Path, programs: Path, *,
+                 bench: Bench | None, cancel: threading.Event | None) -> dict[str, Any]:
     bench = bench or Bench.open(task_spec(config.task))
     runtime = discover_runtime()
     if runtime.dsh is None or runtime.node_root is None:
         raise FileNotFoundError("dsh not found; install DeepSeek Harness or set ECOGYM_DSH_BIN")
     harness = resolve(config.harness)
     agent = AgentSpec.of(harness.agent, config.model)
-    episode_id = f"ep:{uuid.uuid4().hex[:12]}"
-    name = episode_id.replace(":", "-")
-    root = scratch_root() / name
-    trajectory = ecogym_home() / "trajectories" / name
+    trajectory = ecogym_home() / "trajectories" / root.name
     started = time.time()
     deadline = clock.now() + config.minutes * 60  # awake time: a sleeping machine spends none of the budget
     gateway = make_gateway(trajectory, tokens=config.tokens, deadline=deadline,
@@ -167,7 +190,7 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
         path.mkdir(parents=True, exist_ok=True)
     events = Events(ledger_path, episode_id)
     harness.install(root)
-    start = starting_program(bench, root, runtime, config.limits)
+    start = starting_program(bench, root, runtime, config.limits, programs=programs)
     deadline = clock.now() + config.minutes * 60  # the clock starts after the starting program was judged
     gateway.deadline = deadline
     with Ledger(ledger_path) as ledger:
@@ -175,11 +198,13 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
     visible = export_visible(bench, root / "work" / "data", expert=expert.render(advice) if advice else "")
     (root / "work" / "TASK.md").write_text(task_brief(bench, visible["boundaries"], minutes=config.minutes,
                                                       tokens=config.tokens, deadline=deadline, limits=config.limits,
+                                                      selection_policy=config.local_selection,
                                                       start_local=start["local"]["score"] if start else None),
                                            encoding="utf-8")
     (root / "work" / "notes").mkdir(exist_ok=True)
     tools = EpisodeTools(bench=bench, root=root, runtime=runtime, limits=config.limits, deadline=deadline,
-                         usage=gateway.usage, event=events, start=start)
+                         usage=gateway.usage, event=events, start=start, programs=programs,
+                         selection_policy=config.local_selection)
 
     logged = []
 
@@ -187,21 +212,39 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
         logged.append(True)
         events("episode_started", {
             "task_id": bench.task.id, "label": config.label, "bench": bench.identity, "ecogym": __version__,
+            "judge_protocol": JUDGE_PROTOCOL,
             "harness": {"digest": harness.digest, "name": harness.name, "parent": harness.parent},
             "model": agent.model, "agent": asdict(agent), "minutes": config.minutes, "tokens": config.tokens,
             "limits": asdict(config.limits), "context": config.context, "root": str(root),
             "dsh": facts["dsh"], "sandbox": digest(facts["profile"].replace(str(root), "<episode>")),
             "visible_rows": visible["rows"], "boundaries": visible["boundaries"], "expert_entries": len(advice),
             "expert_until": config.expert_until, "replace_margin": REPLACE_MARGIN,
+            "local_selection": config.local_selection,
             "start": None if start is None else {"digest": start["digest"], "local": start["local"]},
         })
+
+    final = None
+    selection_error = None
+
+    def close_tools() -> None:
+        nonlocal final, selection_error
+        tools.close()
+        # Select and, for an automatic fallback, snapshot before the archive is written.
+        try:
+            final = _final_program(tools, root, programs)
+        except Exception as error:
+            selection_error = error
 
     try:
         session = run_agent(root=root, prompt=PROMPT, agent=agent, tools=tools.catalog(), gateway=gateway,
                             deadline=deadline, trajectory=trajectory, runtime=runtime, on_start=started_event,
-                            cancel=cancel, follow_up=_follow_up(tools, deadline=deadline, minutes=config.minutes))
-        final = _final_program(tools, root)
+                            cancel=cancel, follow_up=_follow_up(tools, deadline=deadline, minutes=config.minutes),
+                            on_close=close_tools, programs=programs)
+        if selection_error is not None:
+            raise selection_error
         if final is not None:
+            if not session.trajectory["files"].get("workspace.tar.gz"):
+                raise RuntimeError("the selected program could not be archived")
             report, evaluation = judge_program(bench, Path(final["program"]), SCORED_STAGE, runtime,
                                                limits=config.limits, cancel=cancel)
         else:
@@ -209,19 +252,18 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
             report = report_of(bench, evaluation, None)
     except BaseException as error:  # the agent or the judge was stopped (or broke): nothing is scored
         if logged:
-            events("episode_finished", {"status": "interrupted", "error": f"{type(error).__name__}: {error}"[:2000],
+            status = "interrupted" if isinstance(error, (Cancelled, KeyboardInterrupt)) else "error"
+            events("episode_finished", {"status": status, "error": f"{type(error).__name__}: {error}"[:2000],
                                         "seconds": round(time.time() - started, 1), "tokens": gateway.tokens,
                                         "metered_tokens": gateway.metered, "llm_calls": gateway.calls,
-                                        "submissions": len(tools.submissions),
+                                        "submissions": len(tools.submissions), "unsettled": gateway.unsettled,
                                         "trajectory": {"dir": str(trajectory)}})
-        if not config.keep:
-            subprocess.run(["rm", "-r", "-f", str(root)], check=False)
         raise
 
     report["references"] = reference_scores(bench, SCORED_STAGE)
     stored = save_predictions(trajectory / PREDICTIONS, bench, evaluation)
-    scored = {key: report[key] for key in ("stage", "status", "origins", "score", "interval", "coverage", "cells",
-                                           "fit_seconds", "seconds", "errors", "references")}
+    scored = {key: report[key] for key in ("stage", "judge_protocol", "status", "origins", "score", "interval",
+                                           "coverage", "cells", "fit_seconds", "seconds", "errors", "references")}
     scored.update({"n": final.get("n") if final else None, "digest": final["digest"] if final else None,
                    "auto": bool(final.get("auto")) if final else False,
                    "start": bool(final.get("start")) if final else False, "predictions": PREDICTIONS,
@@ -240,8 +282,6 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
         finished["stalled"] = (f"failed model calls kept the agent from working for {session.stalled_seconds:.0f} "
                                f"of its {budget:.0f} seconds")
     events("episode_finished", finished)
-    if not config.keep:
-        subprocess.run(["rm", "-r", "-f", str(root)], check=False)
     return {"episode": episode_id, **finished, "scored": scored, "predictions": str(trajectory / PREDICTIONS)}
 
 

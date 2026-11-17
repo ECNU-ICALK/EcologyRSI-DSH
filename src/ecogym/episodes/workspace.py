@@ -122,10 +122,10 @@ def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict
 
 
 def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: int, deadline: float,
-               limits: Limits, start_local: float | None = None) -> str:
-    """``start_local``: the starting program's local score (None: the latest accepted submission is scored)."""
+               limits: Limits, start_local: float | None = None, selection_policy: str | None = None) -> str:
+    """Describe the task, including the active submission policy and any starting score."""
 
-    from .tools import REPLACE_MARGIN  # the tools import this module
+    from .tools import BEST_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, selection_rule_text  # tools imports this module
 
     task = bench.task
     known_now = ("`action` 角色的列（控制设定值等）在起点已知；其余输入列也只用到起点为止。"
@@ -144,21 +144,21 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
                   f"大于 0 表示优于基线。基线是在拟合期上逐格选定的朴素预报：{kinds}。")
     scored_line = (f"- **正式成绩**来自可见数据之后的隐藏时期，约 {bounds['scored_days']} 天，你看不到这段数据。"
                    f"裁判先用隐藏时期之前的全部数据调用 `fit`，然后逐个时间步送入新观测，"
-                   f"在每个计分起点调用 `forecast`。")
+                   f"每收到一个时间步就调用 `forecast`，宿主按规定的起点计分。")
     submit_line = ("- 提交内容是 `submission/` 目录：`predictor.py` 中的 `Predictor` 类，接口见文件头；"
                    "同目录下的其他 Python 模块可以导入（如 `ecotk/`）。")
     limit_line = (f"- 时限：`fit` ≤ {limits.fit_seconds:.0f} 秒；"
                   f"单次 `forecast` ≤ {limits.forecast_seconds:.0f} 秒；"
                   f"拟合加全部预报 ≤ {limits.total_seconds:.0f} 秒。结果要确定（固定随机种子）。")
+    policy = selection_policy or BEST_LOCAL_SELECTION
+    rule = "按上面的规则评分"
     if start_local is None:
-        rule = "以最后一次成功的提交为准"
-        rule_line = ""
+        rule_line = ("- **评分用哪个程序**：没有起始程序。"
+                     + ("以最后一次成功的提交为准。\n" if policy == SINGLE_WINDOW_SELECTION
+                        else "在完成本地检验且覆盖完整的提交中，使用本地总分最高者。\n"))
     else:
-        rule = "按上面的规则评分"
-        rule_line = (f"- **评分用哪个程序**：`submission/` 里原有的程序是起始程序，宿主已在本地检验期上运行过它，"
-                     f"本地总分 {start_local:+.4f}。评分用最后一次被接受、且本地总分比起始程序高至少 {REPLACE_MARGIN} "
-                     f"的提交；没有这样的提交时用起始程序。本地检验期比隐藏期短得多，本地只高一点的改动"
-                     f"常常不能在隐藏期上成立。\n")
+        rule_line = (f"- **评分用哪个程序**：`submission/` 里原有的程序是起始程序，"
+                     f"其本地总分为 {start_local:+.4f}。{selection_rule_text(policy)}\n")
     return f"""# 任务：{task.title}
 
 ## 目标

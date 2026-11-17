@@ -743,6 +743,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       if (fixed[reason]) return fixed[reason];
       const list = (text) => text.split(",").map((task) => taskShort(catalog, task)).join("、");
       if (reason.startsWith("task_regression:")) return `有任务可信变差：${list(reason.slice(16))}`;
+      if (reason.startsWith("horizon_regression:")) return `超过预定退化上限的预报步长：${reason.slice(19)}`;
       if (reason.startsWith("missing_tasks:")) return `这些任务缺少可用回合：${list(reason.slice(14))}`;
       return reason;
     }
@@ -996,12 +997,19 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const done = rounds.filter((round) => round.generation > 0 && round.finished).length;
       const episodes = rounds.flatMap((round) => round.episodes || []);
       const failures = episodes.filter((item) => !SCORED.includes(item.status)).length;
-      const used = [...episodes, ...rounds.flatMap((round) => [...(round.earlier_evolvers || []), round.evolver].filter(Boolean))]
-        .reduce((sum, item) => sum + (item.tokens || 0), 0);
+      // what the run spent: every attempt and evolver session the service counted (view.spent), retries, rounds cut
+      // short and holdout episodes included; the rounds alone hold only the episodes the comparisons used
+      const spent = view.spent;
+      const used = isNum(spent?.tokens) ? spent.tokens
+        : [...episodes, ...rounds.flatMap((round) => [...(round.earlier_evolvers || []), round.evolver].filter(Boolean))]
+          .reduce((sum, item) => sum + (item.tokens || 0), 0);
+      const attempts = (spent?.episodes?.attempts ?? 0) + (spent?.verification?.attempts ?? 0);
+      const extra = attempts > episodes.length ? `，共启动 ${attempts} 次（含重试、中断和留出验证）` : "";
       const start = timeOf(view.started_at);
       const end = view.status === "running" ? Date.now() : timeOf(view.finished_at || view.updated_at);
       return [`第 ${done} / ${view.config?.generations ?? "?"} 代`, `采纳 ${(view.adoptions || []).length} 次`,
-        `${episodes.length} 个回合${failures ? `（${failures} 个故障或中断）` : ""}`, used ? `${tokens(used)} token` : null,
+        `${episodes.length} 个回合进入比较${failures ? `（${failures} 个故障或中断）` : ""}${extra}`,
+        used ? `${tokens(used)} token${spent ? "（全部尝试）" : ""}` : null,
         `用时 ${duration(start !== null && end !== null ? (end - start) / 1000 : null)}`].filter(Boolean);
     }
 
@@ -1044,7 +1052,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const elsewhere = key === "elsewhere";
       const resume = confirmed({ title: "继续这次进化？", confirm: "继续运行", text: elsewhere
         ? "账本显示它仍在运行，但不是由这个后端运行的（可能在命令行里运行，也可能已经中断）。确认它已不在运行再继续，否则会重复运行。"
-        : "从最后一个完成的代继续；中断的那一代会重新运行。" }, "resume", { force: elsewhere }, "已继续运行");
+        : "从中断的代继续。有冻结计划时复用已核验的回合，只补缺项。" }, "resume", { force: elsewhere }, "已继续运行");
       const lastDone = lastAttempts(view).filter((round) => round.finished).pop();
       const left = lastDone ? (view.config?.generations ?? lastDone.generation) - lastDone.generation : 0;
       const finish = confirmed({ title: "就此结束这次进化？", confirm: "结束运行", text: lastDone ? `第 ${lastDone.generation} 代结束后的在任版本`
@@ -1104,12 +1112,15 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const round = (view.rounds || [])[(view.rounds || []).length - 1];
       const { data: episodes } = useResource(round ? Api.roundEpisodes(view.run_id, round.generation) : null, { interval: 8000 });
       const since = timeOf(round?.started_at) ?? 0;
-      const mine = (episodes || []).filter((item) => (timeOf(item.started_at) ?? 0) >= since - 1000); // this attempt of the round
-      const live = mine.filter((item) => item.status === "running");
+      const mine = (episodes || []).filter((item) => round?.plan
+        ? item.context?.round_plan === round.plan.id : (timeOf(item.started_at) ?? 0) >= since - 1000);
+      const resumed = timeOf(round?.resumed_at) ?? 0;
+      const live = mine.filter((item) => item.status === "running" && (timeOf(item.started_at) ?? 0) >= resumed - 1000);
       // one slot per version, task and replicate: an episode tried again after a provider failure counts once, at its end
       const slot = (item) => [item.context?.role, item.context?.candidate, item.task_id, item.context?.replicate].join("|");
       const busy = new Set(live.map(slot));
-      const done = new Set(mine.filter((item) => item.status !== "running").map(slot).filter((key) => !busy.has(key))).size;
+      const done = new Set(mine.filter((item) => round?.plan ? SCORED.includes(item.status) : item.status !== "running")
+        .map(slot).filter((key) => !busy.has(key))).size;
       const reviewing = Boolean(round?.generation) && (!round.evolver || round.evolver.rerun); // no episodes until it ends
       const runnable = (round?.candidates || []).filter((candidate) => candidate.status === "proposed" || (candidate.digest && candidate.decision)).length;
       const idle = Boolean(round?.generation) && !reviewing && !runnable; // no candidate can run: the loop runs no episodes
@@ -1193,7 +1204,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           return h("tr", { key: task }, h("td", null, h(TaskLabel, { catalog, id: task })),
             scores.map((value, index) => h("td", { key: labels[index], className: `num ${toneClass(value)}` }, signed(value, 3))),
             labels.length > 1 ? h("td", { className: `num ${toneClass(change)}` }, signed(change, 3)) : null,
-            h("td", { className: "eg-faint" }, entries.map((entry) => entry.episode ? `${short(entry.episode)}${entry.reused ? "（复用）" : ""}` : "").filter(Boolean).join("、")));
+            h("td", { className: "eg-faint" }, entries.map((entry) => entry.episode
+              ? `${(entry.episodes || []).length > 1 ? `${entry.episodes.length} 个回合的程序（取平均）` : short(entry.episode)}${entry.reused ? "（复用）" : ""}`
+              : "").filter(Boolean).join("、")));
         }));
     }
 
@@ -1222,15 +1235,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           button: h(Button, { variant: "primary", disabled: !finished || busy, onClick: () => run("sealed", "validation") }, "评测 validation") },
         { key: "final_test", label: "封存时期 final_test", body: sealed.final_test, field: "tasks",
           hint: sealed.validation ? "最后一道检验，每个版本每个任务只评一次" : "须在 validation 之后",
-          button: h(Button, { variant: "primary", disabled: !finished || busy || !sealed.validation, onClick: () => run("sealed", "final_test") }, "评测 final_test") },
+          button: h(Button, { variant: "primary", disabled: !finished || busy || !sealed.validation || sealed.validation.complete === false,
+            onClick: () => run("sealed", "final_test") }, "评测 final_test") },
       ];
       const live = view.active || (view.status === "running" && !view.stale);
       return h(Card, { title: "独立验证", hint: finished ? "最终版本相对起点版本的提升，还要在进化中没见过的任务和更晚的时期上各验证一次。"
         + `区间的算法和采纳门槛相同（${view.gates?.test === "signed_rank" ? "任务太少时改用 t 区间或分层自助区间" : "任务少于 3 个时改用分层自助区间"}）；`
-        + "每个版本在每个任务上只有一个结果，所以不做单任务否决。"
+        + "区间描述当前任务组的表现，跨场地或季节需要新的独立数据。"
         : live ? "运行完成后可以验证。" : "运行还没有结束：要验证现在的在任版本，先点上面的「结束运行」（结束后不能再继续）；也可以继续运行，跑完再验证。",
         actions: busy ? h(Tag, { tone: "info" }, "验证进行中") : null },
-      h(Table, { head: ["检验", ["起点", "num"], ["最终", "num"], ["最终 − 起点", "num"], "95% 区间 → 结论"] },
+      h(Table, { head: ["检验", ["起点", "num"], ["最终", "num"], ["最终 − 起点", "num"], "任务组区间与结论"] },
         rows.map((row) => {
           if (!row.body) {
             return h("tr", { key: row.key }, h("td", null, row.label), h("td", { colSpan: 3, className: "eg-faint" }, row.hint), h("td", null, row.button));
@@ -1243,16 +1257,42 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             h("td", { className: "num" }, signed(means.seed, 3)),
             h("td", { className: "num" }, signed(means.final, 3)),
             h("td", { className: `num ${toneClass(change)}` }, h("b", null, signed(change, 3))),
-            h("td", null, decision ? h(Fragment, null, `[${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}] → `,
+            h("td", null, decision ? h(Fragment, null, `${decision.basis === "tasks_signed_rank" ? "位置" : "均值"}区间 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}] → `,
               h("span", { className: decision.reason === "improved" ? "eg-good" : "" }, reasonText(catalog, decision.reason)))
               : h("span", { className: "eg-faint" }, Object.keys(row.body.versions || {}).length < 2 ? "只有一个版本（没有采纳过候选），没有可比较的对象" : "没有可比较的任务"),
-              row.key === "holdout" && unfinished.length ? h("div", { style: { marginTop: "6px" } },
-                h("span", { className: "eg-bad" }, `${unfinished.length} 个任务没有成绩 `),
-                h(Button, { disabled: busy, onClick: () => run("holdout") }, "补跑")) : null));
+              decision ? decisionBreakdown(decision) : null,
+              row.key === "holdout" ? h("div", { style: { marginTop: "6px" } },
+                unfinished.length ? h("span", { className: "eg-bad" }, `${unfinished.length} 个任务没有成绩 `) : null,
+                h(Button, { disabled: busy || !finished, onClick: () => run("holdout") }, unfinished.length ? "补跑" : "核验并补跑")) : null,
+              row.key !== "holdout" && row.body.complete === false ? h("div", { style: { marginTop: "6px" } },
+                h("span", { className: "eg-bad" }, `只评了计划的一部分，缺 ${(row.body.missing || []).length} 项：${missingText(row.body.missing)}。结论只代表评到的任务。 `),
+                h(Button, { disabled: busy || !finished, onClick: () => run("sealed", row.key) }, "补评")) : null));
         })),
       rows.filter((row) => row.body).map((row) => h(Details, { key: row.key, summary: `${row.label}：逐任务成绩` },
         h(VersionsTable, { body: row.body, field: row.field, catalog }))),
       h(AdoptionChecks, { view, ask, act, busy, live }));
+    }
+
+    const MISSING_REASONS = { no_program: "没有评过分的程序", awaiting_holdout: "留出验证还没有成绩", awaiting_validation: "validation 还没有结果", program_unavailable: "存档里的程序读不回或与评分时不符", holdout_conditions_differ: "留出回合的模型或预算与本次不同",
+      missing_replicates: "重复回合不足", episode_record_unavailable: "找不到回合记录", mixed_episode_conditions: "回合条件不一致",
+      predictions_unavailable: "预测产物不可用", unscored_episode: "回合没有有效成绩", prior_exposure_differs: "已封存的程序与本次计划不一致",
+      prior_judge_protocol_differs: "已封存结果的裁判协议不同", mixed_judge_protocols: "回合使用了不同的裁判协议",
+      pending_in_source_run: "待原运行补齐已登记的封存程序", mixed_bench_identities: "回合数据或任务版本不同",
+      bench_identity_changed: "数据或任务与原回合不同", duplicate_episode: "重复引用了同一回合" };
+
+    function decisionBreakdown(decision) {
+      const groups = Object.entries(decision.groups || {}).map(([name, item]) => `${name} ${signed(item.delta, 4)}`);
+      const horizons = Object.entries(decision.horizons || {}).map(([step, value]) => `${step} 步 ${signed(value, 4)}`);
+      return groups.length || horizons.length ? h("div", { className: "eg-faint" },
+        groups.length ? h("div", null, `数据组均值 ${groups.join(" · ")}`) : null,
+        horizons.length ? h("div", null, `分时距增益 ${horizons.join(" · ")}`) : null) : null;
+    }
+
+    /** What a sealed verification or check could not judge, in words (``verify.sealed_plan``). */
+    function missingText(missing) {
+      const counts = {};
+      for (const item of missing || []) counts[item.reason] = (counts[item.reason] || 0) + 1;
+      return Object.entries(counts).map(([reason, count]) => `${MISSING_REASONS[reason] || reason} ${count} 项`).join("，");
     }
 
     /** The check of one adoption on the training tasks' sealed period, in words (null when there is none). */
@@ -1264,7 +1304,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const { better, total } = tasksBetter(decision);
       return `在训练任务更晚、谁都没看过的封存时期 validation 上复核：被替换的版本 ${signed(check.means?.parent, 3)}，它 ${signed(check.means?.adopted, 3)}，`
         + `差 ${signed(decision.delta, 3)}（区间 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]，${CREDIBLE_TEXT[credibility(decision.interval)]}），`
-        + `${total} 个任务里 ${better} 个更好。`;
+        + `${total} 个任务里 ${better} 个更好。`
+        + (check.complete === false ? `只评到部分训练任务（${missingText(check.missing)}）。` : "");
     }
 
     /** Every adoption of the run: its gain on the hidden period when it was adopted, and on the sealed period. */
@@ -1595,13 +1636,30 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         ["评审：读证据，找问题", h(EvolverStep, { view, round, go, back })],
         ["候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
         ["回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back })],
-        ["比较（候选 − 在任）与结果", h(Fragment, null, h(DecisionStep, { view, round, catalog }), h(Outcome, { view, round }))],
+        ["比较（候选 − 在任）与结果", h(Fragment, null, h(DecisionStep, { view, round, catalog }),
+          h(TemplateAttribution, { report: round.template_attribution }), h(Outcome, { view, round }))],
       ];
       return h("details", { id: `eg-gen-${index}`, className: "eg-round", open, onToggle: (event) => onToggle(index, event.currentTarget.open) },
         h("summary", null, h("span", { className: "eg-round-no" }, `第 ${round.generation} 代`), h(Tag, { tone }, text),
           h("span", { className: "eg-round-sum", title: line }, line)),
         open ? h("div", { className: "eg-round-body eg-steps" }, steps.map(([title, body], i) => h("div", { key: title, className: "eg-story" },
           h("span", { className: "eg-story-no" }, i + 1), h("h3", null, title), h("div", { className: "eg-story-body" }, body)))) : null);
+    }
+
+    function TemplateAttribution({ report }) {
+      if (!report) return null;
+      if (report.status === "error") return hint("本代未能完成模板与回合的配对检查。");
+      const pairs = Object.entries(report.comparisons || {});
+      return h(Fragment, null,
+        h("div", { className: "eg-label" }, "同一批起点上的模板和回合"),
+        hint(`已配对 ${report.matched_arm_tasks} / ${report.expected_arm_tasks} 个版本与任务组合。`),
+        pairs.length ? h(Table, { head: ["候选", "已配对任务", "模板改动", "智能体相对各自模板的变化", "回合总分变化"] },
+          pairs.map(([name, row]) => {
+            const means = row.mean_on_matched_tasks || {};
+            return h("tr", { key: name }, h("td", null, name), h("td", null, `${row.matched_tasks} / ${row.expected_tasks}`),
+              h("td", null, signed(means.template_gain)), h("td", null, signed(means.episode_over_template_gain)),
+              h("td", null, signed(means.episode_gain)));
+          })) : null);
     }
 
     function EvolverStep({ view, round, go, back }) {
@@ -1617,6 +1675,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const redone = earlier && !evolver.rerun ? hint(`这一代的第一次评审会话被模型服务故障打断，下面是服务恢复后重新做的评审（之前那次用了 ${duration(round.earlier_evolvers[0].seconds)}）。`) : null;
       const steps = recorded && session?.recorded !== false; // a session whose model never answered leaves no steps
       const final = String(evolver.final_text || "").trim();
+      const research = evolver.method_research;
+      const external = round.public_references;
       return h(Fragment, null,
         h("div", { className: "eg-story-sub" }, [evolver.status === "finished" ? null : SESSION_STATUS[evolver.status]?.[0] || evolver.status,
           duration(evolver.seconds), evolver.tokens ? `${tokens(evolver.tokens)} token` : null, `${evolver.llm_calls ?? "–"} 次模型调用`,
@@ -1625,6 +1685,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         trouble ? h(Alert, { tone: "danger" }, h("b", null, trouble[0]), trouble[1]) : null,
         redone,
         error ? h(Alert, { tone: "warning" }, `读不到评审会话：${error.message}`) : null,
+        research ? h(Fragment, null,
+          h("div", { className: "eg-label" }, "方法调查"),
+          hint(`网页检索 ${research.web_search_calls || 0} 次，登记方法试跑 ${(research.probes || []).filter((item) => item.status === "evaluated").length} 次。`),
+          (research.records || []).map((item, i) => h("div", { key: i, className: "eg-note" },
+            h("span", { className: "eg-chip" }, ({ direct: "直接复用", adapt: "改造借鉴", skip: "本轮跳过" })[item.decision] || item.decision),
+            " ", item.name, item.rationale ? ` · ${item.rationale}` : "")),
+          external && isNum(external.selected_minus_external) ? hint(
+            `开发期同口径对照 ${external.method?.id || ""}，本轮所选版本的分差 ${Number(external.selected_minus_external).toFixed(4)}。`) : null) : null,
         session?.recorded ? h(Reads, { reads: session.reads, go, back, label: "看过的材料（按第一次看的先后；悬停看是第几步）" })
           : session ? hint("没有存下这次会话的模型调用，看不到它读了什么。")
             : recorded && !error ? hint("正在读取评审会话…") : null,
@@ -1751,7 +1819,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     /** The incumbent's episodes from earlier rounds that a round's comparison also used (``evolution.loop``'s pool):
      * finished rounds after the incumbent was adopted, under the same expert guidance. */
     function earlierIncumbent(view, round) {
-      if (round.generation === 0) return [];
+      if (round.generation === 0 || round.plan) return [];
       const adoptedAt = Math.max(-1, ...(view.adoptions || []).filter((item) => item.digest === round.incumbent).map((item) => item.generation));
       return (view.rounds || []).filter((other) => other !== round && other.finished && other.generation > adoptedAt && other.generation < round.generation)
         .flatMap((other) => (other.episodes || []).filter((entry) => entry.role === "incumbent" && entry.harness === round.incumbent
@@ -1871,29 +1939,29 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
                 h("span", { className: item.reason === "credible_regression" ? "eg-bad" : "eg-faint" }, reasonText(catalog, item.reason))),
             ]),
             ...(isNum(decision.delta) ? [
-              h("div", { key: "lm" }, h("b", null, "平均")),
+              h("div", { key: "lm" }, h("b", null, decision.basis === "tasks_signed_rank" ? "均值点 / 位置区间" : "平均")),
               h("div", { key: "tm" }, track(decision.delta, decision.interval, decision.adopted)),
               h("div", { key: "vm" }, h("b", { className: toneClass(decision.delta) }, signed(decision.delta, 3)), ` ${range(decision.interval)}`),
             ] : []),
             h("div", { key: "axis-l" }),
             h("div", { key: "axis", className: "eg-axis" }, ticks.map((tick) => h("span", { key: tick, style: { left: `${x(tick)}%` } }, signed(tick, digits)))),
             h("div", { key: "axis-r" })),
+          decisionBreakdown(decision),
           h("div", { className: "eg-verdict" }, verdict(decision, view.gates, catalog)));
       });
       return h(Fragment, null, blocks,
         hint(`每个任务一行：候选回合的均值 − 在任回合的均值，点是增益，横条是 ${taskLevel}% 区间（悬停看两边的均值和回合数）。`
-          + `“平均”一行是 ${level}% 区间${compared.length > 1 ? "（按这一代的候选数加宽）" : ""}。竖线是 0，虚线是实用门槛 ${signed(gate, 3)}。`
+          + `汇总点是平均增益。符号秩区间对应 Hodges–Lehmann 位置，区间水平为 ${level}%${compared.length > 1 ? "（按当代候选数调整）" : ""}。同一数据组内的任务可能相关。`
           + "采纳要同时满足：平均增益超过门槛、区间下限大于 0、没有任务可信变差。"));
     }
 
-    /** A generation that did not finish: run again on resume, or left out when the run was ended there. */
-    const unfinishedText = (view) => (view.status === "finished" ? "运行在这一代完成之前结束了，这一代不算数。" : "这一代没有完成；继续运行时会重跑这一代。");
+    const unfinishedText = (view) => (view.status === "finished" ? "运行在这一代完成之前结束了，这一代不算数。" : "这一代没有完成。有冻结计划时，恢复后只补缺失的回合。");
 
     function Outcome({ view, round }) {
       if (!round.finished) return round.generation ? null : hint(view.active ? "这一代还在进行。" : unfinishedText(view));
       if (round.generation === 0) {
         return h("p", null, `起点版本 ${short(round.incumbent)} 在各训练任务上的均分 ${signed(versionMean(round, round.incumbent), 3)}。`
-          + "这些回合是第 1 代比较时在任版本的成绩；之后每一代，在任版本还会和候选同时再跑。");
+          + (round.plan ? "之后每一代只用同代在任和候选回合做采纳比较。" : "这些回合纳入了历史比较的在任池。"));
       }
       if (round.adopted) {
         const check = checkText(round.sealed_check);
@@ -1915,7 +1983,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       if (isNum(high) && high < 0) return "below";
       return "noise";
     }
-    const CREDIBLE_TEXT = { above: "可信地更好", below: "可信地更差", noise: "在误差内" };
+    const CREDIBLE_TEXT = { above: "任务组区间整体为正", below: "任务组区间整体为负", noise: "任务组区间跨零" };
     const runShort = (id) => String(id || "").replace(/^evo:/, "").slice(0, 6);
     const day = (value) => when(value).slice(0, 5);
 
@@ -2324,6 +2392,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           ["回合预算", `${config.minutes} 分钟，${Number(config.tokens || 0).toLocaleString()} 计费 token`],
           ["内循环模型", config.model || "由 Harness 决定"],
           ["评审智能体", `${config.evolver_model}，${config.evolver_minutes} 分钟，${Number(config.evolver_tokens || 0).toLocaleString()} 计费 token`],
+          ["方法调查", ({ autonomous: "由评审智能体自主调查", supplied: "提供已登记的外部方法" })[config.method_research] || "沿用内部证据与存档"],
+          ["提交选择", ({ "best_local/1": "保留最高分合格提交", "rolling_blocks/1": "要求多窗口一致" })[config.local_selection] || "使用最后一次合格提交"],
           ["并发 / 重试", `${config.concurrency} / ${config.retries}`],
           ["模型服务故障时", `${!isNum(config.outage_minutes) ? "–" : config.outage_minutes > 0 ? `最多等 ${config.outage_minutes} 分钟` : "不等"}`
             + `${config.auto_resume ? "；停下后后端自动继续" : ""}`],
@@ -2391,6 +2461,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         const chosen = suites.find((item) => item.id === saved.suite) || recommended;
         const start = { suite: chosen?.id || "", label: "",
           ...Object.fromEntries(Object.keys(defaults).map((key) => [key, saved[key] ?? defaults[key] ?? ""])) };
+        if (start.method_research === "supplied" && !catalog?.method_registry_available) {
+          start.method_research = defaults.method_research;
+        }
         // the episodes per task the suite is designed for, unless the saved form was for this suite
         if (chosen?.repeats && !(saved.suite === chosen.id && saved.repeats)) start.repeats = chosen.repeats;
         return { ...start, model: modelRef(start.model), evolver_model: modelRef(start.evolver_model) };
@@ -2491,6 +2564,17 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             field("concurrency", "同时运行的回合", { type: "number", min: 1, max: 16, step: 1 }),
             field("evolver_minutes", "每代评审分钟数", { type: "number", min: 1, step: 1 }),
             field("evolver_tokens", "每代评审计费 token", { type: "number", min: 10000, step: 10000 }),
+            defaults.method_research ? h("label", { className: "eg-field" }, h("span", null, "方法调查"),
+              h("select", { className: "eg-input", value: values.method_research, onChange: set("method_research") },
+                h("option", { value: "autonomous" }, "由评审智能体自主调查"),
+                h("option", { value: "internal" }, "沿用内部证据与存档"),
+                catalog?.method_registry_available ? h("option", { value: "supplied" }, "提供已登记的外部方法") : null),
+              h("span", { className: "eg-hint" }, "根据适用性和实测结果决定是否借鉴外部方法。")) : null,
+            defaults.local_selection ? h("label", { className: "eg-field" }, h("span", null, "提交选择"),
+              h("select", { className: "eg-input", value: values.local_selection, onChange: set("local_selection") },
+                h("option", { value: "best_local/1" }, "保留最高分合格提交"),
+                h("option", { value: "rolling_blocks/1" }, "要求多窗口一致"),
+                h("option", { value: "single_window/1" }, "使用最后一次合格提交"))) : null,
             field("outage_minutes", "模型服务故障时最多等几分钟", { type: "number", min: 0, step: 10 }, "测试请求也没有回复时不开始新回合、每分钟试一次；等满还没恢复，运行停下；0 = 不等")),
           h("div", { className: "eg-checks" },
             check("auto_resume", "自动继续：服务恢复后，或后端（DSH）重启后，后端自己接着运行"),
@@ -2591,7 +2675,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h(Stat, { label: "最好的本地成绩", value: Number.isFinite(best) ? signed(best) : "–", sub: isNum(record.start?.local?.score)
             ? `已接受的提交；起始程序 ${signed(record.start.local.score)}` : "本地检验期，已接受的提交" }),
           h(Stat, { label: "提交 / 检验", value: `${(record.submissions || []).length} / ${(record.evaluations || []).length}`, sub: scored?.auto ? "没有被接受的提交：按当时的程序评分"
-            : scored?.start ? `评分用起始程序：没有提交在本地比它高 ${record.replace_margin ?? ""} 以上` : scored?.n ? `评分用第 ${scored.n} 次提交` : "" }),
+            : scored?.start ? "评分用起始程序：没有提交通过替换条件" : scored?.n ? `评分用第 ${scored.n} 次提交` : "" }),
           h(Stat, { label: "笔记 / 问题", value: `${(record.notes || []).length} / ${(record.questions || []).length}` }),
           h(Stat, { label: "Token", value: tokens(finished.tokens), sub: finished.llm_calls ? `${finished.llm_calls} 次模型调用` : "" }),
           h(Stat, { label: "用时", value: duration(finished.seconds), sub: finished.status

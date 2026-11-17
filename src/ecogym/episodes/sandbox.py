@@ -12,8 +12,13 @@ runtimes keep working:
   Python runtime, writes its own directory, no network at all. Hidden data
   reaches it only through the judge's pipe, one time step at a time.
 
-Ancestors of allowed paths get metadata access only, so path resolution
-works without listing directories. Linux (bubblewrap) is not implemented yet.
+Reads are denied under /Users, /Volumes and /private/var/folders, the scratch
+root, and wherever ecogym keeps what no session may see, configured anywhere:
+``$ECOGYM_HOME`` (ledger, trajectories, sealed predictions), the data root and
+the frame cache (``protected_roots``). A data root moved to /opt or
+/private/tmp stays unreadable. Ancestors of allowed paths get metadata access
+only, so path resolution works without listing directories. Linux
+(bubblewrap) is not implemented yet.
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+from ..data.catalog import cache_dir, data_root
 
 DENIED_ROOTS = ("/Users", "/Volumes", "/private/var/folders")
 
@@ -147,15 +154,33 @@ def _ancestors(paths: list[Path]) -> list[Path]:
     return list(seen)
 
 
+def _spellings(path: Path) -> list[Path]:
+    """A path as given (absolute) and resolved: a profile names both, whichever the system matches."""
+
+    given = Path(os.path.abspath(path.expanduser()))
+    return list(dict.fromkeys([given, given.resolve()]))
+
+
+def protected_roots() -> list[Path]:
+    """What no session may read wherever it is configured: ecogym's home, the data root, the frame cache and
+    the scratch root (other sessions' directories). Allowed paths inside them (a session's own directory, a
+    runtime installed under ``$ECOGYM_HOME``) are opened again explicitly after these denials."""
+
+    found: list[Path] = []
+    for root in (ecogym_home(), data_root(), cache_dir(), scratch_root()):
+        found.extend(_spellings(root))
+    return list(dict.fromkeys(found))
+
+
 def _profile(reads: list[Path], writes: list[Path], links: tuple[Path, ...], network: str) -> str:
     reads = [path.resolve() for path in reads]
     writes = [path.resolve() for path in writes]
-    denied = " ".join(f"(subpath {_quote(root)})" for root in DENIED_ROOTS)
+    denied = " ".join(f"(subpath {_quote(root)})" for root in [*DENIED_ROOTS, *protected_roots()])
     literals = list(links) + _ancestors(reads + writes + list(links))
     lines = [
         "(version 1)",
         "(allow default)",
-        f"(deny file-read* {denied} (subpath {_quote(scratch_root())}))",
+        f"(deny file-read* {denied})",
         f"(deny file-write* {denied} (subpath \"/private/tmp\"))",
         "(allow file-read-metadata " + " ".join(f"(literal {_quote(path)})" for path in literals) + ")",
         "(allow file-read* " + " ".join(f"(literal {_quote(path)})" for path in links)
@@ -201,6 +226,7 @@ __all__ = [
     "discover_runtime",
     "ecogym_home",
     "program_profile",
+    "protected_roots",
     "runtime_python",
     "scratch_root",
     "thread_limits",

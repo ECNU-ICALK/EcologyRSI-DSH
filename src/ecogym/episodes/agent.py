@@ -27,6 +27,7 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -81,6 +82,9 @@ class Session:
     # awake seconds failed model calls kept the agent from working (Gateway.stalled_seconds), up to the deadline
     # when the session ended in the middle of a run of failed calls
     stalled_seconds: float = 0.0
+    # tool and model calls still running when the session was sealed: they record nothing more, so its numbers
+    # may miss what they did (0 normally; see run_agent)
+    unsettled: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -228,13 +232,19 @@ def session_env(root: Path, runtime: Runtime, gateway: Gateway) -> dict[str, str
 
 
 class Cancelled(RuntimeError):
-    """The session was cancelled from outside (the process has been stopped)."""
+    """The session was cancelled from outside (the process has been stopped).
+
+    Raised by ``run_agent``, it carries the session's record so far (``session``, status ``interrupted``): what the
+    session spent before it was stopped is not lost."""
+
+    session: Session | None = None
 
 
 def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], gateway: Gateway, deadline: float,
               trajectory: Path, runtime: Runtime, on_start: Callable[[dict[str, Any]], None] | None = None,
               cancel: threading.Event | None = None,
-              follow_up: Callable[[int, str], str | None] | None = None) -> Session:
+              follow_up: Callable[[int, str], str | None] | None = None,
+              on_close: Callable[[], None] | None = None, programs: Path | None = None) -> Session:
     """Run one session to completion or the deadline; ``on_start`` gets the DSH version and sandbox profile.
 
     ``deadline`` is on the awake clock (``ecogym.kernel.clock.now()``), like the gateway's and the tools'.
@@ -242,6 +252,12 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
     Setting ``cancel`` stops the agent within seconds and raises ``Cancelled`` (after the trajectory is stored).
     When the agent ends on its own, ``follow_up(n, last_reply)`` may return the prompt of continuation ``n``
     (a new DSH session in the same workspace, with the same gateway, tools and deadline), or None to stop.
+
+    When the session ends, however it ends, it is sealed in this order: ``on_close`` (the tools stop their work:
+    running local checks are cancelled and nothing more is recorded), the tool server waits for the calls still
+    running, the gateway cuts and records the model calls still waiting on the provider, and only then are the
+    logs closed, the trajectory archived and the session's numbers read. Nothing changes them afterwards; calls
+    that would not end in time are counted in ``unsettled``.
     """
 
     if runtime.dsh is None or runtime.node_root is None:
@@ -251,15 +267,21 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
     started, awake_started = time.time(), clock.now()
     mcp_log = (trajectory / "mcp_calls.jsonl").open("a", encoding="utf-8")
     log_lock = threading.Lock()
+    log_closed = [False]
 
     def log_call(entry: dict[str, Any]) -> None:
         with log_lock:
+            if log_closed[0]:  # a tool call that outlived the session: its record is final
+                return
             mcp_log.write(json.dumps({"at": time.time(), **entry}, ensure_ascii=False) + "\n")
             mcp_log.flush()
 
+    gateway.search_enabled = agent.web_search
     gateway.start()
     mcp = McpServer(tools, token=secrets.token_urlsafe(24), log=log_call).start()
     exit_code, killed, continuations = None, False, 0
+    cancelled: Cancelled | None = None
+    unsettled = 0
     stdout_path, stderr_path = trajectory / "agent_stdout.txt", trajectory / "agent_stderr.txt"
     try:
         patch = root / "session.patch.yml"
@@ -301,28 +323,43 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                     continuations += 1
                     stdout.write(f"\n\n---- 续跑 {continuations} ----\n\n".encode())
                     stdout.flush()
+    except Cancelled as error:
+        cancelled = error
     finally:
         ended = clock.now()
-        mcp.stop()
-        gateway.stop()
-        mcp_log.close()
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:  # sealing goes on whatever the tools say
+                traceback.print_exc()
+        unsettled += mcp.stop()  # no new tool call; the running ones end (their judging was just cancelled)
+        unsettled += gateway.close()  # no new model call; those still waiting on the provider are cut and recorded
+        with log_lock:
+            log_closed[0] = True
+            mcp_log.close()
         try:
-            stored = store(root, trajectory, runtime.node_root / "bin" / "node")
+            stored = store(root, trajectory, runtime.node_root / "bin" / "node", programs=programs)
         except Exception as error:  # a broken trajectory must not hide the session's own outcome
             stored = {"files": {}, "summary": {"error": f"{type(error).__name__}: {error}"}}
-    status = "infra_failed" if gateway.answered == 0 else "timeout" if killed else "finished"
+    status = ("interrupted" if cancelled is not None else "infra_failed" if gateway.answered == 0
+              else "timeout" if killed else "finished")
     final_text = stdout_path.read_text(encoding="utf-8", errors="replace")[-8000:] if stdout_path.exists() else ""
-    return Session(status=status, exit_code=exit_code, killed=killed, seconds=round(time.time() - started, 1),
-                   tokens=gateway.tokens, metered_tokens=gateway.metered, llm_calls=gateway.calls,
-                   answered_calls=gateway.answered,
-                   failed_calls=gateway.failed, refused_calls=gateway.refused, final_text=final_text,
-                   trajectory={"dir": str(trajectory), "files": stored["files"]}, activity=stored["summary"],
-                   upstream_error=gateway.last_failure, continuations=continuations,
-                   asleep_seconds=round(clock.asleep_since(started, awake_started), 1),
-                   # a session that ended while its calls kept failing (DSH gives up after a few minutes of
-                   # errors) could not use the rest of its time either
-                   stalled_seconds=round(gateway.stalled_seconds(max(ended, deadline) if gateway.failing
-                                                                 else ended), 1))
+    session = Session(status=status, exit_code=exit_code, killed=killed, seconds=round(time.time() - started, 1),
+                      tokens=gateway.tokens, metered_tokens=gateway.metered, llm_calls=gateway.calls,
+                      answered_calls=gateway.answered,
+                      failed_calls=gateway.failed, refused_calls=gateway.refused, final_text=final_text,
+                      trajectory={"dir": str(trajectory), "files": stored["files"]}, activity=stored["summary"],
+                      upstream_error=gateway.last_failure, continuations=continuations,
+                      asleep_seconds=round(clock.asleep_since(started, awake_started), 1),
+                      # a session that ended while its calls kept failing (DSH gives up after a few minutes of
+                      # errors) could not use the rest of its time either
+                      stalled_seconds=round(gateway.stalled_seconds(max(ended, deadline) if gateway.failing
+                                                                    else ended), 1),
+                      unsettled=unsettled)
+    if cancelled is not None:
+        cancelled.session = session
+        raise cancelled
+    return session
 
 
 __all__ = ["AgentSpec", "Cancelled", "Session", "dsh_patch", "dsh_version", "make_gateway", "run_agent",

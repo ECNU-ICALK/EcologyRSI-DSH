@@ -22,6 +22,12 @@ forwards to the route's upstream, streaming responses back unchanged. It also
   to be turned into training data. Other responses (web search) are stored as
   raw text, truncated.
 
+``close`` ends a session's calls before its record is sealed: no new call is
+taken, calls still waiting on the provider are cut off and recorded, and only
+then does the session read the counters and archive the log (a call answered
+after that would be counted nowhere and would write a log beside the archive;
+2026-11: 44 such calls in 31 trajectories, each a stream that had stalled).
+
 Keys never appear in the log: only bodies are recorded, never headers.
 """
 
@@ -30,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import socket
 import ssl
 import sys
 import threading
@@ -51,6 +58,16 @@ REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")  # store
 CAPTURE_LIMIT = 16_000_000  # bytes of one response kept for assembly
 RAW_LOG_LIMIT = 200_000  # characters of a response that cannot be assembled
 CACHE_WEIGHT = 0.1  # budget weight of a prompt token served from the provider's cache
+DRAIN_SECONDS = 10.0  # how long ``close`` waits for cut-off calls to finish and be recorded
+
+
+def _abort(connection: Any) -> None:
+    """Cut an upstream connection a handler is reading from: its read fails at once, and the call is recorded."""
+
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        with contextlib.suppress(OSError, ValueError):
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -180,6 +197,7 @@ class Gateway:
                  routes: dict[str, tuple[str, str, dict[str, str]]] | None = None, chat: str | None = None) -> None:
         self.token = token
         self.chat = chat
+        self.search_enabled = True
         self.log_path = log_path
         self._upstreams: dict[str, tuple[Any, str, dict[str, str]]] = {}
         if key:
@@ -201,6 +219,12 @@ class Gateway:
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self.on_call: Callable[[dict[str, Any]], None] | None = None
+        self._closed = False  # set by close: no new call is taken
+        self._sealed = False  # set once close returns: nothing more is written to the log
+        self._active: dict[int, Any] = {}  # calls in progress -> their upstream connection (None before it opens)
+        self._calls_started = 0
+        self.unsettled = 0  # calls still running when close gave up waiting (the session's numbers may miss them)
+        self.late = 0  # calls recorded after the session was sealed: counted here only, never logged
 
     @property
     def port(self) -> int:
@@ -229,6 +253,8 @@ class Gateway:
     def permits(self, method: str, prefix: str, rest: str) -> bool:
         """Whether a request for ``rest`` (the path after ``prefix``, without the query) may go upstream."""
 
+        if not self.search_enabled and rest.startswith(SEARCH_PATH):
+            return False
         if self.chat is None:
             return True
         if method != "POST":
@@ -242,10 +268,54 @@ class Gateway:
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
 
-    def stop(self) -> None:
+    def _enter(self) -> int | None:
+        """Register a call; None once the gateway is closed (the call is refused)."""
+
+        with self._lock:
+            if self._closed:
+                self.refused += 1
+                return None
+            self._calls_started += 1
+            self._active[self._calls_started] = None
+            return self._calls_started
+
+    def _attach(self, ident: int, connection: Any) -> bool:
+        """Name a call's upstream connection, so that ``close`` can cut it; False when closing began already."""
+
+        with self._lock:
+            self._active[ident] = connection
+            return not self._closed
+
+    def _leave(self, ident: int) -> None:
+        with self._lock:
+            self._active.pop(ident, None)
+
+    def close(self, timeout: float = DRAIN_SECONDS) -> int:
+        """Take no new call, cut every call waiting on the provider, and wait (up to ``timeout``) until each has
+        been recorded; then stop serving. Returns the calls still running at the end (``unsettled``)."""
+
+        with self._lock:
+            self._closed = True
+        end = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                connections = [item for item in self._active.values() if item is not None]
+                running = len(self._active)
+            if not running or time.monotonic() >= end:
+                break
+            for connection in connections:  # again on every pass: a call may have connected since
+                _abort(connection)
+            time.sleep(0.05)
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+        with self._lock:
+            self.unsettled = len(self._active)
+            self._sealed = True
+        return self.unsettled
+
+    def stop(self) -> None:
+        self.close()
 
     def usage(self) -> dict[str, Any]:
         return {"tokens_used": self.metered, "tokens_left": max(0, self.token_budget - self.metered),
@@ -292,6 +362,9 @@ class Gateway:
 
         began = clock.now() if started is None else started
         with self._lock:
+            if self._sealed:  # the session's record and log are final: a straggler changes neither
+                self.late += 1
+                return
             self.calls += 1
             self.tokens += tokens_of(entry.get("usage"))
             self.metered += metered_tokens(entry.get("usage"))
@@ -362,6 +435,16 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 # "quota exhausted" is what DSH classifies as QUOTA, which it does not retry: waiting changes
                 # nothing here, and the session's retry policy would otherwise keep it for minutes
                 return self._json(429, f"session quota exhausted: {reason}")
+            ident = gateway._enter()
+            if ident is None:
+                return self._json(429, "session quota exhausted: the session has ended")
+            try:
+                self._relay(method, body, found, ident)
+            finally:
+                gateway._leave(ident)
+
+        def _relay(self, method: str, body: bytes, found: tuple[str, tuple[Any, str, dict[str, str]]],
+                   ident: int) -> None:
             prefix, (upstream, key, extra) = found
             path = upstream.path.rstrip("/") + self.path[len(prefix):]
             headers = {name: value for name, value in self.headers.items() if name.lower() not in HOP}
@@ -385,6 +468,8 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             connection = None
             try:
                 connection = gateway.connection(upstream)
+                if not gateway._attach(ident, connection):  # the session ended before this call went upstream
+                    raise ConnectionAbortedError("the session ended before the call went upstream")
                 connection.request(method, path, body=body or None, headers=headers)
                 response = connection.getresponse()
                 entry["status"] = response.status

@@ -72,7 +72,6 @@ class History:
 
 
 def main():
-    os.environ.setdefault("PYTHONHASHSEED", "0")
     random.seed(0)
     np.random.seed(0)
     sys.path.insert(0, os.getcwd())

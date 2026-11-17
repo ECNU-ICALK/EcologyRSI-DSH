@@ -10,10 +10,10 @@ post-compaction continuations are threads of their own.
 
 Files written to the target directory:
 
-    sft.jsonl          {"id", "messages", "tools", "meta"} for every thread of a session that passes the filters:
-                       an episode that ended normally, was scored on a submission the judge accepted (not the
-                       automatic snapshot of an episode that never submitted) and scored above ``min_score``
-                       (0 = the naive baseline); an evolver session that proposed a valid candidate
+    sft.jsonl          {"id", "messages", "tools", "meta"} for clean threads that pass the filters:
+                       an episode thread contains the exact accepted submission scored by the judge, and the
+                       episode ended normally and scored above ``min_score`` (0 = the naive baseline);
+                       an evolver session proposed a valid candidate
     preferences.jsonl  {"id", "prompt", "chosen", "rejected", "meta"}: two episodes of one task with the same
                        prompt (same harness) whose hidden scores differ credibly (paired day-block bootstrap) and
                        by at least ``margin``; with ``cross_prompt`` also pairs whose prompts differ, which then
@@ -62,6 +62,8 @@ REDACT = (
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "<redacted-key>"),
 )
 MESSAGE_KEYS = ("role", "content", "reasoning_content", "tool_calls", "tool_call_id", "name")
+SUBMIT_TOOL = "mcp__ecogym__submit"
+COMPLETE_REPLIES = ("stop", "tool_calls", "function_call")
 PAIR_GATES = SuiteGates(resamples=1000)
 MAX_PAIRS_PER_TASK = 50
 
@@ -78,12 +80,12 @@ def _reply(call: dict[str, Any]) -> dict[str, Any] | None:
     reply = call.get("reply")
     if reply is None and isinstance(call.get("response"), str) and call["response"].startswith("data:"):
         reply = assemble(call["response"], "text/event-stream")  # trajectories recorded before replies were assembled
-    if not reply or not isinstance(reply.get("message"), dict):
+    if not isinstance(reply, dict) or not isinstance(reply.get("message"), dict):
         return None
     message = reply["message"]
     if not message.get("content") and not message.get("tool_calls"):
         return None
-    return message
+    return reply
 
 
 def _clean(message: dict[str, Any]) -> dict[str, Any]:
@@ -112,8 +114,9 @@ def threads(path: Path) -> list[dict[str, Any]]:
         if chain is None:
             chain = {"calls": 0, "first_seq": call.get("seq")}
             chains.append(chain)
-        chain.update(keys=keys, messages=[*messages, _clean(reply)], tools=request.get("tools") or [],
-                     model=call.get("model"), calls=chain["calls"] + 1, last_seq=call.get("seq"))
+        chain.update(keys=keys, messages=[*messages, _clean(reply["message"])], tools=request.get("tools") or [],
+                     model=call.get("model"), calls=chain["calls"] + 1, last_seq=call.get("seq"),
+                     complete=not call.get("error") and reply.get("finish_reason") in COMPLETE_REPLIES)
     unique, seen = [], set()
     for chain in chains:
         text = json.dumps(chain["messages"], sort_keys=True, ensure_ascii=False)
@@ -185,6 +188,39 @@ def _evolver_outcomes(ledger: Ledger) -> dict[str, dict[str, Any]]:
     return outcomes
 
 
+def _scored_submission(record: dict[str, Any]) -> dict[str, Any] | None:
+    scored = record.get("scored") or {}
+    number, digest = scored.get("n"), scored.get("digest")
+    if (scored.get("start") or scored.get("auto") or type(number) is not int
+            or not isinstance(digest, str) or not digest):
+        return None
+    return next((item for item in record["submissions"] if item.get("accepted") is True
+                 and item.get("n") == number and item.get("digest") == digest), None)
+
+
+def _submission_calls(messages: list[dict[str, Any]], submission: dict[str, Any]) -> set[str]:
+    """IDs of actual submit calls whose tool response confirms the ledger's number and program digest."""
+    submitted, matched = set(), set()
+    digest = submission["digest"]
+    for message in messages:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if (call.get("function") or {}).get("name") == SUBMIT_TOOL and call.get("id"):
+                    submitted.add(call["id"])
+        elif message.get("role") == "tool" and message.get("tool_call_id") in submitted:
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                reply = json.loads(content)
+            except ValueError:
+                continue
+            if (isinstance(reply, dict) and reply.get("accepted") is True and reply.get("n") == submission["n"]
+                    and reply.get("digest") in (digest, digest[:12])):
+                matched.add(message["tool_call_id"])
+    return matched
+
+
 def _episode_meta(record: dict[str, Any]) -> dict[str, Any]:
     scored, finished = record.get("scored") or {}, record.get("finished") or {}
     references = scored.get("references") or {}
@@ -218,7 +254,7 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
 
-    main_threads: dict[str, dict[str, Any]] = {}
+    credited_threads: dict[str, dict[str, Any]] = {}
     scored_episodes: dict[str, list[dict[str, Any]]] = {}
     with Ledger(ledger_path) as ledger, \
             (target / "sft.jsonl").open("w", encoding="utf-8") as sft, \
@@ -228,6 +264,7 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
         for session in _sessions(ledger):
             counts["sessions"] += 1
             calls = session["trajectory"] / "llm_calls.jsonl.gz"
+            submission = None
             if session["kind"] == "episode":
                 record = session["record"]
                 meta = _episode_meta(record)
@@ -243,15 +280,13 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
                                             "score": meta["score"]}, ensure_ascii=False) + "\n")
                     counts["notes"] += 1
                 good = meta["status"] in ("finished", "timeout")
-                scored = record.get("scored") or {}
-                # an episode scored on its starting program says nothing about the agent's own work: no pairs
-                if good and isinstance(meta["score"], float) and scored.get("predictions") and not meta["start"]:
-                    scored_episodes.setdefault(record["task_id"], []).append(
-                        {**meta, "predictions": str(session["trajectory"] / scored["predictions"]),
-                         "predictions_digest": scored.get("predictions_digest")})
-                accepted = meta["scored_submission"] is not None and not meta["auto"]
-                passes = good and accepted and (min_score is None or (isinstance(meta["score"], float)
-                                                                      and meta["score"] > min_score))
+                submission = _scored_submission(record)
+                local_score = ((submission or {}).get("local") or {}).get("score")
+                start_score = ((record.get("start") or {}).get("local") or {}).get("score")
+                local_gain = (local_score - start_score if isinstance(local_score, (float, int))
+                              and isinstance(start_score, (float, int)) else None)
+                passes = good and submission is not None and (
+                    min_score is None or (isinstance(meta["score"], float) and meta["score"] > min_score))
             else:
                 if not evolver:
                     continue
@@ -269,20 +304,48 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
             if not (passes or include_failed):
                 skip(f"{session['kind']} below the filters")
                 continue
-            found = threads(calls)
+            try:
+                found = threads(calls)
+            except (OSError, EOFError, ValueError):
+                skip("unreadable model-call log")
+                continue
+            links = [_submission_calls(chain["messages"], submission) if submission else set() for chain in found]
+            call_ids = set().union(*links)
+            tool_id = next(iter(call_ids)) if len(call_ids) == 1 else None
+            if passes and submission and not any(chain["complete"] and tool_id in link
+                                                 for chain, link in zip(found, links, strict=True)):
+                skip("episode without an attributable scored submission thread")
             for index, chain in enumerate(found):
+                thread_meta = {}
+                thread_passes = passes and chain["complete"]
+                if session["kind"] == "episode":
+                    credited = chain["complete"] and tool_id in links[index]
+                    thread_passes = thread_passes and credited
+                    thread_meta = {"credited_tool_call_id": tool_id if credited else None,
+                                   "episode_score": meta["score"],
+                                   "episode_scored_submission": meta["scored_submission"],
+                                   "local_gain_vs_start": local_gain if credited else None}
+                    if not credited:
+                        thread_meta.update(score=None, interval=None, beats={}, scored_submission=None)
+                if not (thread_passes or include_failed):
+                    continue
                 sample = {"id": f"{session['id']}/{index}",
                           "messages": _normalize(chain["messages"], [session["root"]], scratch),
                           "tools": _normalize(chain["tools"], [session["root"]], scratch),
-                          "meta": {**meta, "thread": index, "threads": len(found), "model_calls": chain["calls"],
-                                   "passes_filters": passes,
+                          "meta": {**meta, **thread_meta, "thread": index, "threads": len(found),
+                                   "model_calls": chain["calls"], "complete_reply": chain["complete"],
+                                   "passes_filters": thread_passes,
                                    "assistant_turns": sum(1 for item in chain["messages"]
                                                           if item.get("role") == "assistant")}}
                 sft.write(json.dumps(sample, ensure_ascii=False) + "\n")
                 counts["sft"] += 1
-            if session["kind"] == "episode" and found:
-                main_threads[session["id"]] = {"messages": _normalize(found[0]["messages"], [session["root"]],
-                                                                      scratch)}
+                if session["kind"] == "episode" and thread_passes and session["id"] not in credited_threads:
+                    scored = record.get("scored") or {}
+                    if isinstance(meta["score"], float) and scored.get("predictions"):
+                        credited_threads[session["id"]] = {"messages": sample["messages"]}
+                        scored_episodes.setdefault(record["task_id"], []).append(
+                            {**sample["meta"], "predictions": str(session["trajectory"] / scored["predictions"]),
+                             "predictions_digest": scored.get("predictions_digest")})
         if evolver:
             for run_id in ledger.runs(first="evolve_started"):
                 for event in ledger.events(run_id, kind="evolver_note"):
@@ -290,7 +353,7 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
                                             "kind": event.body.get("kind"), "text": event.body.get("text"),
                                             "at": event.at}, ensure_ascii=False) + "\n")
                     counts["notes"] += 1
-    counts["preferences"] = _preferences(target / "preferences.jsonl", scored_episodes, main_threads, margin, skip,
+    counts["preferences"] = _preferences(target / "preferences.jsonl", scored_episodes, credited_threads, margin, skip,
                                          cross_prompt=cross_prompt)
     manifest = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ecogym": __version__,
                 "ledger": str(ledger_path), "filters": {"min_score": min_score, "include_failed": include_failed,

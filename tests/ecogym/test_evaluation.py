@@ -6,7 +6,10 @@ import numpy as np
 
 from ecogym.evaluation import compare, objective_interval
 from ecogym.evaluation.bootstrap import iid_counts, legal_starts, moving_counts
+from ecogym.evaluation.harness import Evaluation
 from ecogym.evaluation.scoring import block_sums, cell_objectives, objective, skill
+from ecogym.evaluation.suite import TaskPair, compare_suite
+from ecogym.task.suite import SuiteGates
 
 from .helpers import synthetic_bench
 from .test_solvers import RECIPE
@@ -34,6 +37,26 @@ class ScoringTests(unittest.TestCase):
         whole = objective(total, np.array([0.5, 0.5]))[0]
         expected = np.mean(skill(np.sqrt((method**2).mean(axis=1)), np.sqrt((base**2).mean(axis=1))))
         self.assertAlmostEqual(float(whole), float(expected))
+
+    def test_suite_separates_horizon_and_group_gains_and_can_guard_a_horizon(self):
+        bench = synthetic_bench()
+        stage = bench.stage("model_selection")
+        genome = bench.genome(PERSISTENCE)
+        incumbent = Evaluation(genome, stage, stage.baseline, np.zeros(len(stage.cells)))
+        forecast = stage.observed.copy()
+        forecast[1] = stage.observed[1] + 1.25 * (stage.baseline[1] - stage.observed[1])
+        candidate = Evaluation(genome, stage, forecast, np.zeros(len(stage.cells)))
+        pairs = [TaskPair(f"task-{i}", (candidate,), (incumbent,), group=f"season-{i // 4}") for i in range(8)]
+        unrestricted = compare_suite(pairs, SuiteGates(test="signed_rank"), "seed")
+        decision = compare_suite(pairs, SuiteGates(test="signed_rank", max_horizon_loss=((6, 0.1),)), "seed")
+        self.assertTrue(unrestricted.adopted)
+        self.assertFalse(decision.adopted)
+        self.assertEqual(decision.reason, "horizon_regression:6")
+        self.assertEqual(decision.interval_target, "hodges_lehmann_task_gain")
+        self.assertEqual(decision.scope, "observed_task_suite")
+        self.assertEqual(decision.groups["season-0"]["tasks"], 4)
+        self.assertAlmostEqual(decision.horizons[1], 1.0)
+        self.assertAlmostEqual(decision.horizons[6], -0.2)
 
 
 class BootstrapTests(unittest.TestCase):

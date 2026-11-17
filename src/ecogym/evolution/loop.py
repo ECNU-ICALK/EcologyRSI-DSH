@@ -11,9 +11,8 @@ episodes each). Every later round:
    training task with the same budget, queued task by task so no version
    starts later than another, and with the same expert guidance: what the
    ledger held when the round started;
-3. each candidate is compared with the incumbent's unbiased episodes (those it
-   ran as the incumbent under the same guidance, never the episodes that got
-   it adopted) under the suite's gates (``ecogym.evaluation.suite``), with
+3. each candidate is compared with the incumbent's episodes from the same
+   round under the suite's gates (``ecogym.evaluation.suite``), with
    the suite interval Bonferroni-adjusted for the number of candidates;
 4. the passing candidate with the largest gain becomes the incumbent;
 5. after an adoption, the programs of the new incumbent and of the version it
@@ -49,26 +48,35 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import math
 import os
 import re
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .. import __version__
 from ..episodes import expert, providers
 from ..episodes.agent import Cancelled
-from ..episodes.judge import Limits, load_predictions, reference_scores
+from ..episodes.history import fold_episode
+from ..episodes.judge import JUDGE_PROTOCOL, Limits, judge_program, load_predictions, reference_scores
+from ..episodes.mcp import ToolError
 from ..episodes.runner import STALL_SHARE, EpisodeConfig, run_episode
+from ..episodes.sandbox import discover_runtime, scratch_root
+from ..episodes.tools import BEST_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES, SINGLE_WINDOW_SELECTION
+from ..episodes.tools import snapshot as snapshot_program
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench, Evaluation
 from ..evaluation.suite import TaskPair, adjusted_confidence, compare_suite
@@ -78,10 +86,12 @@ from ..kernel.canonical import digest
 from ..kernel.ledger import Ledger, LedgerConflict
 from ..task.spec import TaskSpec
 from ..task.suite import signed_rank_reachable, suite_spec
-from .evolver import EvolverSettings, run_evolver
-from .fold import EVENT_KINDS, SCORED_STATUSES, evolver_sessions, fold
+from .evolver import METHOD_RESEARCH_MODES, EvolverSettings, run_evolver
+from .fold import EVENT_KINDS, SCORED_STATUSES, evolver_sessions, fold, spending
 
 PATCH_LIMIT = 60_000  # characters of unified diff kept per candidate in the ledger
+PUBLIC_REFERENCE_SECONDS = 120.0  # shared by all tasks in this optional development diagnostic
+TEMPLATE_ATTRIBUTION_SECONDS = 120.0  # shared across all fixed replays in one round
 
 
 class RunStopped(RuntimeError):
@@ -114,10 +124,13 @@ class EvolveConfig:
     evolver_model: str = "deepseek-v4-pro"
     concurrency: int = 3
     retries: int = 1
-    check_adoptions: bool = True  # each adoption against the version it replaced, on the sealed validation period
+    check_adoptions: bool = False  # optional diagnostic on sealed validation, for people only
     outage_minutes: float = 120.0  # how long a round waits for the model service to answer again (0: not at all)
     auto_resume: bool = True  # the service continues the run by itself after it restarts or the service recovers
     limits: Limits = field(default_factory=Limits)
+    method_research: str = "autonomous"
+    method_registry: str | None = None
+    local_selection: str = BEST_LOCAL_SELECTION
 
     def __post_init__(self) -> None:
         if self.generations < 1 or self.repeats < 1 or self.concurrency < 1 or self.retries < 0:
@@ -128,6 +141,14 @@ class EvolveConfig:
             raise ValueError("budgets must be positive")
         if not (math.isfinite(self.outage_minutes) and self.outage_minutes >= 0):
             raise ValueError("outage_minutes must be a finite number of minutes, 0 or more")
+        if self.method_research not in METHOD_RESEARCH_MODES:
+            raise ValueError(f"method_research must be one of {', '.join(METHOD_RESEARCH_MODES)}")
+        if self.local_selection not in LOCAL_SELECTION_POLICIES:
+            raise ValueError(f"local_selection must be one of {', '.join(LOCAL_SELECTION_POLICIES)}")
+        if self.method_research == "supplied" and not self.method_registry:
+            raise ValueError("supplied method research needs a host method registry")
+        if self.method_registry:
+            object.__setattr__(self, "method_registry", str(Path(self.method_registry).expanduser().resolve()))
         for ref in (self.model, self.evolver_model):
             if ref:
                 providers.split(ref)  # <provider>/<model> or a DeepSeek id; ModelError is a ValueError
@@ -143,6 +164,8 @@ class EvolveConfig:
         # adoption checks (an outage is waited out: that changes no measurement)
         values.setdefault("auto_resume", False)
         values.setdefault("check_adoptions", False)
+        values.setdefault("method_research", "internal")
+        values.setdefault("local_selection", SINGLE_WINDOW_SELECTION)
         return cls(**values)
 
     def episodes_per_round(self, tasks: int) -> tuple[int, int]:
@@ -155,7 +178,6 @@ class EvolveConfig:
 class State:
     generation: int  # the next round to run
     incumbent: str
-    pool: dict[str, list[dict[str, Any]]]  # task -> the incumbent's unbiased episodes
     tried: set[str]  # behavior digests of the seed and of every candidate compared in a finished round
 
 
@@ -167,8 +189,67 @@ class Snapshot:
     guidance: dict[str, str | None]
 
 
+def _slot(entry: dict[str, Any]) -> tuple[str, str, str | None, str, int]:
+    return entry["harness"], entry["role"], entry.get("candidate"), entry["task"], entry["replicate"]
+
+
 def usable(entry: dict[str, Any]) -> bool:
     return entry.get("status") in SCORED_STATUSES and bool(entry.get("predictions"))
+
+
+def _scored_program(scored: dict[str, Any]) -> dict[str, Any]:
+    return {"program_digest": scored.get("digest"), "scored_start": bool(scored.get("start")),
+            "score_stage": scored.get("stage"), "judge_protocol": scored.get("judge_protocol"),
+            "score_status": scored.get("status")}
+
+
+def _forecast_fingerprint(evaluation: Evaluation) -> str:
+    predicted = np.array(evaluation.predicted, dtype="<f8", copy=True, order="C")
+    predicted[np.isnan(predicted)] = np.nan
+    predicted[predicted == 0] = 0.0
+    return hashlib.sha256(predicted.tobytes()).hexdigest()
+
+
+def _horizon_scores(evaluation: Evaluation) -> dict[str, float]:
+    sums: dict[str, tuple[float, float]] = {}
+    for cell, result, weight in zip(evaluation.stage.cells, evaluation.cells(), evaluation.stage.weights, strict=True):
+        key = str(cell.horizon)
+        total, total_weight = sums.get(key, (0.0, 0.0))
+        sums[key] = (total + float(weight) * result["objective"], total_weight + float(weight))
+    return {key: total / weight for key, (total, weight) in sums.items() if weight > 0}
+
+
+def _attribution_summary(arms: dict[str, Any], tasks: Sequence[TaskSpec]) -> dict[str, Any]:
+    comparisons = {}
+    for label, arm in arms.items():
+        if label == "incumbent":
+            continue
+        matched, missing = {}, []
+        for task in tasks:
+            own, incumbent = arm["tasks"][task.id], arms["incumbent"]["tasks"][task.id]
+            if own["episode_over_template"] is None or incumbent["episode_over_template"] is None:
+                missing.append(task.id)
+                continue
+            matched[task.id] = {"template_gain": own["template"]["score"] - incumbent["template"]["score"],
+                                "episode_over_template_gain": (own["episode_over_template"]
+                                                               - incumbent["episode_over_template"]),
+                                "episode_gain": own["episode_mean"] - incumbent["episode_mean"]}
+            horizon_gains = {}
+            for horizon, score in own.get("episode_horizons", {}).items():
+                before = incumbent.get("episode_horizons", {}).get(horizon)
+                prior = incumbent["template"].get("horizons", {}).get(horizon)
+                next_score = own["template"].get("horizons", {}).get(horizon)
+                if None not in (before, prior, next_score):
+                    horizon_gains[horizon] = {
+                        "episode_gain": score - before, "template_gain": next_score - prior,
+                        "episode_over_template_gain": (score - next_score) - (before - prior)}
+            matched[task.id]["horizons"] = horizon_gains
+        means = {key: sum(row[key] for row in matched.values()) / len(matched) if matched else None
+                 for key in ("template_gain", "episode_over_template_gain", "episode_gain")}
+        comparisons[label] = {"matched_tasks": len(matched), "expected_tasks": len(tasks), "missing_tasks": missing,
+                              "status": "complete" if not missing else "partial" if matched else "unavailable",
+                              "mean_on_matched_tasks": means, "tasks": matched}
+    return comparisons
 
 
 def owner() -> dict[str, Any]:
@@ -388,17 +469,30 @@ def claim_resume(ledger_path: Path, run_id: str, *, by: str, why: str | None = N
     return view
 
 
-def result_of(view: dict[str, Any]) -> dict[str, Any]:
-    """The body of ``evolve_finished`` without its timing: the final version and what the run spent."""
+def result_of(view: dict[str, Any], spent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The body of ``evolve_finished`` without its timing: the final version and what the run spent.
+
+    ``episodes`` counts the episodes its comparisons used; ``tokens`` and ``attempts`` come from ``spent``
+    (``fold.spending``: every attempt and session) when given, else from those episodes and the evolver sessions."""
 
     episodes = [item for round_ in view["rounds"] for item in round_["episodes"]]
     evolvers = evolver_sessions(view)
-    return {
+    body = {
         "seed": view["seed"]["digest"], "final": view["incumbent"], "adoptions": len(view["adoptions"]),
         "rounds": sum(1 for round_ in view["rounds"] if round_["finished"]), "episodes": len(episodes),
         "tokens": sum(item.get("tokens") or 0 for item in [*episodes, *evolvers]),
         "metered_tokens": sum(item.get("metered_tokens") or 0 for item in [*episodes, *evolvers]),
     }
+    if spent is not None:
+        body.update({"tokens": spent["tokens"], "metered_tokens": spent["metered_tokens"],
+                     "attempts": spent["episodes"]["attempts"] + spent["verification"]["attempts"], "spent": spent})
+    return body
+
+
+def spent_by(ledger: Ledger, view: dict[str, Any]) -> dict[str, Any]:
+    """What one run spent (``fold.spending``)."""
+
+    return spending(ledger, {view["run_id"]: view})[view["run_id"]]
 
 
 def finish_run(ledger_path: Path, run_id: str, *, force: bool = False) -> dict[str, Any]:
@@ -424,8 +518,9 @@ def finish_run(ledger_path: Path, run_id: str, *, force: bool = False) -> dict[s
         finished = [round_["generation"] for round_ in view["rounds"] if round_["finished"]]
         if not finished:
             raise ValueError(f"{run_id} has no finished round: it has nothing to verify")
-        body = {**result_of(view), "ended_early": True, "planned_generations": view["config"]["generations"],
-                "last_generation": max(finished), "was": view["status"]}
+        body = {**result_of(view, spent_by(ledger, view)), "ended_early": True,
+                "planned_generations": view["config"]["generations"], "last_generation": max(finished),
+                "was": view["status"]}
         ledger.append(run_id, "evolve_finished", body, after=events[-1].seq)
     return body
 
@@ -451,6 +546,15 @@ class Evolution:
         self._evaluations: dict[str, Evaluation] = {}
         self._notify_lock = threading.Lock()
         self._gates: dict[str, ServiceGate] = {}  # model -> its gate, for the models the run was started with
+        self.method_registry = None
+        if config.method_registry and config.method_research != "internal":
+            from .methods import MethodRegistry
+
+            self.method_registry = MethodRegistry(Path(config.method_registry)).pin()
+            self.method_registry.check_agent_isolation(scratch_root() / "_method_registry_preflight",
+                                                       discover_runtime())
+            if config.method_research == "supplied" and not self.method_registry.available():
+                raise ValueError("supplied method research needs at least one approved method")
 
     # ---- plumbing ---------------------------------------------------------------------------------------------
 
@@ -483,8 +587,9 @@ class Evolution:
 
     def _evaluation(self, entry: dict[str, Any]) -> Evaluation:
         if entry["episode"] not in self._evaluations:
+            bench = self.benches[entry["task"]]
             self._evaluations[entry["episode"]] = load_predictions(
-                Path(entry["predictions"]), self.benches[entry["task"]], expect=entry.get("predictions_digest"))
+                Path(entry["predictions"]), bench, bench.stage(SCORED_STAGE), expect=entry.get("predictions_digest"))
         return self._evaluations[entry["episode"]]
 
     # ---- the run ----------------------------------------------------------------------------------------------
@@ -497,6 +602,7 @@ class Evolution:
             providers.probe(ref)  # and one tiny request: settings may list a model the key cannot use
         self._log(run_id, "evolve_started", {
             "label": label, "config": self.config.to_dict(), "ecogym": __version__,
+            **({"method_registry_digest": self.method_registry.identity()} if self.method_registry is not None else {}),
             "suite": {"id": self.suite.id, "title": self.suite.title, "digest": self.suite.digest,
                       "train": list(self.suite.train), "holdout_tasks": len(self.suite.holdout)},
             "gates": asdict(self.suite.gates),
@@ -528,7 +634,10 @@ class Evolution:
             self.cancel.set()
             self._log(run_id, "evolve_failed", {"error": f"{type(error).__name__}: {error}"[:2000]})
             raise
-        result = {**result_of(self.view(run_id)), "seconds": round(time.monotonic() - started, 1)}
+        with Ledger(self.ledger_path) as ledger:
+            view = fold(ledger.events(run_id))
+            spent = spent_by(ledger, view)
+        result = {**result_of(view, spent), "seconds": round(time.monotonic() - started, 1)}
         self._log(run_id, "evolve_finished", result)
         return result
 
@@ -543,6 +652,9 @@ class Evolution:
                 return view["result"]
             if view["suite"]["digest"] != self.suite.digest:
                 raise ValueError("the suite differs from the one this run started with")
+            if (self.method_registry is not None
+                    and view.get("method_registry_digest") != self.method_registry.identity()):
+                raise ValueError("the approved method registry differs from the one this run started with")
             if resumed:  # checks an interruption cut short, or that failed, are tried again once per resume
                 resumed = False
                 self._watch(run_id, view)
@@ -573,51 +685,84 @@ class Evolution:
         finished = [round_ for round_ in view["rounds"] if round_["finished"]]
         generation = finished[-1]["generation"] + 1 if finished else 0
         incumbent = finished[-1]["incumbent_after"] if finished else view["seed"]["digest"]
-        adopted_at = max((item["generation"] for item in view["adoptions"] if item["digest"] == incumbent),
-                         default=-1)
-        pool: dict[str, list[dict[str, Any]]] = {}
-        for round_ in finished:
-            if round_["generation"] <= adopted_at:
-                continue
-            for entry in round_["episodes"]:
-                if entry["role"] == "incumbent" and entry["harness"] == incumbent and usable(entry):
-                    pool.setdefault(entry["task"], []).append(entry)
         tried = {view["seed"].get("behavior") or view["seed"]["digest"]}
         for round_ in finished:
             for candidate in round_["candidates"]:
                 decision = candidate.get("decision")
-                if decision and not str(decision.get("reason", "")).startswith("missing_tasks"):
+                if decision and not candidate.get("missing") and not decision["reason"].startswith("missing_tasks"):
                     tried.add(candidate.get("behavior") or candidate["digest"])
-        return State(generation, incumbent, pool, tried)
+        return State(generation, incumbent, tried)
+
+    def _measurement(self) -> str:
+        """Identity of the inputs and local software allowed to fill the same round plan."""
+
+        package = Path(__file__).resolve().parents[1]
+        sources = [Path(__file__).resolve()]
+        sources.extend(package / "evolution" / name for name in ("evolver.py", "evolver.md", "methods.py"))
+        for layer in ("data", "episodes", "evaluation", "harness", "protocol", "solvers"):
+            sources.extend(sorted((package / layer).glob("*.py")))
+        runtime = discover_runtime()
+        interpreters = {}
+        for executable in (runtime.python, runtime.dsh):
+            if executable is not None:
+                target = executable.resolve()
+                stat = target.stat()
+                interpreters[str(target)] = [stat.st_size, stat.st_mtime_ns]
+        libraries = sorted(str(path.relative_to(root)) for root in runtime.python_roots
+                           for path in root.glob("lib/python*/site-packages/*.dist-info"))
+        registry_identity = self.method_registry.identity() if self.method_registry is not None else None
+        return digest({"config": self.config.to_dict(), "suite": self.suite.digest, "version": __version__,
+                       "method_registry": registry_identity,
+                       "bench": {task.id: self.benches[task.id].identity for task in self.tasks},
+                       "sources": {str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                   for path in sources},
+                       "interpreters": interpreters, "libraries": libraries})
 
     def _round(self, run_id: str, view: dict[str, Any], state: State) -> None:
         generation = state.generation
         incumbent = resolve(state.incumbent)
-        with Ledger(self.ledger_path) as ledger:
-            until = ledger.last_seq()
-            snapshot = Snapshot(until, {task.id: _guidance_digest(expert.guidance(ledger, task, until=until))
-                                        for task in self.tasks})
-        self._log(run_id, "round_started", {"generation": generation, "incumbent": incumbent.digest,
-                                            "owner": owner(), "expert_until": until, "guidance": snapshot.guidance})
-        if generation == 0:
-            entries = self._episodes(run_id, generation, [(incumbent, "incumbent", None)], snapshot)
-            self._log(run_id, "episodes_finished", {"generation": 0, "episodes": entries})
-            _require_replies(entries)
-            self._log(run_id, "round_finished", {"generation": 0, "incumbent": incumbent.digest, "adopted": None,
-                                                 "outcome": "baseline"})
-            return
-        candidates = self._propose(run_id, generation, incumbent, view, state, snapshot)
-        if not candidates:
+        last = view["rounds"][-1] if view["rounds"] else {}
+        plan = last.get("plan") if last.get("generation") == generation and not last["finished"] else None
+        measurement = self._measurement()
+        if plan:
+            if plan["measurement"] != measurement or plan["incumbent"] != incumbent.digest:
+                raise ValueError("the interrupted round's data or execution environment changed; "
+                                 "restore it to continue this round")
+            snapshot = Snapshot(plan["expert_until"], plan["guidance"])
+        else:
+            with Ledger(self.ledger_path) as ledger:
+                until = ledger.last_seq()
+                snapshot = Snapshot(until, {task.id: _guidance_digest(expert.guidance(ledger, task, until=until))
+                                            for task in self.tasks})
+        self._log(run_id, "round_started", {"generation": generation, "incumbent": incumbent.digest, "owner": owner(),
+                                            "expert_until": snapshot.until, "guidance": snapshot.guidance,
+                                            **({"resume_plan": plan["id"]} if plan else {})})
+        if plan:
+            candidates = [{**item, "harness": resolve(item["digest"])} for item in plan["candidates"]]
+        else:
+            candidates = self._propose(run_id, generation, incumbent, view, state, snapshot) if generation else []
+            plan = {"schema": "ecogym.round-plan/1", "generation": generation, "incumbent": incumbent.digest,
+                    "measurement": measurement, "expert_until": snapshot.until, "guidance": snapshot.guidance,
+                    "candidates": [{key: item[key] for key in ("name", "digest")} for item in candidates]}
+            plan["id"] = digest({"run": run_id, **plan})
+            self._log(run_id, "round_planned", plan)
+        if generation and not candidates:
             self._log(run_id, "round_finished", {"generation": generation, "incumbent": incumbent.digest,
                                                  "adopted": None, "outcome": "no_candidates"})
             return
         jobs = [(incumbent, "incumbent", None)] + [(item["harness"], "candidate", item["name"]) for item in candidates]
-        entries = self._episodes(run_id, generation, jobs, snapshot)
+        entries = self._episodes(run_id, generation, jobs, snapshot, plan["id"])
         self._log(run_id, "episodes_finished", {"generation": generation, "episodes": entries})
         _require_replies(entries)
-        # earlier incumbent episodes count only if they saw this round's guidance; otherwise only today's do
-        pool = {task: [entry for entry in items if entry.get("guidance") == snapshot.guidance.get(task)]
-                for task, items in state.pool.items()}
+        if generation == 0:
+            self._log(run_id, "round_finished", {"generation": 0, "incumbent": incumbent.digest, "adopted": None,
+                                                 "outcome": "baseline"})
+            self._record_template_attribution(run_id, generation, plan, jobs, entries, view)
+            return
+        research = None
+        if self.method_registry is not None:
+            research = (self.view(run_id)["rounds"][-1].get("evolver") or {}).get("method_research")
+        pool: dict[str, list[dict[str, Any]]] = {}
         for entry in entries:
             if entry["role"] == "incumbent" and usable(entry):
                 pool.setdefault(entry["task"], []).append(entry)
@@ -629,7 +774,7 @@ class Evolution:
                 own = [entry for entry in entries if entry["role"] == "candidate" and entry["task"] == task.id
                        and entry["candidate"] == candidate["name"] and usable(entry)]
                 theirs = pool.get(task.id, [])
-                if not own or not theirs:
+                if min(len(own), len(theirs)) < self.config.repeats:
                     missing.append(task.id)
                     continue
                 pairs.append(TaskPair(task.id, tuple(self._evaluation(entry) for entry in own),
@@ -640,8 +785,9 @@ class Evolution:
                 decision = compare_suite(pairs, self.suite.gates, {"run": run_id, "generation": generation,
                                                                    "candidate": candidate["name"]},
                                          confidence=confidence).to_dict()
-                if missing and decision["adopted"]:
+                if missing:
                     decision["adopted"], decision["reason"] = False, "missing_tasks:" + ",".join(missing)
+                    decision["scope"] = "partial_task_suite"
             else:
                 decision = {"adopted": False, "reason": "missing_tasks:" + ",".join(missing), "delta": None,
                             "interval": [None, None], "confidence": confidence, "tasks": [], "cells": {}}
@@ -660,8 +806,230 @@ class Evolution:
             "generation": generation, "incumbent": adopted["digest"] if adopted else incumbent.digest,
             "adopted": adopted["name"] if adopted else None, "outcome": "adopted" if adopted else "kept",
         })
+        self._record_template_attribution(run_id, generation, plan, jobs, entries, view)
+        references = self._public_reference(research, entries, adopted["name"] if adopted else None)
+        if references:
+            self._log(run_id, "method_reference_checked", {"generation": generation, **references})
         if adopted:
             self._check_adoptions(run_id, [generation])
+
+    def _record_template_attribution(self, run_id: str, generation: int, plan: dict[str, Any],
+                                     jobs: list[tuple[Harness, str, str | None]], entries: list[dict[str, Any]],
+                                     view: dict[str, Any]) -> None:
+        try:
+            result = self._template_attribution(jobs, entries, plan["measurement"], view["rounds"])
+        except Cancelled:
+            raise
+        except Exception as error:  # a diagnostic must not block a committed round or the next one
+            result = {"status": "error", "error": f"{type(error).__name__}: {error}"[:1000]}
+        self._log(run_id, "template_attribution_checked", {
+            "schema": "ecogym.template-attribution/1", "generation": generation, "round_plan": plan["id"],
+            "stage": SCORED_STAGE, "judge_protocol": JUDGE_PROTOCOL, **result})
+
+    def _template_attribution(self, jobs: list[tuple[Harness, str, str | None]], entries: list[dict[str, Any]],
+                              measurement: str, rounds: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        # A complete reference can be reused across identical programs, even when the surrounding harness changes.
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for entry in entries:
+            label = "incumbent" if entry["role"] == "incumbent" else entry["candidate"]
+            groups.setdefault((label, entry["task"]), []).append(entry)
+        prior: dict[str, tuple[int, dict[str, Any]]] = {}
+        for round_ in rounds:
+            for arm in (round_.get("template_attribution") or {}).get("arms", {}).values():
+                for task in arm["tasks"].values():
+                    reference = task["template"]
+                    if reference["status"] in ("ok", "drift"):
+                        prior[reference["key"]] = (round_["generation"], reference)
+
+        started = clock.now()
+        arms: dict[str, Any] = {}
+        pending: dict[str, tuple[Bench, Path]] = {}
+        references: dict[str, dict[str, Any]] = {}
+        observed_starts: dict[str, list[dict[str, Any]]] = {}
+        with tempfile.TemporaryDirectory(prefix="evolution-templates-", dir=scratch_root()) as directory:
+            for harness, _, name in jobs:
+                label = name or "incumbent"
+                template = Path(directory) / label
+                template.mkdir()
+                program, problem = None, None
+                try:
+                    program = snapshot_program(harness.root / "template", template)
+                except (OSError, ToolError) as error:
+                    problem = str(error)[:500]
+                rows = {}
+                for task in self.tasks:
+                    bench = self.benches[task.id]
+                    key = digest([measurement, bench.digest, SCORED_STAGE, JUDGE_PROTOCOL, program])
+                    case = groups.get((label, task.id), [])
+                    row, starts = self._episode_attribution(case, program)
+                    reference = {"key": key, "program_digest": program, "bench": bench.digest}
+                    if problem:
+                        references[key] = {**reference, "status": "invalid_template", "error": problem}
+                    else:
+                        pending.setdefault(key, (bench, template))
+                        observed_starts.setdefault(key, []).extend(starts)
+                        references.setdefault(key, reference)
+                    rows[task.id] = {**row, "template_key": key}
+                arms[label] = {"harness": harness.digest, "tasks": rows}
+
+            for key, starts in observed_starts.items():
+                previous = prior.get(key)
+                if previous is not None:
+                    generation, saved = previous
+                    if saved["status"] == "drift":
+                        references[key] = {**saved, "source": "prior_round", "source_generation": generation}
+                        pending.pop(key)
+                        continue
+                    starts.append({**saved, "source": "prior_round", "source_generation": generation})
+                if not starts:
+                    continue
+                fingerprints = {item["forecast_digest"] for item in starts}
+                if len(fingerprints) == 1:
+                    references[key] = {**references[key], **starts[0],
+                                       "matching_observations": len(starts)}
+                else:
+                    scores = [item["score"] for item in starts]
+                    references[key].update({"status": "drift", "observations": len(starts),
+                                            "score_range": [min(scores), max(scores)],
+                                            "distinct_forecasts": len(fingerprints)})
+                pending.pop(key)
+            self._replay_templates(pending, references, started)
+
+        for arm in arms.values():
+            for row in arm["tasks"].values():
+                reference = references[row.pop("template_key")]
+                row["template"] = reference
+                row["episode_over_template"] = (row["episode_mean"] - reference["score"]
+                                                if reference["status"] == "ok" and row["episode_mean"] is not None
+                                                else None)
+        matched = sum(row["episode_over_template"] is not None
+                      for arm in arms.values() for row in arm["tasks"].values())
+        expected = len(arms) * len(self.tasks)
+        return {"status": "complete" if matched == expected else "partial" if matched else "unavailable",
+                "matched_arm_tasks": matched, "expected_arm_tasks": expected, "expected_episodes": self.config.repeats,
+                "replay_budget_seconds": TEMPLATE_ATTRIBUTION_SECONDS, "seconds": round(clock.now() - started, 3),
+                "arms": arms, "comparisons": _attribution_summary(arms, self.tasks)}
+
+    def _episode_attribution(self, case: Sequence[dict[str, Any]], program: str | None
+                             ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        scores, starts, coverage = [], [], []
+        horizons: dict[str, list[float]] = {}
+        available = set()
+        failed = 0
+        for entry in case:
+            if (not usable(entry) or not entry.get("predictions_digest") or entry.get("score_stage") != SCORED_STAGE
+                    or entry.get("judge_protocol") != JUDGE_PROTOCOL or entry["replicate"] in available):
+                continue
+            try:
+                evaluation = self._evaluation(entry)
+                score = evaluation.score()
+                covered = float(np.isfinite(evaluation.predicted).mean())
+                by_horizon = _horizon_scores(evaluation)
+            except (OSError, ValueError, KeyError):
+                failed += 1
+                continue
+            if not math.isfinite(score):
+                failed += 1
+                continue
+            scores.append(score)
+            coverage.append(covered)
+            available.add(entry["replicate"])
+            for horizon, value in by_horizon.items():
+                horizons.setdefault(horizon, []).append(value)
+            if (program and entry.get("scored_start") and entry.get("program_digest") == program
+                    and entry.get("score_status") == "ok" and entry.get("score_limits_match")):
+                starts.append({"status": "ok", "source": "episode_start", "episode": entry["episode"],
+                               "score": score, "coverage": covered, "origins": evaluation.stage.size,
+                               "horizons": by_horizon,
+                               "predictions_digest": entry["predictions_digest"],
+                               "forecast_digest": _forecast_fingerprint(evaluation)})
+        complete = available == set(range(self.config.repeats))
+        return {"episode_count": len(scores), "episode_mean": sum(scores) / len(scores) if complete else None,
+                "episode_horizons": {key: sum(values) / len(values) for key, values in horizons.items()
+                                     if complete and len(values) == len(scores)},
+                "episode_coverage": sum(coverage) / len(coverage) if coverage else None,
+                "scored_start_count": sum(bool(item.get("scored_start")) for item in case if usable(item)),
+                "episodes_unreadable": failed}, starts
+
+    def _replay_templates(self, pending: dict[str, tuple[Bench, Path]], references: dict[str, dict[str, Any]],
+                          started: float) -> None:
+        if not pending:
+            return
+        runtime = discover_runtime()
+        limits = self.config.limits
+        workers = min(2, self.config.concurrency, len(pending))
+        deadline = started + TEMPLATE_ATTRIBUTION_SECONDS
+        per_job = TEMPLATE_ATTRIBUTION_SECONDS / math.ceil(len(pending) / workers)
+
+        def replay(bench: Bench, template: Path) -> dict[str, Any]:
+            seconds = min(limits.total_seconds, per_job, deadline - clock.now())
+            if seconds <= 0:
+                return {"status": "budget_exhausted"}
+            capped = replace(limits, total_seconds=seconds, fit_seconds=min(limits.fit_seconds, seconds),
+                             forecast_seconds=min(limits.forecast_seconds, seconds))
+            try:
+                report, evaluation = judge_program(bench, template, SCORED_STAGE, runtime,
+                                                   limits=capped, cancel=self.cancel)
+            except Cancelled:
+                raise
+            except (OSError, ValueError, RuntimeError) as error:
+                return {"status": "error", "error": f"{type(error).__name__}: {error}"[:500]}
+            result = {"status": report["status"], "source": "fixed_replay", "coverage": report["coverage"],
+                      "origins": report["origins"], "seconds": report["seconds"], "limit_seconds": seconds}
+            if report["status"] == "ok" and math.isfinite(report["score"]):
+                result.update({"score": report["score"], "forecast_digest": _forecast_fingerprint(evaluation),
+                               "horizons": _horizon_scores(evaluation)})
+            elif report["status"] == "ok":
+                result["status"] = "invalid_score"
+            return result
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="template-attribution") as pool:
+            futures = {key: pool.submit(replay, *item) for key, item in pending.items()}
+            for key, future in futures.items():
+                references[key].update(future.result())
+
+    def _public_reference(self, research: dict[str, Any] | None, entries: list[dict[str, Any]],
+                          adopted: str | None) -> dict[str, Any] | None:
+        """Compare one method actually probed this round on development, independently of adoption."""
+
+        if self.method_registry is None or not research:
+            return None
+        completed = [probe for probe in research.get("probes", ())
+                     if probe.get("status") == "evaluated" and probe.get("method")
+                     and probe.get("result", {}).get("status") == "ok"]
+        if not completed:
+            return None
+        method = max(completed, key=lambda probe: probe["result"]["mean"])["method"]
+        runtime = discover_runtime()
+        limits = self.config.limits
+        budget = min(limits.total_seconds, PUBLIC_REFERENCE_SECONDS)
+        deadline = clock.now() + budget
+        tasks = {}
+        for task in self.tasks:
+            remaining = deadline - clock.now()
+            row: dict[str, Any] = {"status": "budget_exhausted", "external": None}
+            try:
+                if remaining > 0:
+                    capped = replace(limits, total_seconds=remaining, fit_seconds=min(limits.fit_seconds, remaining),
+                                     forecast_seconds=min(limits.forecast_seconds, remaining))
+                    report, _ = self.method_registry.judge(method["digest"], self.benches[task.id], SCORED_STAGE,
+                                                           runtime, limits=capped, cancel=self.cancel)
+                    row.update({key: report.get(key) for key in ("status", "coverage", "bench", "judge_protocol")})
+                    if report.get("status") == "ok" and report.get("coverage") == 1:
+                        row["external"] = report.get("score")
+            except Cancelled:
+                raise
+            except (OSError, ValueError, RuntimeError) as error:
+                row = {"status": type(error).__name__, "external": None}
+            scores = [entry["score"] for entry in entries if entry["task"] == task.id and usable(entry)
+                      and (entry.get("candidate") == adopted if adopted is not None else entry["role"] == "incumbent")]
+            row["selected"] = sum(scores) / len(scores) if len(scores) >= self.config.repeats else None
+            tasks[task.id] = row
+        gaps = [row["selected"] - row["external"] for row in tasks.values()
+                if row["external"] is not None and row["selected"] is not None]
+        gap = sum(gaps) / len(gaps) if gaps and len(gaps) == len(tasks) else None
+        return {"method": method, "stage": SCORED_STAGE, "tasks": tasks, "selected_minus_external": gap,
+                "budget_seconds": budget}
 
     def _check_adoptions(self, run_id: str, generations: list[int]) -> None:
         """Measure these generations' adoptions on the training tasks' sealed validation period
@@ -701,13 +1069,23 @@ class Evolution:
                                       settings=settings, repeats=config.repeats, episode_minutes=config.minutes,
                                       episode_tokens=config.tokens, model=config.model, limits=config.limits,
                                       expert_text=expert.render(advice) if advice else "", cancel=self.cancel,
-                                      workers=config.concurrency)  # template checks: the load chosen for episodes
-            except (Cancelled, KeyboardInterrupt):
+                                      workers=config.concurrency,
+                                      method_research=config.method_research, method_registry=self.method_registry,
+                                      local_selection=config.local_selection)
+            except (Cancelled, KeyboardInterrupt) as error:
+                stopped = getattr(error, "session", None)
+                if stopped is not None:  # what the stopped session spent stays on the record (fold.spending)
+                    body = stopped.to_dict()
+                    self._log(run_id, "evolver_finished", {
+                        "generation": generation, "status": "interrupted", "candidates": [],
+                        **{key: body.get(key) for key in ("seconds", "tokens", "metered_tokens", "llm_calls",
+                                                          "answered_calls", "failed_calls", "trajectory",
+                                                          "upstream_error", "unsettled")}})
                 raise
-            except Exception as error:  # a failed review costs one round, not the run
+            except Exception as error:
                 self._log(run_id, "evolver_finished", {"generation": generation, "status": "error",
                                                        "error": f"{type(error).__name__}: {error}"[:2000]})
-                return []
+                raise
             session = outcome["session"]
             budget = config.evolver_minutes * 60
             stalled = float(session.get("stalled_seconds") or 0.0)
@@ -757,6 +1135,8 @@ class Evolution:
                     "summary": candidate.get("summary", ""), "proposal": candidate.get("proposal", ""),
                     "agent": candidate.get("agent"), "changes": patches, "smoke": candidate.get("smoke"),
                     "problems": candidate.get("problems", []), "warnings": candidate.get("warnings", [])}
+            if candidate.get("method_research"):
+                body["method_research"] = candidate["method_research"]
             if candidate["status"] == "proposed":
                 self._log(run_id, "candidate_proposed", body)
                 found.append({"name": candidate["name"], "digest": candidate["digest"],
@@ -770,26 +1150,79 @@ class Evolution:
                                                  "upstream_error", "continuations")},
             "final_text": session["final_text"][-4000:],
             "candidates": [{"name": item["name"], "status": item["status"]} for item in outcome["candidates"]],
+            **({"method_research": outcome["method_research"]} if "method_research" in outcome else {}),
         })
         return found
 
+    def _recover_episodes(self, run_id: str, generation: int, plan_id: str, snapshot: Snapshot
+                          ) -> tuple[dict, dict]:
+        """Find verified completed slots and the next attempt numbers from the episode events."""
+
+        with Ledger(self.ledger_path) as ledger:
+            events = ledger.evolution_episode_events(
+                (run_id,), generation=generation, kinds=("episode_started", "episode_scored", "episode_finished"))
+        by_episode: dict[str, list] = {}
+        for event in events:
+            by_episode.setdefault(event.run_id, []).append(event)
+        recovered, attempts = {}, {}
+        for history in by_episode.values():
+            started = history[0].body
+            context = started.get("context") or {}
+            if context.get("round_plan") != plan_id:
+                continue
+            task = started["task_id"]
+            entry = {"task": task, "harness": started["harness"]["digest"], "role": context["role"],
+                     "candidate": context.get("candidate"), "replicate": context["replicate"],
+                     "guidance": snapshot.guidance[task], "attempt": context["attempt"]}
+            slot = _slot(entry)
+            attempts[slot] = max(attempts.get(slot, 0), context["attempt"] + 1)
+            if slot in recovered:
+                continue
+            record = fold_episode(history)
+            finished, scored = record.get("finished") or {}, record.get("scored") or {}
+            artifact_dir = (finished.get("trajectory") or {}).get("dir")
+            if (record["status"] not in SCORED_STATUSES or not artifact_dir or not scored.get("predictions")
+                    or not scored.get("predictions_digest")):
+                continue
+            entry.update({"episode": record["episode"], "status": record["status"], "score": scored["score"],
+                          "predictions": str(Path(artifact_dir) / scored["predictions"]),
+                          "predictions_digest": scored["predictions_digest"], "tokens": finished.get("tokens"),
+                          "metered_tokens": finished.get("metered_tokens"), "seconds": finished.get("seconds"),
+                          **_scored_program(scored),
+                          "score_limits_match": started.get("limits") == asdict(self.config.limits)})
+            try:
+                self._evaluation(entry)
+            except (OSError, ValueError, KeyError):
+                continue
+            recovered[slot] = entry
+        return recovered, attempts
+
     def _episodes(self, run_id: str, generation: int, jobs: list[tuple[Harness, str, str | None]],
-                  snapshot: Snapshot) -> list[dict[str, Any]]:
+                  snapshot: Snapshot, plan_id: str) -> list[dict[str, Any]]:
         # replicate by replicate, task by task, every version in turn: no version waits behind another's queue
         specs = [(harness, role, name, task, replicate) for replicate in range(self.config.repeats)
                  for task in self.tasks for harness, role, name in jobs]
+        recovered, attempts = self._recover_episodes(run_id, generation, plan_id, snapshot)
         with ThreadPoolExecutor(max_workers=self.config.concurrency, thread_name_prefix="episode") as pool:
-            futures = [pool.submit(self._episode, run_id, generation, *spec, snapshot) for spec in specs]
+            pending = []
+            for spec in specs:
+                harness, role, name, task, replicate = spec
+                slot = (harness.digest, role, name, task.id, replicate)
+                future = None if slot in recovered else pool.submit(
+                    self._episode, run_id, generation, *spec, snapshot, plan_id, attempts.get(slot, 0))
+                pending.append((slot, future))
             try:
-                return [future.result() for future in futures]
+                return [recovered[slot] if future is None else future.result() for slot, future in pending]
             except BaseException:
                 self.cancel.set()
-                for future in futures:
-                    future.cancel()
+                for _, future in pending:
+                    if future is not None:
+                        future.cancel()
                 raise
 
     def _episode(self, run_id: str, generation: int, harness: Harness, role: str, name: str | None,
-                 task: TaskSpec, replicate: int, snapshot: Snapshot) -> dict[str, Any]:
+                 task: TaskSpec, replicate: int, snapshot: Snapshot, plan_id: str,
+                 first_attempt: int) -> dict[str, Any]:
         entry: dict[str, Any] = {"task": task.id, "harness": harness.digest, "role": role, "candidate": name,
                                  "replicate": replicate, "guidance": snapshot.guidance[task.id]}
         gate = self._gate(self.config.model or harness.agent.model)
@@ -799,13 +1232,14 @@ class Evolution:
                 raise Cancelled("the run was cancelled")
             if gate is not None:
                 gate.wait(self.cancel)  # no episode starts while the service is down
-            attempt = failures + outages
+            attempt = first_attempt + failures + outages
             label = f"{run_id} 第{generation}代 {'在任' if role == 'incumbent' else f'候选{name}'} {task.id}"
             config = EpisodeConfig(
                 task=task.id, harness=harness.digest, minutes=self.config.minutes, tokens=self.config.tokens,
                 model=self.config.model, label=label, limits=self.config.limits, expert_until=snapshot.until,
+                local_selection=self.config.local_selection,
                 context={"evolution": run_id, "generation": generation, "role": role, "candidate": name,
-                         "replicate": replicate, "attempt": attempt},
+                         "replicate": replicate, "attempt": attempt, "round_plan": plan_id},
             )
             try:
                 result = run_episode(config, self.ledger_path, bench=self.benches[task.id], cancel=self.cancel)
@@ -818,9 +1252,11 @@ class Evolution:
                 if failures > self.config.retries:
                     break
                 continue
+            scored = result.get("scored") or {}
             entry.update({"episode": result["episode"], "status": result["status"], "score": result["score"],
                           "predictions": result["predictions"],
-                          "predictions_digest": (result.get("scored") or {}).get("predictions_digest"),
+                          "predictions_digest": scored.get("predictions_digest"), **_scored_program(scored),
+                          "score_limits_match": True,
                           "attempt": attempt, "tokens": result["tokens"], "metered_tokens": result["metered_tokens"],
                           "seconds": result["seconds"]})
             entry.pop("error", None)
@@ -841,4 +1277,4 @@ class Evolution:
 
 
 __all__ = ["Evolution", "EvolveConfig", "RunBusy", "RunStopped", "ServiceDown", "Snapshot", "State", "claim_resume",
-           "finish_run", "owner", "result_of", "run_models", "stale", "usable"]
+           "finish_run", "owner", "result_of", "run_models", "spent_by", "stale", "usable"]

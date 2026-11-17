@@ -24,6 +24,7 @@ outage of the model service that is over, or a process that died.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import re
@@ -38,6 +39,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
+from os import environ
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -79,7 +81,7 @@ def _flag(value: Any) -> bool:
 EVOLVE_FIELDS = {"harness": str, "generations": int, "candidates": int, "repeats": int, "minutes": float,
                  "tokens": int, "model": str, "evolver_minutes": float, "evolver_tokens": int, "evolver_model": str,
                  "concurrency": int, "retries": int, "outage_minutes": float, "auto_resume": _flag,
-                 "check_adoptions": _flag}
+                 "check_adoptions": _flag, "method_research": str, "local_selection": str}
 HARNESS_TEXT = ("instructions.md", "memory/lessons.md", "harness.toml")
 ARENA = "方法竞技"
 
@@ -249,6 +251,7 @@ class Service:
     def catalog(self) -> dict[str, Any]:
         from .episodes import providers
         from .evolution import EvolveConfig
+        from .evolution.methods import MethodRegistry
         from .harness import HarnessError, resolve
         from .task.suite import suite_specs
 
@@ -257,6 +260,11 @@ class Service:
             harness_model = resolve("seed").agent.model
         except (HarnessError, OSError, ValueError):
             harness_model = None
+        registry = environ.get("ECOGYM_METHOD_REGISTRY")
+        registry_available = False
+        if registry:
+            with contextlib.suppress(OSError, ValueError):  # launching a run reports configuration errors
+                registry_available = MethodRegistry(Path(registry)).available()
         return {
             "version": __version__,
             "ledger": str(self.ledger_path),
@@ -265,6 +273,7 @@ class Service:
             "tasks": [_task_entry(task) for task in task_specs()],
             "suites": [_suite_entry(suite) for suite in suite_specs()],
             "evolve_defaults": {key: defaults[key] for key in EVOLVE_FIELDS},
+            "method_registry_available": registry_available,
             "datasets": sorted({task.dataset for task in task_specs()}),
             "solvers": [s.describe() for s in solver_specs()],
             "proposers": sorted(PROPOSERS),
@@ -298,12 +307,14 @@ class Service:
 
     def evolutions(self) -> list[dict[str, Any]]:
         from .evolution import fold, summary
+        from .evolution.fold import spending
 
         with Ledger(self.ledger_path) as ledger:
             views = [fold(ledger.events(run_id)) for run_id in ledger.runs(first="evolve_started")]
+            spent = spending(ledger, {view["run_id"]: view for view in views})  # every attempt, not only the compared
         runs = []
         for view in views:
-            item = summary(view)
+            item = summary(view, spent.get(view["run_id"]))
             item["active"] = self._alive(item["run_id"])
             item["verifying"] = self._alive(item["run_id"], verifying=True)
             item["stale"] = not item["active"] and self._stale(view)
@@ -330,6 +341,7 @@ class Service:
         from .episodes.history import fold_episode
         from .evolution import fold
         from .evolution.ancestry import ancestry
+        from .evolution.loop import spent_by
 
         with Ledger(self.ledger_path) as ledger:
             events = ledger.events(run_id)
@@ -344,6 +356,7 @@ class Service:
                         if scored.get("references"):
                             references[entry["task"]] = scored["references"]
             view["ancestry"] = ancestry(ledger, view["seed"]["digest"], exclude=run_id)
+            view["spent"] = spent_by(ledger, view)  # every attempt and session, not only the episodes compared
         view["active"] = self._alive(run_id)
         view["verifying"] = self._alive(run_id, verifying=True)
         view["stale"] = not view["active"] and self._stale(view)
@@ -375,7 +388,9 @@ class Service:
             values = {key: kind(body[key]) for key, kind in EVOLVE_FIELDS.items()
                       if body.get(key) not in (None, "")}
             values.setdefault("repeats", suite_spec(str(body["suite"])).repeats)  # the suite's design
-            evolution = Evolution(EvolveConfig(suite=str(body["suite"]), **values), self.ledger_path)
+            config = EvolveConfig(suite=str(body["suite"]), method_registry=environ.get("ECOGYM_METHOD_REGISTRY"),
+                                  **values)
+            evolution = Evolution(config, self.ledger_path)
             run_id = evolution.start(label=str(body.get("label", ""))[:200])
         except (KeyError, TypeError, ValueError, OSError) as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"{type(error).__name__}: {error}") from None
@@ -624,9 +639,9 @@ class Service:
             raise ApiError(HTTPStatus.BAD_REQUEST, "generation needs evolution: a generation belongs to one run")
         with Ledger(self.ledger_path) as ledger:
             ids = None if not evolution else [
-                event.run_id for event in ledger.events(kind="episode_started")
-                if (context := event.body.get("context") or {}).get("evolution") == evolution
-                and (generation is None or context.get("generation") == int(generation))]
+                event.run_id for event in ledger.evolution_episode_events(
+                    (evolution,), kinds=("episode_started",),
+                    generation=None if generation is None else int(generation))]
             items = list(reversed([summary(record) for record in episode_records(ledger, ids)]))
         if status:
             items = [item for item in items if item["status"] == status]

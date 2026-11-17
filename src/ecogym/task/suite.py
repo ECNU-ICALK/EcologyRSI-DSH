@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from ..kernel.canonical import digest
 from ..kernel.config import ConfigError, Fields, load_toml
@@ -41,14 +42,17 @@ class SuiteGates:
     resamples: int = 2000
     task_cap: float = 0.03  # a task may not lose more than this with its own interval below zero
     test: str = "t"  # the interval over the task gains with three or more tasks: t | signed_rank
+    max_horizon_loss: tuple[tuple[int, float], ...] = ()  # predeclared skill loss tolerances, in task steps
 
 
-def gates_body(gates: SuiteGates) -> dict[str, float | int | str]:
+def gates_body(gates: SuiteGates) -> dict[str, Any]:
     """The gates as they enter a suite's digest: without ``test`` when it is the default t interval."""
 
     body = asdict(gates)
     if body["test"] == "t":
         del body["test"]
+    if not body["max_horizon_loss"]:
+        del body["max_horizon_loss"]
     return body
 
 
@@ -80,12 +84,19 @@ def load_suite_spec(path: str | Path) -> SuiteSpec:
     fields = Fields(load_toml(path), Path(path).name)
     table = fields.table("gates")
     default = SuiteGates()  # slots dataclass: class attributes are descriptors, not defaults
+    horizon_table = table.table("max_horizon_loss")
+    losses = []
+    for horizon in horizon_table:
+        if not horizon.isascii() or not horizon.isdigit() or int(horizon) <= 0 or str(int(horizon)) != horizon:
+            raise ConfigError(f"{horizon_table.where}: use positive integer forecast steps as keys")
+        losses.append((int(horizon), horizon_table.float(horizon, lo=0.0, hi=2.0)))
     gates = SuiteGates(
         min_delta=table.float("min_delta", default.min_delta, lo=0.0),
         confidence=table.float("confidence", default.confidence, lo=0.5, hi=0.999),
         resamples=table.int("resamples", default.resamples, lo=200),
         task_cap=table.float("task_cap", default.task_cap, lo=0.0),
         test=table.str("test", default.test, choices=GATE_TESTS),
+        max_horizon_loss=tuple(sorted(losses)),
     )
     table.done()
     spec = SuiteSpec(
@@ -111,6 +122,7 @@ def check_suite(spec: SuiteSpec) -> None:
     """Fail unless every entry resolves to a distinct single-episode task."""
 
     seen: dict[tuple[str, str], str] = {}
+    protected = {horizon for horizon, _ in spec.gates.max_horizon_loss}
     for side, refs in (("train", spec.train), ("holdout", spec.holdout)):
         for ref in refs:
             try:
@@ -119,6 +131,8 @@ def check_suite(spec: SuiteSpec) -> None:
                 raise ConfigError(f"suite {spec.id}: {error.args[0]}") from None
             if len(task.episodes) != 1:
                 raise ConfigError(f"suite {spec.id}: {ref} has {len(task.episodes)} episodes; use <task>:<episode>")
+            if not protected.issubset(task.horizons):
+                raise ConfigError(f"suite {spec.id}: {ref} must score every protected forecast horizon")
             key = (task.dataset, task.episodes[0])
             if key in seen:
                 raise ConfigError(f"suite {spec.id}: {ref} ({side}) repeats {seen[key]}")

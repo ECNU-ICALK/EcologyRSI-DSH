@@ -15,19 +15,28 @@ on a sealed period (``adoption_checked``) is attached to its round as
 last generation finishes with ``ended_early``. ``evolve_finished`` is final:
 only verification events count after it (a process still running the run
 cannot change its final version or reopen it).
+
+A round's record holds the episodes its comparisons used: the last attempt
+of each, written once the whole round has run. What a run spent is wider
+(``spending``): every attempt it started, retried and interrupted ones and
+whole rounds cut short included, its holdout episodes and every evolver
+session; read from the episodes' own events, not from the rounds (on
+2026-11-06 the rounds of evo:23336384a1aa held 352 of its 401 attempts and
+262.9 of the 285.5 million tokens they used).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..kernel.ledger import Event
+from ..kernel.ledger import Event, Ledger
 
 START = "evolve_started"
 EVENT_KINDS = frozenset({
     START,
     "round_started",
+    "round_planned",
     "evolver_finished",
     "evolver_note",
     "expert_question",
@@ -43,6 +52,8 @@ EVENT_KINDS = frozenset({
     "sealed_task",  # one task's sealed result, recorded as soon as it is judged
     "sealed_verified",
     "adoption_checked",  # an adopted version against the one it replaced, on the training tasks' validation period
+    "method_reference_checked",  # optional public-method reference on development, after round commit
+    "template_attribution_checked",  # fixed vs episode-selected programs on development, after round commit
     "outage_started",  # a model service stopped answering: no session starts until it answers again
     "outage_ended",
     "evolve_resumed",  # who continued a stopped run (a person, or the service by itself) and why it had stopped
@@ -84,6 +95,18 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
             if target is not None and not (body.get("error") and held and not held.get("error")):
                 target["sealed_check"] = body
             continue
+        if event.kind == "method_reference_checked":
+            target = next((item for item in reversed(view["rounds"]) if item["generation"] == body.get("generation")
+                           and item["finished"]), None)
+            if target is not None:
+                target["public_references"] = body
+            continue
+        if event.kind == "template_attribution_checked":
+            target = next((item for item in reversed(view["rounds"]) if item["generation"] == body.get("generation")
+                           and item["finished"] and (item.get("plan") or {}).get("id") == body.get("round_plan")), None)
+            if target is not None and "template_attribution" not in target:
+                target["template_attribution"] = body
+            continue
         if event.kind in ("outage_started", "outage_ended"):
             if event.kind == "outage_started":
                 view["waiting"] = {"since": event.at, **body}
@@ -101,12 +124,18 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
         if event.kind == "round_started":
             view.pop("waiting", None)
             _running(view)  # resumed by a version that logged no evolve_resumed
+            view["owner"] = body.get("owner")
+            if (current is not None and not current["finished"]
+                    and current["generation"] == body["generation"]
+                    and body.get("resume_plan") and (current.get("plan") or {}).get("id") == body["resume_plan"]):
+                current["resumed_at"] = event.at
+                pending = None
+                continue
             current = {"generation": body["generation"], "incumbent": body["incumbent"], "started_at": event.at,
                        "evolver": None, "notes": [], "candidates": {}, "episodes": [], "adopted": None,
                        "finished": False, "guidance": body.get("guidance")}
             pending = None
             view["rounds"].append(current)
-            view["owner"] = body.get("owner")
         elif event.kind == "evolver_note":
             view["notes"].append({"at": event.at, **body})
             if current is not None:
@@ -117,6 +146,8 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
             if event.kind in ("evolve_finished", "evolve_failed", "holdout_verified", "sealed_verified"):
                 _closing(view, event)
             continue
+        elif event.kind == "round_planned":
+            current["plan"] = body
         elif event.kind == "evolver_finished":
             if current["evolver"] is not None:  # a session the service cut short, reviewed again (``rerun``)
                 current.setdefault("earlier_evolvers", []).append(current["evolver"])
@@ -125,14 +156,17 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
             status = "proposed" if event.kind == "candidate_proposed" else body.get("status", "rejected")
             current["candidates"][body["name"]] = {**body, "status": status, "decision": None}
         elif event.kind == "episodes_finished":
-            current["episodes"].extend(body["episodes"])
+            if current.get("plan"):
+                current["episodes"] = body["episodes"]
+            else:
+                current["episodes"].extend(body["episodes"])
         elif event.kind == "candidate_compared":
             entry = current["candidates"].setdefault(body["name"], {"name": body["name"], "status": "proposed"})
             entry["decision"] = body["decision"]
             entry["missing"] = body.get("missing") or []  # training tasks without usable episodes
             if body["decision"]["adopted"]:
                 entry["status"] = "passed"
-            elif entry["status"] == "proposed":
+            elif entry["status"] in ("proposed", "passed"):
                 entry["status"] = "not_adopted"
         elif event.kind == "harness_adopted":
             pending = body
@@ -192,19 +226,73 @@ def evolver_sessions(view: dict[str, Any]) -> list[dict[str, Any]]:
             for item in [*round_.get("earlier_evolvers", []), *([round_["evolver"]] if round_.get("evolver") else [])]]
 
 
+def _bucket() -> dict[str, Any]:
+    return {"attempts": 0, "tokens": 0, "metered_tokens": 0, "statuses": {}, "unfinished": 0}
+
+
+def spending(ledger: Ledger, views: Mapping[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What each run of ``views`` (run id -> folded view) spent: every episode attempt it started, in its rounds
+    (``episodes``) and in its holdout verification (``verification``), and every evolver session (``evolver``),
+    whether or not it entered a comparison. ``unfinished`` counts attempts with no end recorded (the process
+    died): their use is unknown and not in the totals. Totals are what the ledger recorded, not a provider's bill.
+    """
+
+    found: dict[str, dict[str, Any]] = {run: {"episodes": _bucket(), "verification": _bucket(),
+                                               "evolver": {"sessions": 0, "tokens": 0, "metered_tokens": 0}}
+                                        for run in views}
+    owners: dict[str, tuple[str, str]] = {}  # episode -> (run, bucket)
+    for event in ledger.evolution_episode_events(tuple(views), kinds=("episode_started", "episode_finished")):
+        if event.kind == "episode_started":
+            context = event.body["context"]
+            run = context["evolution"]
+            name = "verification" if context.get("role") == "holdout" else "episodes"
+            owners[event.run_id] = (run, name)
+            bucket = found[run][name]
+            bucket["attempts"] += 1
+            bucket["unfinished"] += 1
+            continue
+        if event.run_id not in owners:
+            continue
+        run, name = owners.pop(event.run_id)
+        bucket = found[run][name]
+        bucket["unfinished"] -= 1
+        bucket["tokens"] += int(event.body.get("tokens") or 0)
+        bucket["metered_tokens"] += int(event.body.get("metered_tokens") or 0)
+        status = str(event.body.get("status") or "unknown")
+        bucket["statuses"][status] = bucket["statuses"].get(status, 0) + 1
+    for run, view in views.items():
+        evolver = found[run]["evolver"]
+        for session in evolver_sessions(view):
+            evolver["sessions"] += 1
+            evolver["tokens"] += int(session.get("tokens") or 0)
+            evolver["metered_tokens"] += int(session.get("metered_tokens") or 0)
+        parts = (found[run]["episodes"], found[run]["verification"], evolver)
+        found[run]["tokens"] = sum(part["tokens"] for part in parts)
+        found[run]["metered_tokens"] = sum(part["metered_tokens"] for part in parts)
+    return found
+
+
 def verified_gains(view: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Final minus starting version in each independent verification done: holdout, validation, final_test."""
 
     sealed = sorted(view["verification"]["sealed"].items(), key=lambda item: (item[0] != "validation", item[0]))
     checks = [("holdout", view["verification"]["holdout"]), *sealed]
-    return {name: {key: decision.get(key) for key in ("delta", "interval", "reason")}
+    return {name: {**{key: decision.get(key) for key in ("delta", "interval", "reason")},
+                   "complete": body.get("complete") is not False}
             for name, body in checks if body and (decision := body.get("decision"))}
 
 
-def summary(view: dict[str, Any]) -> dict[str, Any]:
+def summary(view: dict[str, Any], spent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A run's listing. ``episodes`` counts the episodes its comparisons used; with ``spent`` (``spending``),
+    ``tokens`` is what the run spent on every attempt and session, ``attempts`` how many episodes it started.
+    Without it, ``tokens`` covers those comparison episodes and the recorded evolver sessions only."""
+
     rounds = view["rounds"]
     episodes = [item for round_ in rounds for item in round_["episodes"]]
     sessions = [*episodes, *evolver_sessions(view)]
+    extra = {} if spent is None else {"tokens": spent["tokens"], "metered_tokens": spent["metered_tokens"],
+                                      "attempts": spent["episodes"]["attempts"] + spent["verification"]["attempts"],
+                                      "spent": spent}
     return {
         "run_id": view["run_id"], "label": view.get("label", ""), "status": view["status"],
         "started_at": view["started_at"], "updated_at": view["updated_at"], "finished_at": view.get("finished_at"),
@@ -217,11 +305,15 @@ def summary(view: dict[str, Any]) -> dict[str, Any]:
         "metered_tokens": sum(item.get("metered_tokens") or 0 for item in sessions),
         "verified": {"holdout": view["verification"]["holdout"] is not None,
                      "sealed": sorted(view["verification"]["sealed"]),
+                     # sealed stages verified on part of their plan (``verify.sealed_plan``): read with care
+                     "incomplete": sorted(stage for stage, body in view["verification"]["sealed"].items()
+                                          if body.get("complete") is False),
                      "gains": verified_gains(view)},
         "adoption_gains": [item.get("delta") for item in view["adoptions"]],
         "ended_early": bool(view.get("ended_early")),
         "error": (view.get("error") or "")[:300] or None,
+        **extra,
     }
 
 
-__all__ = ["EVENT_KINDS", "SCORED_STATUSES", "START", "evolver_sessions", "fold", "summary"]
+__all__ = ["EVENT_KINDS", "SCORED_STATUSES", "START", "evolver_sessions", "fold", "spending", "summary"]

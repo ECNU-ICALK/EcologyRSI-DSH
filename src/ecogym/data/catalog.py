@@ -52,8 +52,13 @@ def dataset_dir(spec: DatasetSpec, root: Path | None = None) -> Path:
     return (root or data_root()) / spec.path
 
 
-def _cache_dir() -> Path:
+def cache_dir() -> Path:
+    """Where parsed frames are cached (whole datasets, sealed periods included)."""
+
     return Path(os.environ.get("ECOGYM_CACHE_DIR") or Path.home() / ".cache" / "ecogym").expanduser()
+
+
+_cache_dir = cache_dir
 
 
 def _cache_key(spec: DatasetSpec, directory: Path) -> str:
@@ -126,6 +131,7 @@ def load_frame(dataset: str | DatasetSpec, *, root: Path | None = None, cache: b
 
 __all__ = [
     "LOADER_VERSION",
+    "cache_dir",
     "data_root",
     "dataset_dir",
     "dataset_spec",

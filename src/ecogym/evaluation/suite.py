@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -101,6 +101,10 @@ class SuiteDecision:
     cells: dict[str, float]  # mean per-cell objective gain over the tasks that have the cell
     basis: str = "tasks_t"  # tasks_t | tasks_signed_rank | bootstrap
     task_confidence: float = 0.95  # of the per-task intervals
+    interval_target: str = "mean_task_gain"
+    scope: str = "observed_task_suite"
+    groups: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    horizons: dict[int, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -212,6 +216,8 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
     columns = np.arange(resamples)[:, None]
     draws, verdicts = [], []
     cell_gains: dict[str, list[float]] = {}
+    group_gains: dict[str, list[float]] = {}
+    horizon_gains: dict[int, list[float]] = {}
     for pair in pairs:
         _check(pair)
         blocks = pair.candidate[0].sums().blocks
@@ -227,6 +233,7 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
         point_c = float(np.mean([item.score() for item in pair.candidate]))
         point_i = float(np.mean([item.score() for item in pair.incumbent]))
         delta = point_c - point_i
+        group_gains.setdefault(pair.group or pair.task, []).append(delta)
         if high < 0.0 and -delta > gates.task_cap:
             # one run per side: the interval holds day-block noise only, not the agent's run-to-run spread
             confirmed = min(len(pair.candidate), len(pair.incumbent)) >= VETO_REPLICATES
@@ -236,8 +243,15 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
         verdicts.append(TaskVerdict(pair.task, point_c, point_i, delta, (low, high),
                                     (len(pair.candidate), len(pair.incumbent)), passed, reason))
         before, after = _cells(pair.incumbent), _cells(pair.candidate)
-        for key in after.keys() & before.keys():
-            cell_gains.setdefault(key, []).append(after[key] - before[key])
+        stage = pair.candidate[0].stage
+        by_horizon: dict[int, list[tuple[float, float]]] = {}
+        for cell, weight in zip(stage.cells, stage.weights, strict=True):
+            gain = after[cell.key] - before[cell.key]
+            cell_gains.setdefault(cell.key, []).append(gain)
+            by_horizon.setdefault(cell.horizon, []).append((gain, float(weight)))
+        for horizon, values in by_horizon.items():
+            horizon_gains.setdefault(horizon, []).append(
+                sum(gain * weight for gain, weight in values) / sum(weight for _, weight in values))
     gains = np.array([verdict.delta for verdict in verdicts])
     delta = float(gains.mean())
     if basis == "tasks_t":
@@ -250,16 +264,25 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
         overall = np.sort(np.stack(draws)[picks, columns].mean(axis=1))
         interval = (percentile(overall, tail), percentile(overall, 1.0 - tail))
     failed = [verdict.task for verdict in verdicts if not verdict.passed]
+    horizons = {horizon: float(np.mean(values)) for horizon, values in sorted(horizon_gains.items())}
+    degraded = [str(horizon) for horizon, cap in gates.max_horizon_loss
+                if horizon not in horizons or horizons[horizon] < -cap]
     if delta <= gates.min_delta:
         adopted, reason = False, "below_practical_delta"
     elif interval[0] <= 0.0:
         adopted, reason = False, "interval_crosses_zero"
     elif failed:
         adopted, reason = False, "task_regression:" + ",".join(failed)
+    elif degraded:
+        adopted, reason = False, "horizon_regression:" + ",".join(degraded)
     else:
         adopted, reason = True, "improved"
     cells = {key: float(np.mean(values)) for key, values in sorted(cell_gains.items())}
-    return SuiteDecision(adopted, reason, delta, interval, level, tuple(verdicts), cells, basis, gates.confidence)
+    groups = {key: {"tasks": len(values), "delta": float(np.mean(values))}
+              for key, values in sorted(group_gains.items())}
+    interval_target = "hodges_lehmann_task_gain" if basis == "tasks_signed_rank" else "mean_task_gain"
+    return SuiteDecision(adopted, reason, delta, interval, level, tuple(verdicts), cells, basis, gates.confidence,
+                         interval_target=interval_target, groups=groups, horizons=horizons)
 
 
 __all__ = ["SuiteDecision", "TaskPair", "TaskVerdict", "adjusted_confidence", "compare_suite", "signed_rank_critical",

@@ -464,7 +464,7 @@ def cmd_episode_run(args: argparse.Namespace) -> int:
     from .episodes.runner import EpisodeConfig, run_episode
 
     config = EpisodeConfig(task=args.task, harness=args.harness, minutes=args.minutes, tokens=args.tokens,
-                           model=args.model, label=args.label, keep=args.keep)
+                           model=args.model, label=args.label, keep=args.keep, local_selection=args.local_selection)
     print(f"episode on {args.task} with harness {args.harness}, {args.minutes:g} min; this runs the agent end to end")
     result = run_episode(config, args.ledger)
     if args.json:
@@ -639,11 +639,6 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
         with Ledger(args.ledger) as ledger:
             run_id = _match(ledger, args.resume, "evolve_started", "evo:")
             config = EvolveConfig.from_dict(fold(ledger.events(run_id))["config"])
-        try:  # recorded before it starts, so no other process continues it too
-            claim_resume(args.ledger, run_id, by="cli", force=args.force)
-        except (ValueError, RunBusy, LedgerConflict) as error:
-            raise SystemExit(f"{error}" + ("; pass --force if it is not" if isinstance(error, RunBusy)
-                                           else "")) from None
     else:
         if not args.suite:
             raise SystemExit("evolve run needs --suite (or --resume RUN)")
@@ -656,8 +651,16 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
                               evolver_tokens=args.evolver_tokens, evolver_model=args.evolver_model,
                               concurrency=args.concurrency, retries=args.retries,
                               outage_minutes=args.outage_minutes, auto_resume=args.auto_resume,
-                              check_adoptions=not args.no_check_adoptions)
+                              check_adoptions=args.check_adoptions, method_research=args.method_research,
+                              method_registry=args.method_registry or os.environ.get("ECOGYM_METHOD_REGISTRY"),
+                              local_selection=args.local_selection)
     evolution = Evolution(config, args.ledger, on_event=None if args.json else _progress)
+    if run_id is not None:
+        try:  # claim only after checking the environment that will resume it
+            claim_resume(args.ledger, run_id, by="cli", force=args.force)
+        except (ValueError, RunBusy, LedgerConflict) as error:
+            raise SystemExit(f"{error}" + ("; pass --force if it is not" if isinstance(error, RunBusy)
+                                           else "")) from None
     run_id = run_id or evolution.start(label=args.label)
     first, later = config.episodes_per_round(len(evolution.tasks))
     if not args.json:
@@ -672,16 +675,30 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
         _print_json({"run_id": run_id, **result})
         return 0
     print(f"\n{run_id} finished: seed {result['seed'][:12]} -> final {result['final'][:12]}, "
-          f"{result['adoptions']} adoption(s), {result['episodes']} episodes, {result['tokens']:,} tokens")
+          f"{result['adoptions']} adoption(s), {result['episodes']} episodes compared "
+          f"({result.get('attempts', result['episodes'])} started), {result['tokens']:,} tokens spent")
     print(f"next: ecogym evolve verify {run_id} --holdout")
+    return 0
+
+
+def cmd_method_register(args: argparse.Namespace) -> int:
+    from .evolution.methods import MethodRegistry
+
+    method = MethodRegistry(args.registry).approve(
+        args.method_id, args.program, source=args.source, license=args.license, revision=args.revision,
+        summary=args.summary)
+    _print_json(method.describe())
     return 0
 
 
 def cmd_evolve_list(args: argparse.Namespace) -> int:
     from .evolution import fold, summary
+    from .evolution.fold import spending
 
     with Ledger(args.ledger) as ledger:
-        runs = [summary(fold(ledger.events(run_id))) for run_id in ledger.runs(first="evolve_started")]
+        views = {run_id: fold(ledger.events(run_id)) for run_id in ledger.runs(first="evolve_started")}
+        spent = spending(ledger, views)
+        runs = [summary(view, spent[run_id]) for run_id, view in views.items()]
     if args.json:
         _print_json(runs)
         return 0
@@ -697,6 +714,7 @@ def cmd_evolve_list(args: argparse.Namespace) -> int:
 
 def cmd_evolve_show(args: argparse.Namespace) -> int:
     from .evolution import fold
+    from .evolution.loop import spent_by
 
     with Ledger(args.ledger) as ledger:
         view = fold(ledger.events(_match(ledger, args.run, "evolve_started", "evo:")))
@@ -734,7 +752,16 @@ def cmd_evolve_show(args: argparse.Namespace) -> int:
             means = ", ".join(f"{key} {body['means'][key]:+.4f}" for key in ("seed", "final")
                               if body["means"].get(key) is not None)
             gain = f"; final - seed {decision['delta']:+.4f} -> {decision['reason']}" if decision else ""
-            print(f"\nverified on {name}: {means}{gain}")
+            partial = f" (incomplete: {_missing(body.get('missing'))})" if body.get("complete") is False else ""
+            print(f"\nverified on {name}: {means}{gain}{partial}")
+    with Ledger(args.ledger) as ledger:
+        spent = spent_by(ledger, view)
+    print(f"\nspent: {spent['tokens']:,} tokens ({spent['metered_tokens']:,} metered) on "
+          f"{spent['episodes']['attempts']} episode attempts, {spent['verification']['attempts']} holdout episodes and "
+          f"{spent['evolver']['sessions']} evolver sessions"
+          + (f"; {spent['episodes']['unfinished'] + spent['verification']['unfinished']} attempts without a "
+             "recorded end are not counted" if spent['episodes']['unfinished'] + spent['verification']['unfinished']
+             else ""))
     return 0
 
 
@@ -762,7 +789,18 @@ def cmd_evolve_verify(args: argparse.Namespace) -> int:
     if decision:
         low, high = decision["interval"]
         print(f"  final - seed: {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}] -> {decision['reason']}")
+    if body.get("complete") is False:
+        print(f"  incomplete: {_missing(body.get('missing'))}; the result covers the judged tasks only")
     return 0
+
+
+def _missing(items: list[dict[str, Any]] | None) -> str:
+    """What a sealed verification or check could not judge, by reason (``verify.sealed_plan``)."""
+
+    counts: dict[str, int] = {}
+    for item in items or []:
+        counts[item.get("reason", "?")] = counts.get(item.get("reason", "?"), 0) + 1
+    return ", ".join(f"{count} {reason}" for reason, count in counts.items()) or "nothing listed"
 
 
 def _adoption_check(body: dict[str, Any]) -> str:
@@ -778,7 +816,8 @@ def _adoption_check(body: dict[str, Any]) -> str:
     better = sum(1 for item in tasks if (item.get("delta") or 0) > 0)
     low, high = decision["interval"]
     return (f"check on {stage}: adopted - replaced {decision['delta']:+.4f} [{low:+.4f}, {high:+.4f}], "
-            f"better on {better}/{len(tasks)} tasks")
+            f"better on {better}/{len(tasks)} tasks"
+            + (f" (incomplete: {_missing(body.get('missing'))})" if body.get("complete") is False else ""))
 
 
 def _not_running(view: dict[str, Any], force: bool) -> None:
@@ -917,6 +956,8 @@ def cmd_expert_note(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .episodes.tools import BEST_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES
+
     parser = argparse.ArgumentParser(prog="ecogym", description="Ecological forecasting training ground")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -1019,6 +1060,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="override the harness model: <provider>/<model> (see `ecogym models`) or a "
                                   "DeepSeek model id")
     run_episode.add_argument("--label", default="")
+    run_episode.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=BEST_LOCAL_SELECTION)
     run_episode.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
     episode_command("list", cmd_episode_list, "episodes in the ledger")
     episode_command("show", cmd_episode_show, "an episode's events").add_argument("episode")
@@ -1052,6 +1094,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--evolver-minutes", type=float, default=30.0)
     start.add_argument("--evolver-tokens", type=int, default=4_000_000)
     start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
+    start.add_argument("--method-research", choices=("internal", "supplied", "autonomous"), default="autonomous",
+                       help="investigate external methods, use supplied methods, or use internal evidence")
+    start.add_argument("--method-registry", help="host-approved method directory (or ECOGYM_METHOD_REGISTRY)")
+    start.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=BEST_LOCAL_SELECTION)
     start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
     start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
     start.add_argument("--outage-minutes", type=float, default=120.0,
@@ -1059,8 +1105,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--auto-resume", action="store_true",
                        help="let the service (ecogym serve, the DSH panel) resume the run if it stops for an outage "
                             "or this process dies (off by default here; on by default for runs the panel starts)")
-    start.add_argument("--no-check-adoptions", action="store_true",
-                       help="do not check each adoption on the training tasks' sealed validation period")
+    start.add_argument("--check-adoptions", action=argparse.BooleanOptionalAction, default=False,
+                       help="check each adoption on the training tasks' sealed validation period (off by default)")
     start.add_argument("--force", action="store_true", help="--resume even though the ledger says it is running")
     start.add_argument("--label", default="")
     evolve_command("list", cmd_evolve_list, "evolution runs in the ledger")
@@ -1079,6 +1125,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "check each adoption not checked yet on the training tasks' sealed validation period")
     recheck.add_argument("run")
     recheck.add_argument("--force", action="store_true", help="even though the ledger says it is running")
+
+    register_method = evolves.add_parser("register-method", help="approve a reviewed local method implementation")
+    register_method.set_defaults(handler=cmd_method_register)
+    register_method.add_argument("--registry", type=Path, required=True)
+    register_method.add_argument("method_id")
+    register_method.add_argument("program", type=Path, help="reviewed directory containing predictor.py")
+    register_method.add_argument("--source", required=True, help="canonical public source URL")
+    register_method.add_argument("--license", required=True)
+    register_method.add_argument("--revision", default="")
+    register_method.add_argument("--summary", default="")
 
     harness = commands.add_parser("harness", help="inspect harness versions")
     harnesses = harness.add_subparsers(dest="harness_command", required=True)

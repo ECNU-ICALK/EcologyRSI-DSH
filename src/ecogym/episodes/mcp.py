@@ -11,6 +11,12 @@ the tool runs, then the reply. DSH's client fetches with Node's defaults, which
 give up on a response whose headers take five minutes; a template screen can
 take longer (2026-11-05: 378 and 479 s, both reported to the evolver as "fetch
 failed", and the evolver spent its whole session waiting).
+
+``stop`` ends the session's tool calls before its record is sealed: no new call
+is taken, and calls still running (a submission being judged when the agent was
+stopped) are waited for, up to ``DRAIN_SECONDS``; the session's owner cancels
+their work first (``run_agent``'s ``on_close``), so nothing a tool does lands
+after the session's submissions, events and logs are final.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from ..kernel.canonical import jsonable
 
 PROTOCOL_VERSION = "2025-06-18"
 KEEPALIVE_SECONDS = 15.0  # a streamed tool call sends a comment this often while it runs
+DRAIN_SECONDS = 30.0  # how long ``stop`` waits for running tool calls (their judging is cancelled first)
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -62,6 +69,10 @@ class McpServer:
         self.log = log
         self.session = uuid.uuid4().hex
         self._server: ThreadingHTTPServer | None = None
+        self._calls = threading.Condition()
+        self._running = 0  # tool calls in progress
+        self._closed = False
+        self.unsettled = 0  # tool calls still running when stop gave up waiting
 
     @property
     def port(self) -> int:
@@ -73,10 +84,20 @@ class McpServer:
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = DRAIN_SECONDS) -> int:
+        """Take no new tool call, wait (up to ``timeout``) for the running ones, then stop serving; the calls
+        still running at the end (``unsettled``)."""
+
+        end = time.monotonic() + timeout
+        with self._calls:
+            self._closed = True
+            while self._running and time.monotonic() < end:
+                self._calls.wait(min(0.5, max(0.0, end - time.monotonic())))
+            self.unsettled = self._running
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+        return self.unsettled
 
     def dispatch(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method, params, ident = message.get("method"), message.get("params") or {}, message.get("id")
@@ -98,6 +119,19 @@ class McpServer:
         return {"jsonrpc": "2.0", "id": ident, "result": result}
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        with self._calls:
+            if self._closed:
+                text = "the session has ended: no more tool calls"
+                return {"content": [{"type": "text", "text": text}], "isError": True}
+            self._running += 1
+        try:
+            return self._call(name, arguments)
+        finally:
+            with self._calls:
+                self._running -= 1
+                self._calls.notify_all()
+
+    def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         tool = self.tools.get(name)
         error = None
@@ -112,7 +146,7 @@ class McpServer:
             error = text = str(failure)
         except TypeError as failure:
             error = text = f"bad arguments for {name}: {failure}"
-        except Exception as failure:  # reported to the model and logged, never raised
+        except Exception as failure:  # reported to the model and logged, never raised (a cancelled judge too)
             error = text = f"{type(failure).__name__}: {failure}"
         if self.log is not None:
             self.log({"tool": name, "arguments": arguments, "error": error, "result": text[:20000],

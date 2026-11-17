@@ -2,14 +2,21 @@
 
 For stage S of a single-episode task the predictor is fitted on every row of
 the episode before S starts, then receives S one time step at a time (rows
-are dense; missing values are nulls). After each eligible origin of S it is
-asked for its forecasts, so it can never see a value later than the origin.
+are dense; missing values are nulls). After each row of S it is asked for its
+forecasts, regardless of whether that origin has the future labels for scoring.
 Scores are the bench's own: per-cell skill against the fit-selected naive
 baseline on S's eligible origins, -1 for missing forecasts, forecasts clipped
 to the targets' physical bounds, a day-block bootstrap interval.
 
 The predictor runs in the program sandbox (no network, reads only its own
 directory); hidden values exist only in this process and the pipe.
+
+Every run gets a fresh copy of the program (``run_predictor``): what a run
+writes into its directory never reaches the stored program, so a program
+judged again later (a sealed check, a re-judged submission) is byte for byte
+the one its digest names. A watchdog holds the run to its total time and to
+``cancel`` even where the host blocks writing to a program that stopped
+reading its input: it kills the program's whole process group.
 """
 
 from __future__ import annotations
@@ -17,9 +24,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import queue
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -35,9 +45,14 @@ from ..evaluation.harness import Bench, Evaluation, StageData
 from ..protocol.views import SealedAccess
 from ..solvers.base import Genome
 from .agent import Cancelled
-from .sandbox import Runtime, confine, program_profile, thread_limits
+from .sandbox import Runtime, confine, program_profile, scratch_root, thread_limits
 
+JUDGE_PROTOCOL = "causal_stream/2"
 RUNNER = "_ecogym_runner.py"
+WRITE_GRACE = 5.0  # seconds past the total deadline before the watchdog kills a program the host cannot reach
+CLOSE_SECONDS = 10.0  # a finished run's program gets this long to exit after "end"
+REPLY_LIMIT = 1_000_000  # bytes of one reply line; longer ones are an error
+REPLY_QUEUE = 64  # replies read ahead of the judge; a program that floods its output waits
 # A judged program's numeric threads: fixed, so no score depends on how hot the machine may run. One: these
 # programs fit small models, and with two a template's judging took 1.4–1.8 times as long and 3.6–4.6 times the
 # CPU (waiting OpenMP threads spin), for the same score to the last digit (2026-11-05, the 2fb9cb template, two
@@ -63,7 +78,7 @@ class Stream:
     fit_values: np.ndarray
     time: np.ndarray
     values: np.ndarray
-    ask: np.ndarray  # stream positions of the stage's eligible origins, in order
+    ask: np.ndarray  # stream positions scored by the host, never sent to the predictor
 
 
 def episode_of(bench: Bench) -> str:
@@ -143,17 +158,54 @@ class _Program:
         self._stderr = stderr.open("wb")
         self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self._stderr, start_new_session=True)
-        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        threading.Thread(target=self._read, daemon=True).start()
+        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=REPLY_QUEUE)
+        self._closed = threading.Event()
+        threading.Thread(target=self._read, daemon=True, name="judge-reader").start()
+
+    def _put(self, item: dict[str, Any] | None) -> bool:
+        """Queue one reply, waiting while the queue is full; False once the run is over (nobody reads it)."""
+
+        while not self._closed.is_set():
+            try:
+                self.replies.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _read(self) -> None:
         assert self.process.stdout is not None
-        for line in self.process.stdout:
+        skipping = False  # inside a line longer than REPLY_LIMIT
+        while True:
             try:
-                self.replies.put(json.loads(line))
-            except json.JSONDecodeError:
-                self.replies.put({"op": "error", "message": "unreadable reply from the runner"})
-        self.replies.put(None)
+                chunk = self.process.stdout.readline(REPLY_LIMIT)
+            except (OSError, ValueError):  # the pipe was closed under a reader that a leftover process kept waiting
+                return
+            if not chunk:
+                break
+            complete = chunk.endswith(b"\n")
+            if skipping or (not complete and len(chunk) >= REPLY_LIMIT):
+                skipping = not complete
+                if not skipping and not self._put({"op": "error", "message": "an oversized reply from the runner"}):
+                    return
+                continue
+            try:
+                item = json.loads(chunk)
+            except ValueError:  # not JSON, or not UTF-8
+                item = None
+            if not isinstance(item, dict):
+                item = {"op": "error", "message": "unreadable reply from the runner"}
+            if not self._put(item):
+                return
+        self._put(None)
+
+    def kill(self) -> None:
+        """Kill the program and whatever it started in its process group (it runs in a session of its own)."""
+
+        with contextlib.suppress(OSError):
+            os.killpg(self.process.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError):
+            self.process.kill()
 
     def send(self, message: dict[str, Any]) -> bool:
         assert self.process.stdin is not None
@@ -179,12 +231,17 @@ class _Program:
 
     def close(self) -> None:
         try:
-            self.send({"op": "end"})
-            self.process.wait(timeout=10)
+            if self.process.poll() is None:
+                self.send({"op": "end"})
+                self.process.wait(timeout=CLOSE_SECONDS)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
+            pass
         finally:
+            if self.process.poll() is None:
+                self.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.process.wait(timeout=CLOSE_SECONDS)
+            self._closed.set()
             for pipe in (self.process.stdin, self.process.stdout):
                 if pipe is not None:
                     with contextlib.suppress(OSError):
@@ -192,28 +249,78 @@ class _Program:
             self._stderr.close()
 
 
+def _watch(program: _Program, limit: list[float], cancel: threading.Event | None, stopped: list[str],
+           over: threading.Event) -> None:
+    """Kill the program once ``cancel`` is set or the clock passes ``limit[0]``, whatever the judge is doing: a
+    write to a program that does not read its input blocks, and only the program's death ends that write."""
+
+    while not over.wait(0.2):
+        if cancel is not None and cancel.is_set():
+            stopped.append("cancelled")
+        elif time.monotonic() > limit[0]:
+            stopped.append("timeout")
+        else:
+            continue
+        program.kill()
+        return
+
+
+def _fresh_copy(source: Path, target: Path) -> None:
+    """Copy a program directory's regular files and folders (never links), so a run cannot change the original."""
+
+    target.mkdir(parents=True)
+    for directory, names, files in os.walk(source, followlinks=False):
+        here = Path(directory)
+        relative = here.relative_to(source)
+        for name in list(names):
+            if (here / name).is_symlink():
+                names.remove(name)
+            else:
+                (target / relative / name).mkdir()
+        for name in files:
+            path = here / name
+            if path.is_file() and not path.is_symlink():
+                shutil.copyfile(path, target / relative / name)
+
+
 def run_predictor(program_dir: Path, stream: Stream, spec: dict[str, Any], runtime: Runtime, *,
                   limits: Limits | None = None, step: str = "1h", cancel: threading.Event | None = None) -> Run:
     """Fit and stream one predictor; forecasts for origins it misses are NaN.
 
-    Setting ``cancel`` kills the predictor within a second and raises ``Cancelled``: a run cut short is
-    never scored.
+    The predictor runs in a fresh copy of ``program_dir``, removed afterwards; ``program_dir`` itself is never
+    written. Setting ``cancel`` kills the predictor within a second and raises ``Cancelled``: a run cut short is
+    never scored. The run is killed ``WRITE_GRACE`` seconds after its total time even where the host blocks on it.
     """
 
     limits = limits or Limits()
-    program_dir = program_dir.resolve()
-    shutil.copyfile(resources.files("ecogym.episodes").joinpath("predictor_runner.py"), program_dir / RUNNER)
-    (program_dir / "tmp").mkdir(exist_ok=True)
-    argv = confine(program_profile(program_dir, runtime), program_dir.parent / f"{program_dir.name}.sb",
-                   [str(runtime.python), "-I", "-B", RUNNER])
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(program_dir), "TMPDIR": str(program_dir / "tmp"), "LANG": "en_US.UTF-8",
+    work = Path(tempfile.mkdtemp(prefix="judge-", dir=scratch_root()))
+    try:
+        run_dir = work / "program"
+        _fresh_copy(Path(program_dir).resolve(), run_dir)
+        return _run_in(run_dir, work / "program.sb", stream, spec, runtime, limits=limits, step=step, cancel=cancel)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _run_in(run_dir: Path, profile: Path, stream: Stream, spec: dict[str, Any], runtime: Runtime, *,
+            limits: Limits, step: str, cancel: threading.Event | None) -> Run:
+    shutil.copyfile(resources.files("ecogym.episodes").joinpath("predictor_runner.py"), run_dir / RUNNER)
+    (run_dir / "tmp").mkdir(exist_ok=True)
+    # The allowlisted environment below sets PYTHONHASHSEED. -I would ignore it. Keep -I's safe import path
+    # and disabled user site explicitly, without inheriting any other PYTHON* environment variables.
+    argv = confine(program_profile(run_dir, runtime), profile, [str(runtime.python), "-P", "-s", "-B", RUNNER])
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(run_dir), "TMPDIR": str(run_dir / "tmp"), "LANG": "en_US.UTF-8",
            "PYTHONHASHSEED": "0", **thread_limits(JUDGE_THREADS)}
     targets, horizons = spec["targets"], spec["horizons"]
     predicted = np.full((len(targets), len(horizons), stream.ask.size), np.nan)
     errors: list[str] = []
     started = time.monotonic()
     deadline = started + limits.total_seconds
-    program = _Program(argv, program_dir, env, program_dir / "stderr.log")
+    stderr = profile.with_suffix(".stderr")
+    program = _Program(argv, run_dir, env, stderr)
+    limit, stopped, over = [deadline + WRITE_GRACE], [], threading.Event()
+    threading.Thread(target=_watch, args=(program, limit, cancel, stopped, over), daemon=True,
+                     name="judge-watchdog").start()
     status, fit_seconds = "ok", None
 
     def stop_if_cancelled() -> None:
@@ -231,51 +338,59 @@ def run_predictor(program_dir: Path, stream: Stream, spec: dict[str, Any], runti
             status = "fit_failed" if reply and reply.get("op") == "error" else "fit_timeout" if reply else "crashed"
             if reply and reply.get("op") == "error":
                 errors.append(str(reply.get("message")))
-            return Run(predicted, status, errors, None, time.monotonic() - started, _tail(program_dir))
-        fit_seconds = float(reply.get("seconds", 0.0))
-        asked = {int(position): index for index, position in enumerate(stream.ask)}
-        stamps = iso(stream.time, step)
-        rows = _rows(stream.values)
-        for position, row in enumerate(rows):
-            stop_if_cancelled()
-            if not program.send({"op": "row", "time": stamps[position], "values": row}):
-                status = "crashed"
-                break
-            if position not in asked:
-                continue
-            program.send({"op": "forecast"})
-            reply = program.reply(min(limits.forecast_seconds, deadline - time.monotonic()), cancel)
-            if reply is None:
-                status = "crashed"
-                break
-            if reply.get("op") == "timeout":
-                status = "timeout"
-                break
-            if reply.get("op") == "error":
-                errors.append(str(reply.get("message")))
-                if len(errors) > limits.max_error_share * stream.ask.size:
-                    status = "too_many_errors"
+        else:
+            fit_seconds = float(reply.get("seconds", 0.0))
+            asked = {int(position): index for index, position in enumerate(stream.ask)}
+            stamps = iso(stream.time, step)
+            rows = _rows(stream.values)
+            for position, row in enumerate(rows):
+                stop_if_cancelled()
+                if not program.send({"op": "row", "time": stamps[position], "values": row}):
+                    status = "crashed"
                     break
-                continue
-            values = reply.get("values") or {}
-            for t, target in enumerate(targets):
-                for h, value in enumerate((values.get(target) or [])[: len(horizons)]):
-                    if value is not None:
-                        predicted[t, h, asked[position]] = float(value)
-        stop_if_cancelled()  # a cancel during the last forecast leaves it missing: not a result either
+                program.send({"op": "forecast"})
+                reply = program.reply(min(limits.forecast_seconds, deadline - time.monotonic()), cancel)
+                if reply is None:
+                    status = "crashed"
+                    break
+                if reply.get("op") == "timeout":
+                    status = "timeout"
+                    break
+                if reply.get("op") == "error":
+                    errors.append(str(reply.get("message")))
+                    if len(errors) > limits.max_error_share * stream.time.size:
+                        status = "too_many_errors"
+                        break
+                    continue
+                if position not in asked:
+                    continue
+                values = reply.get("values") if isinstance(reply.get("values"), dict) else {}
+                for t, target in enumerate(targets):
+                    found = values.get(target)
+                    for h, value in enumerate(found[: len(horizons)] if isinstance(found, list) else []):
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            predicted[t, h, asked[position]] = float(value)
+            stop_if_cancelled()  # a cancel during the last forecast leaves it missing: not a result either
     finally:
         if program.process.poll() is None and status in ("timeout", "too_many_errors", "fit_timeout", "cancelled"):
-            program.process.kill()
+            program.kill()
+        limit[0] = min(limit[0], time.monotonic() + CLOSE_SECONDS + WRITE_GRACE)  # closing is bounded too
         program.close()
-    return Run(predicted, status, errors[:20], fit_seconds, time.monotonic() - started, _tail(program_dir))
+        over.set()
+    if stopped and status not in ("ok", "cancelled"):  # the watchdog ended it: say why, not "crashed"
+        status = "cancelled" if stopped[0] == "cancelled" else "fit_timeout" if fit_seconds is None else "timeout"
+    if status == "cancelled":
+        raise Cancelled("judging was cancelled")
+    return Run(predicted, status, errors[:20], fit_seconds, time.monotonic() - started, _tail(stderr))
 
 
-def _tail(program_dir: Path, limit: int = 4000) -> str:
-    path = program_dir / "stderr.log"
-    if not path.exists():
+def _tail(path: Path, limit: int = 4000) -> str:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - limit))
+            return stream.read(limit).decode("utf-8", "replace")
+    except FileNotFoundError:
         return ""
-    data = path.read_bytes()
-    return data[-limit:].decode("utf-8", "replace")
 
 
 SUBMISSION = "submission@1"
@@ -326,6 +441,7 @@ def report_of(bench: Bench, evaluation: Evaluation, run: Run | None) -> dict[str
     low, high = objective_interval(evaluation, None, bench.task.gates, {"judge": stage})
     return {
         "stage": stage,
+        "judge_protocol": JUDGE_PROTOCOL,
         "status": run.status if run is not None else "no_program",
         "origins": int(evaluation.stage.size),
         "score": evaluation.score(),
@@ -353,8 +469,9 @@ def judge_program(bench: Bench, program_dir: Path, stage: str, runtime: Runtime,
 
 
 def judge(bench: Bench, program_dir: Path, stage: str, runtime: Runtime, *, limits: Limits | None = None,
-          sealed: SealedAccess | None = None, references: bool = True) -> dict[str, Any]:
-    report, _ = judge_program(bench, program_dir, stage, runtime, limits=limits, sealed=sealed)
+          sealed: SealedAccess | None = None, references: bool = True,
+          cancel: threading.Event | None = None) -> dict[str, Any]:
+    report, _ = judge_program(bench, program_dir, stage, runtime, limits=limits, sealed=sealed, cancel=cancel)
     if references and sealed is None:
         report["references"] = reference_scores(bench, stage)
     return report
@@ -406,6 +523,6 @@ def reference_scores(bench: Bench, stage: str) -> dict[str, float]:
     return scores
 
 
-__all__ = ["SUBMISSION", "Limits", "Run", "Stream", "average", "file_digest", "judge", "judge_program",
-           "load_predictions", "missing", "predictor_spec", "reference_scores", "report_of", "run_predictor",
-           "save_predictions", "score", "stage_stream", "timestamps", "visible_columns"]
+__all__ = ["JUDGE_PROTOCOL", "SUBMISSION", "Limits", "Run", "Stream", "average", "file_digest", "judge",
+           "judge_program", "load_predictions", "missing", "predictor_spec", "reference_scores", "report_of",
+           "run_predictor", "save_predictions", "score", "stage_stream", "timestamps", "visible_columns"]

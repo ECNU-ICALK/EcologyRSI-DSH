@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS events (
     hash TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS events_by_run ON events (run_id, seq);
+CREATE INDEX IF NOT EXISTS episodes_by_evolution ON events (
+    json_extract(body, '$.context.evolution'), json_extract(body, '$.context.generation'), seq
+) WHERE kind = 'episode_started';
 CREATE TABLE IF NOT EXISTS exposures (
     key TEXT PRIMARY KEY,
     task TEXT NOT NULL,
@@ -154,6 +157,24 @@ class Ledger:
         row = self._db.execute("SELECT seq, run_id, kind, at, body, hash FROM events WHERE run_id = ? ORDER BY seq "
                                "LIMIT 1", (run_id,)).fetchone()
         return None if row is None else Event(row[0], row[1], row[2], row[3], json.loads(row[4]), row[5])
+
+    def evolution_episode_events(self, runs: Sequence[str], *, kinds: Sequence[str],
+                                 generation: int | None = None) -> list[Event]:
+        """Read the requested events of episodes belonging to the selected evolution runs."""
+
+        if not runs or not kinds:
+            return []
+        run_args = ", ".join("?" for _ in runs)
+        kind_args = ", ".join("?" for _ in kinds)
+        filters = "" if generation is None else " AND json_extract(start.body, '$.context.generation') = ?"
+        args = (*runs, *kinds) if generation is None else (*runs, *kinds, generation)
+        rows = self._db.execute(
+            "SELECT event.seq, event.run_id, event.kind, event.at, event.body, event.hash "
+            "FROM events AS start JOIN events AS event ON event.run_id = start.run_id "
+            f"WHERE start.kind = 'episode_started' AND json_extract(start.body, '$.context.evolution') IN ({run_args}) "
+            f"AND event.kind IN ({kind_args}){filters} ORDER BY event.seq", args)
+        return [Event(seq, run_id, kind, at, json.loads(body), event_hash)
+                for seq, run_id, kind, at, body, event_hash in rows]
 
     def last_seq(self) -> int:
         """The sequence number of the newest event (0 for an empty ledger)."""

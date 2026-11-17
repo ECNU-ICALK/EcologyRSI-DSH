@@ -5,7 +5,7 @@ The security claims phase 1 must prove, as tests:
 * the agent never holds the real API key (the gateway injects it, meters tokens,
   enforces the deadline, and never logs the key);
 * a submitted predictor is fitted and streamed one row at a time, so it can see
-  no value at or after the origin it forecasts, and the fit sees nothing from the
+  no value after the origin it forecasts, and the fit sees nothing from the
   scored stage;
 * the exported workspace holds no row at or after the scored stage;
 * under the sandbox, a process cannot read the credentials file or the dataset
@@ -21,13 +21,17 @@ import time
 import unittest
 from importlib import resources
 from pathlib import Path
+from unittest.mock import patch
 
+from ecogym.episodes import judge as judge_module
 from ecogym.episodes import sandbox as sbx
 from ecogym.episodes.gateway import Gateway, tokens_of, usage_of
-from ecogym.episodes.judge import Limits, iso, judge, predictor_spec, run_predictor, stage_stream
+from ecogym.episodes.judge import Limits, iso, judge, predictor_spec, stage_stream
 from ecogym.episodes.mcp import McpServer, Tool
-from ecogym.episodes.trajectory import summarize
+from ecogym.episodes.tools import EpisodeTools, snapshot, starting_program
+from ecogym.episodes.trajectory import extract_submission, store, summarize
 from ecogym.episodes.workspace import LOCAL_STAGE, SCORED_STAGE, boundaries, export_visible
+from ecogym.kernel import clock
 
 from .helpers import synthetic_bench, synthetic_frame
 
@@ -39,7 +43,7 @@ HAVE_SANDBOX = sbx.available() and RUNTIME is not None
 requires_sandbox = unittest.skipUnless(HAVE_SANDBOX, "agent runtime or sandbox-exec not available")
 
 LEAKAGE_PREDICTOR = """
-import json, os
+import json, os, sys
 LOG = os.path.join(os.getcwd(), "seen.jsonl")
 
 class Predictor:
@@ -53,6 +57,8 @@ class Predictor:
             handle.write(json.dumps({"op": op, "n": int(len(history)), "last": last}) + "\\n")
 
     def fit(self, history):
+        assert sys.flags.hash_randomization == 0
+        assert sys.flags.safe_path and sys.flags.no_user_site
         self._log("fit", history)
 
     def forecast(self, history):
@@ -316,14 +322,17 @@ class JudgeStreamingTests(unittest.TestCase):
         self.assertAlmostEqual(report["coverage"], 1.0, places=6)
         self.assertLess(abs(report["score"]), 1e-6)
 
-    def test_predictor_never_sees_the_origin_or_later(self):
+    def test_forecast_schedule_reveals_no_future_values_or_scoring_mask(self):
         bench = self._bench()
         stream, _ = stage_stream(bench, SCORED_STAGE)
         with tempfile.TemporaryDirectory(dir=sbx.scratch_root()) as tmp:
             program = Path(tmp) / "program"
             program.mkdir()
             (program / "predictor.py").write_text(LEAKAGE_PREDICTOR, encoding="utf-8")
-            run = run_predictor(program, stream, predictor_spec(bench), RUNTIME, limits=Limits())
+            # run_predictor runs a fresh copy and discards what the run writes; the protocol runs in place here so
+            # the predictor's own log of what it saw survives the run
+            run = judge_module._run_in(program, Path(tmp) / "program.sb", stream, predictor_spec(bench), RUNTIME,
+                                       limits=Limits(), step=bench.frame.step, cancel=None)
             self.assertEqual(run.status, "ok", run.stderr)
             seen = [json.loads(line) for line in (program / "seen.jsonl").read_text().splitlines()]
         fits = [entry for entry in seen if entry["op"] == "fit"]
@@ -334,10 +343,46 @@ class JudgeStreamingTests(unittest.TestCase):
         self.assertEqual(fits[0]["n"], fit_rows)
         self.assertEqual(fits[0]["last"], iso(stream.fit_time[-1:], bench.frame.step)[0])
         # each forecast sees every row up to and including its origin, and none after
-        origins = iso(stream.time[stream.ask], bench.frame.step)
+        self.assertLess(stream.ask.size, stream.time.size)
+        origins = iso(stream.time, bench.frame.step)
         self.assertEqual([entry["last"] for entry in forecasts], origins)
         self.assertEqual([entry["n"] for entry in forecasts],
-                         [fit_rows + int(position) + 1 for position in stream.ask])
+                         list(range(fit_rows + 1, fit_rows + 1 + stream.time.size)))
+        self.assertEqual(run.predicted.shape[-1], stream.ask.size)
+
+
+@requires_sandbox
+class SubmissionTests(unittest.TestCase):
+    def test_archive_and_score_use_the_locally_judged_snapshot(self):
+        bench = synthetic_bench()
+        with tempfile.TemporaryDirectory(dir=sbx.scratch_root()) as tmp:
+            base = Path(tmp)
+            episode, programs, trajectory = (base / name for name in ("episode", "programs", "trajectory"))
+            source = episode / "work" / "submission"
+            source.mkdir(parents=True)
+            original = resources.files("ecogym.harness").joinpath("seed/template/predictor.py").read_bytes()
+            (source / "predictor.py").write_bytes(original)
+            start = starting_program(bench, episode, RUNTIME, Limits(), programs=programs)
+            self.assertEqual(start["local"]["status"], "ok")
+            self.assertTrue(Path(start["program"]).is_relative_to(programs))
+            tools = EpisodeTools(bench=bench, root=episode, programs=programs, runtime=RUNTIME, limits=Limits(),
+                                 deadline=clock.now() + 60, usage=dict, event=lambda *_: None)
+            self.assertTrue(tools.submit()["accepted"])
+            (source / "predictor.py").write_text("raise RuntimeError('unsubmitted edit')\n", encoding="utf-8")
+            tools.close()
+            final = tools.final()
+            self.assertTrue(Path(final["program"]).is_relative_to(programs))
+            (episode / "home").mkdir()
+            with patch("ecogym.episodes.trajectory.sessions", side_effect=ValueError("bad DSH history")):
+                archive = store(episode, trajectory, base / "node", programs=programs)
+            self.assertIn("workspace.tar.gz", archive["files"])
+            self.assertIn("bad DSH history", archive["summary"]["error"])
+            replay = extract_submission(trajectory, final, base / "replay")
+            self.assertEqual((replay / "predictor.py").read_bytes(), original)
+            initial = extract_submission(trajectory, start, base / "initial")
+            self.assertEqual((initial / "predictor.py").read_bytes(), original)
+            report = judge(bench, Path(final["program"]), SCORED_STAGE, RUNTIME, references=False)
+            self.assertEqual(report["status"], "ok")
 
 
 @requires_sandbox
@@ -378,6 +423,21 @@ class SandboxTests(unittest.TestCase):
 
 
 class TrajectorySummaryTests(unittest.TestCase):
+    def test_legacy_automatic_submission_is_recovered_from_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "episode"
+            source = root / "work" / "submission"
+            source.mkdir(parents=True)
+            original = b"class Predictor: pass\n"
+            (source / "predictor.py").write_bytes(original)
+            saved = Path(tmp) / "snapshot"
+            saved.mkdir()
+            scored = {"auto": True, "n": None, "digest": snapshot(source, saved)}
+            trajectory = Path(tmp) / "trajectory"
+            store(root, trajectory, None)
+            replay = extract_submission(trajectory, scored, Path(tmp) / "replay")
+            self.assertEqual((replay / "predictor.py").read_bytes(), original)
+
     def test_summary_counts_tokens_queries_and_subagents(self):
         parent = {"id": "root", "parent": None, "depth": 0, "events": [
             {"type": "assistant/message", "data": {"usage": {"inputTokens": 100, "outputTokens": 20,

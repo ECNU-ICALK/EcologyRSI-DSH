@@ -146,51 +146,88 @@ def submission_files(trajectory: Path, scored: dict[str, Any] | None, *, max_byt
     return files
 
 
+class ProgramMismatch(ValueError):
+    """A stored program is not the one its episode was scored with (its digest differs, or none was recorded)."""
+
+
 def extract_submission(trajectory: Path, scored: dict[str, Any] | None, target: Path) -> Path:
-    """Write the scored program into ``target`` (a fresh directory) for re-judging."""
+    """Write the scored program into ``target`` (a fresh directory) for re-judging.
+
+    ``target`` holds exactly the files the host's snapshot rule keeps (``tools.snapshot``), and only when their
+    digest is the one recorded when the episode was scored; ``ProgramMismatch`` otherwise. A program judged again
+    on a sealed period is then the very program behind the recorded score, whatever its stored copy went through.
+    """
+
+    from .tools import ToolError, snapshot  # the tools import the judge, which imports this module's users
 
     files = submission_files(trajectory, scored, max_bytes=MAX_PROGRAM_BYTES)
     if "predictor.py" not in files:
         raise FileNotFoundError(f"{trajectory}: the scored program is not in the stored workspace")
-    target.mkdir(parents=True, exist_ok=False)
-    for relative, data in files.items():
-        path = (target / relative).resolve()
-        if not path.is_relative_to(target.resolve()):
-            continue  # never write outside the target, whatever the archive says
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+    expected = (scored or {}).get("digest")
+    if not expected:
+        raise ProgramMismatch(f"{trajectory}: no digest was recorded for the scored program")
+    with tempfile.TemporaryDirectory(prefix="ecogym-replay-") as scratch:
+        source = Path(scratch) / "program"
+        for relative, data in files.items():
+            path = (source / relative).resolve()
+            if not path.is_relative_to(source.resolve()):
+                continue  # never write outside the scratch copy, whatever the archive says
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        target.mkdir(parents=True, exist_ok=False)
+        try:
+            found = snapshot(source, target)
+        except ToolError as error:
+            shutil.rmtree(target, ignore_errors=True)
+            raise ProgramMismatch(f"{trajectory}: the stored program breaks the snapshot rules: {error}") from None
+    if found != expected:
+        shutil.rmtree(target, ignore_errors=True)
+        raise ProgramMismatch(f"{trajectory}: the stored program's digest {found[:12]} is not the scored "
+                              f"program's {str(expected)[:12]}; it is not judged again")
     return target
 
 
-def store(root: Path, target: Path, node: Path | None) -> dict[str, Any]:
+def store(root: Path, target: Path, node: Path | None, *, programs: Path | None = None) -> dict[str, Any]:
     """Write the trajectory files into ``target``; return per-file digests and a session summary."""
 
     target.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {}
     if node is not None and (root / "home").is_dir():
-        found = sessions(root / "home", node)
-        summary = summarize(found)
-        with gzip.open(target / "dsh_sessions.jsonl.gz", "wt", encoding="utf-8") as stream:
-            for session in found:
-                for event in session["events"]:
-                    stream.write(json.dumps({"session": session["id"], "parent": session["parent"],
-                                             "depth": session["depth"], **event}, ensure_ascii=False) + "\n")
+        dsh_log = target / "dsh_sessions.jsonl.gz"
+        try:
+            found = sessions(root / "home", node)
+            summary = summarize(found)
+            with gzip.open(dsh_log, "wt", encoding="utf-8") as stream:
+                for session in found:
+                    for event in session["events"]:
+                        stream.write(json.dumps({"session": session["id"], "parent": session["parent"],
+                                                 "depth": session["depth"], **event}, ensure_ascii=False) + "\n")
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            dsh_log.unlink(missing_ok=True)
+            summary = {"error": f"{type(error).__name__}: {error}"}
     for name in ("llm_calls.jsonl", "mcp_calls.jsonl"):
         path = target / name
         if path.exists():
             with path.open("rb") as source, gzip.open(target / f"{name}.gz", "wb") as sink:
                 shutil.copyfileobj(source, sink)
             path.unlink()
-    with tarfile.open(target / "workspace.tar.gz", "w:gz") as archive:
-        work = root / "work"
-        for item in sorted(work.iterdir()) if work.is_dir() else []:
-            if item.name != "data":
-                archive.add(item, arcname=f"work/{item.name}", filter=_no_links)
-        for folder in ("submissions", "evals"):
-            if (root / folder).is_dir():
-                archive.add(root / folder, arcname=folder, filter=_no_links)
+    pending = target / "workspace.tar.gz.tmp"
+    try:
+        with tarfile.open(pending, "w:gz") as archive:
+            work = root / "work"
+            for item in sorted(work.iterdir()) if work.is_dir() else []:
+                if item.name != "data":
+                    archive.add(item, arcname=f"work/{item.name}", filter=_no_links)
+            for folder in ("submissions", "evals"):
+                source = (programs or root) / folder
+                if source.is_dir():
+                    archive.add(source, arcname=folder, filter=_no_links)
+        pending.replace(target / "workspace.tar.gz")
+    finally:
+        pending.unlink(missing_ok=True)
     files = {path.name: _digest(path) for path in sorted(target.iterdir()) if path.is_file()}
     return {"files": files, "summary": summary}
 
 
-__all__ = ["extract_submission", "session_events", "sessions", "store", "submission_files", "summarize"]
+__all__ = ["ProgramMismatch", "extract_submission", "session_events", "sessions", "store", "submission_files",
+           "summarize"]
