@@ -97,7 +97,11 @@ from .fold import EVENT_KINDS, SCORED_STATUSES, evolver_sessions, fold, spending
 
 PATCH_LIMIT = 60_000  # characters of unified diff kept per candidate in the ledger
 PUBLIC_REFERENCE_SECONDS = 120.0  # shared by all tasks in this optional development diagnostic
-TEMPLATE_ATTRIBUTION_SECONDS = 120.0  # shared across all fixed replays in one round
+# shared across all fixed replays in one round, split evenly between them. Scoring a program on model_selection
+# takes 49 s at the median and 85 s at the 90th percentile (400 scorings in the ledger, 2026-11-17); with one worker,
+# 120 s gave each replay less than the median once three were pending. Most rounds need few replays (an episode that
+# kept its template already scored it), and the budget is a cap, not a wait
+TEMPLATE_ATTRIBUTION_SECONDS = 600.0
 
 
 class RunStopped(RuntimeError):
