@@ -358,7 +358,13 @@ class EpisodeTools:
         elif replaces:
             verdict = f"已接受，满足替换条件，但已有本地成绩更好的提交。现在评分用{self.scored_text()}"
         else:
-            verdict = f"已接受，未达到本地替换条件。现在评分用{self.scored_text()}。"
+            gain = selection.get("delta")
+            small = (selection.get("reason") in ("below_margin", "overall_gain_below_margin")
+                     and isinstance(gain, (int, float)) and math.isfinite(gain))
+            verdict = ("已接受，未达到本地替换条件"
+                       + (f"：本地比起始程序 {gain:+.4f}，替换至少要高 {REPLACE_MARGIN:g}" if small else "")
+                       + f"。现在评分用{self.scored_text()}。"
+                       + ("本地检验期比隐藏期短得多，这么小的提升常常不能在隐藏期上成立。" if small and gain > 0 else ""))
         return {"n": number, "digest": digest[:12], "accepted": accepted, "replaces_start": replaces,
                 "verdict": verdict, "local_selection": selection, **summary}
 

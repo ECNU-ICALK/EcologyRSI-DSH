@@ -158,7 +158,8 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
                         else "在完成本地检验且覆盖完整的提交中，使用本地总分最高者。\n"))
     else:
         rule_line = (f"- **评分用哪个程序**：`submission/` 里原有的程序是起始程序，"
-                     f"其本地总分为 {start_local:+.4f}。{selection_rule_text(policy)}\n")
+                     f"其本地总分为 {start_local:+.4f}。{selection_rule_text(policy)}"
+                     "本地检验期比隐藏期短得多，本地只高一点的改动常常不能在隐藏期上成立。\n")
     return f"""# 任务：{task.title}
 
 ## 目标
@@ -188,6 +189,7 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 ## ecogym 工具（MCP）
 
 - `task_info`：剩余时间与 token、已提交的版本、最好的本地成绩、现在评分用哪个程序。
+- `classical_reference`：列出持久、季节朴素和任务登记的经典方法；填 `name` 试算一个，只返回本地检验期的汇总成绩。
 - `evaluate_local`：按裁判协议在本地检验期上运行 `submission/`，返回总分和逐格技能。
 - `submit`：保存当前 `submission/` 的快照并在本地检验期上运行；{rule}。
 - `note`：记录发现、经验、无效方向（kind = finding / lesson / dead_end）。

@@ -16,7 +16,7 @@ from ecogym.episodes.tools import (
     EpisodeTools,
     rolling_selection,
 )
-from ecogym.episodes.workspace import LOCAL_STAGE
+from ecogym.episodes.workspace import LOCAL_STAGE, task_brief
 from ecogym.evaluation.harness import Evaluation
 from ecogym.kernel import clock
 from ecogym.solvers import Genome
@@ -141,3 +141,31 @@ class LocalSelectionTests(unittest.TestCase):
                 self.assertEqual(tools.final()["n"], expected)
                 self.assertEqual(tools.task_info()["scored_now"], expected)
                 self.assertEqual(events[0][1]["local_selection"], evaluation["local_selection"])
+
+    def test_a_small_local_gain_hears_the_margin_and_the_short_window_caution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "work" / "submission"
+            program.mkdir(parents=True)
+            (program / "predictor.py").write_text("# snapshot fixture\n", encoding="utf-8")
+            start = {"local": {"score": 0.0}, "healthy": True, "evaluation": self.anchor}
+            tools = EpisodeTools(bench=self.bench, root=root, runtime=None, limits=Limits(),
+                                 deadline=clock.now() + 60, usage=dict, event=lambda *_: None, start=start)
+            small, worse = self.window_scores((0.01, 0.01, 0.01)), self.window_scores((-0.01, -0.01, -0.01))
+            with patch("ecogym.episodes.tools.judge_program",
+                       side_effect=[(self.report(x), x) for x in (small, worse)]):
+                gained, lost = tools.submit(), tools.submit()
+        for result in (gained, lost):
+            self.assertTrue(result["accepted"])
+            self.assertFalse(result["replaces_start"])
+            self.assertIn("替换至少要高 0.02", result["verdict"])
+            self.assertIn("现在评分用起始程序", result["verdict"])
+        self.assertIn("短得多", gained["verdict"])
+        self.assertNotIn("短得多", lost["verdict"])
+
+    def test_task_brief_keeps_the_short_local_window_caution(self) -> None:
+        brief = task_brief(self.bench, {"scored_days": 10}, minutes=8, tokens=1000, deadline=clock.now() + 60,
+                           limits=Limits(), start_local=0.05, selection_policy=BEST_LOCAL_SELECTION)
+        self.assertIn("本地总分为 +0.0500", brief)
+        self.assertIn("本地只高一点的改动常常不能在隐藏期上成立", brief)
+        self.assertIn("`classical_reference`", brief)
