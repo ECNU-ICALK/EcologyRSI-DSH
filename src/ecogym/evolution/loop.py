@@ -15,8 +15,9 @@ episodes each). Every later round:
    round under the suite's gates (``ecogym.evaluation.suite``), with
    the suite interval Bonferroni-adjusted for the number of candidates;
 4. the passing candidate with the largest gain becomes the incumbent;
-5. after an adoption, the programs of the new incumbent and of the version it
-   replaced are judged again on the training tasks' sealed validation period
+5. optionally (``check_adoptions``, off by default since 0.4.0), after an
+   adoption, the programs of the new incumbent and of the version it replaced
+   are judged again on the training tasks' sealed validation period
    (``verify.check_adoptions``): a run adopts small gains chosen on one hidden
    period, and this says how much of each holds on a period nobody saw.
    People read it; the evolver never does.
@@ -37,7 +38,12 @@ than being spent on the outage.
 Failed candidates stay in the record; later evolvers read them in
 ``archive.md``. All loop state is recomputed from the ledger at every round,
 so ``Evolution.run`` continues an interrupted run after its last finished
-round. ``round_started`` names the process that runs it (``owner``), so
+round. Each round's plan (``round_planned``: candidates, incumbent, expert
+guidance and the identity of the data, code and runtime) is recorded before
+its episodes run, so a resumed round keeps its candidates and reuses its
+verified episodes; when the data, code or runtime changed meanwhile, the same
+candidates run again, every episode, under a new plan that names the one it
+replaces. ``round_started`` names the process that runs it (``owner``), so
 another process can tell a live run from a dead one (``stale``). A stopped
 run can be ended where it is (``finish_run``), so its result can be verified.
 Holdout tasks and sealed stages are touched only by
@@ -725,9 +731,9 @@ class Evolution:
         plan = last.get("plan") if last.get("generation") == generation and not last["finished"] else None
         measurement = self._measurement()
         if plan:
-            if plan["measurement"] != measurement or plan["incumbent"] != incumbent.digest:
-                raise ValueError("the interrupted round's data or execution environment changed; "
-                                 "restore it to continue this round")
+            if plan["incumbent"] != incumbent.digest:
+                raise ValueError("the interrupted round was planned for another incumbent than the run's finished "
+                                 "rounds name; the ledger is inconsistent")
             snapshot = Snapshot(plan["expert_until"], plan["guidance"])
         else:
             with Ledger(self.ledger_path) as ledger:
@@ -739,6 +745,15 @@ class Evolution:
                                             **({"resume_plan": plan["id"]} if plan else {})})
         if plan:
             candidates = [{**item, "harness": resolve(item["digest"])} for item in plan["candidates"]]
+            if plan["measurement"] != measurement:
+                # the data, code or runtime changed while the round was interrupted (an upgrade, a new DSH): its
+                # episodes so far measured something else. The same candidates under the same expert guidance are
+                # measured again, every slot, under a new plan; nothing of the old one is reused, and its episodes
+                # stay in the ledger and in the run's cost.
+                plan = {**{key: value for key, value in plan.items() if key not in ("id", "replaces", "reason")},
+                        "measurement": measurement, "replaces": plan["id"], "reason": "environment_changed"}
+                plan["id"] = digest({"run": run_id, **plan})
+                self._log(run_id, "round_planned", plan)
         else:
             candidates = self._propose(run_id, generation, incumbent, view, state, snapshot) if generation else []
             plan = {"schema": "ecogym.round-plan/1", "generation": generation, "incumbent": incumbent.digest,

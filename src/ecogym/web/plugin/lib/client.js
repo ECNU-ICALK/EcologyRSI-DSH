@@ -1052,7 +1052,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const elsewhere = key === "elsewhere";
       const resume = confirmed({ title: "继续这次进化？", confirm: "继续运行", text: elsewhere
         ? "账本显示它仍在运行，但不是由这个后端运行的（可能在命令行里运行，也可能已经中断）。确认它已不在运行再继续，否则会重复运行。"
-        : "从中断的代继续。有冻结计划时复用已核验的回合，只补缺项。" }, "resume", { force: elsewhere }, "已继续运行");
+        : "从中断的代继续。有冻结计划时沿用它的候选，复用已核验的回合，只补缺项；数据、代码或运行环境变了时，这一代的回合全部重跑。" }, "resume", { force: elsewhere }, "已继续运行");
       const lastDone = lastAttempts(view).filter((round) => round.finished).pop();
       const left = lastDone ? (view.config?.generations ?? lastDone.generation) - lastDone.generation : 0;
       const finish = confirmed({ title: "就此结束这次进化？", confirm: "结束运行", text: lastDone ? `第 ${lastDone.generation} 代结束后的在任版本`
@@ -1955,7 +1955,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           + "采纳要同时满足：平均增益超过门槛、区间下限大于 0、没有任务可信变差。"));
     }
 
-    const unfinishedText = (view) => (view.status === "finished" ? "运行在这一代完成之前结束了，这一代不算数。" : "这一代没有完成。有冻结计划时，恢复后只补缺失的回合。");
+    const unfinishedText = (view) => (view.status === "finished" ? "运行在这一代完成之前结束了，这一代不算数。" : "这一代没有完成。有冻结计划时，恢复后只补缺失的回合；数据、代码或运行环境变了时全部重跑。");
 
     function Outcome({ view, round }) {
       if (!round.finished) return round.generation ? null : hint(view.active ? "这一代还在进行。" : unfinishedText(view));
