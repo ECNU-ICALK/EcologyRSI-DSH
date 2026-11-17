@@ -138,7 +138,8 @@ class VerificationTests(unittest.TestCase):
                                     "predictions_digest": verify.file_digest(artifact)} for episode in look.episodes]}
             return {"seed": {"train": result}}, {}, []
 
-        with patch.object(verify, "_seal_locked", side_effect=seal) as work:
+        with (patch.object(verify, "_seal_locked", side_effect=seal) as work, patch.object(verify, "_key_bench"),
+              patch.object(verify, "exposure_key", return_value="first-look")):
             validation = verify.verify_sealed(self.ledger, self.run, "validation")
             final_test = verify.verify_sealed(self.ledger, self.run, "final_test")
             (self.root / "validation.npz").write_text("changed")
@@ -204,6 +205,81 @@ class VerificationTests(unittest.TestCase):
         judge.assert_not_called()
         self.assertEqual(results, {"seed": {}})
         self.assertEqual(missing[0]["reason"], "prior_judge_protocol_differs")
+
+    def earlier_look(self, harness, episodes, *, key):
+        """A complete validation look another run took of ``harness`` with ``episodes``."""
+
+        artifact = self.root / f"earlier-{harness}.npz"
+        artifact.write_text("synthetic")
+        with Ledger(self.ledger) as db:
+            (look,), _ = verify._looks(db, [("final", harness, "train", episodes)])
+        self.append("sealed_task", {
+            "stage": "validation", "version": "final", "harness": harness, "task": "train", "exposure_key": key,
+            "conditions": look.conditions, "judge_protocol": verify.JUDGE_PROTOCOL, "plan": look.plan(),
+            "episodes": list(episodes), "complete": True,
+            "programs": [{"episode": episode, "predictions": str(artifact),
+                          "predictions_digest": verify.file_digest(artifact)} for episode in episodes]},
+            run="evo:earlier")
+
+    def test_a_version_an_earlier_run_judged_keeps_that_look(self):
+        """A run that starts from an earlier run's final version plans that version's recorded look: planning its
+        own programs would find the exposure taken (prior_exposure_differs) and never complete."""
+
+        self.start(final="seed", episodes=[self.episode(episode, "seed") for episode in ("ep:c", "ep:d")])
+        for episode in ("ep:a", "ep:b"):
+            self.episode(episode, "seed")
+        self.earlier_look("seed", ["ep:a", "ep:b"], key="same-exposure")
+        with (patch.object(verify, "_key_bench"), patch.object(verify, "_open"),
+              patch.object(verify, "exposure_key", return_value="same-exposure"),
+              patch.object(verify, "judge_program") as judge,
+              patch.object(verify, "_evaluations", return_value=(object(), object()))):
+            with Ledger(self.ledger) as db:
+                looks, missing = verify.sealed_plan(db, verify.fold(db.events(self.run)), self.suite, "validation")
+            body = verify.verify_sealed(self.ledger, self.run, "validation")
+        judge.assert_not_called()
+        self.assertEqual([look.episodes for look in looks], [("ep:a", "ep:b")])
+        self.assertEqual(missing, [])
+        self.assertTrue(body["complete"])
+        result = body["versions"]["seed"]["tasks"]["train"]
+        self.assertEqual((result["reused"], result["source_run"]), (True, "evo:earlier"))
+
+    def test_adoption_check_keeps_the_replaced_versions_earlier_look(self):
+        self.append("evolve_started", {"seed": {"digest": "seed"}, "suite": {"digest": "suite"},
+                                      "config": self.config.to_dict()})
+        self.append("round_started", {"generation": 0, "incumbent": "seed"})
+        self.append("episodes_finished", {"episodes": [self.episode(ep, "seed") for ep in ("ep:c", "ep:d")]})
+        self.append("round_finished", {"incumbent": "seed"})
+        self.append("round_started", {"generation": 1, "incumbent": "seed"})
+        self.append("candidate_proposed", {"generation": 1, "name": "a", "digest": "new"})
+        self.append("episodes_finished", {"episodes": [
+            *({**self.episode(ep, "new", role="candidate"), "role": "candidate", "candidate": "a"}
+              for ep in ("ep:e", "ep:f")),
+            *(self.episode(ep, "seed") for ep in ("ep:g", "ep:h"))]})
+        self.append("harness_adopted", {"generation": 1, "name": "a", "digest": "new", "delta": 0.01})
+        self.append("round_finished", {"generation": 1, "incumbent": "new", "adopted": "a"})
+        for episode in ("ep:a", "ep:b"):
+            self.episode(episode, "seed")
+        self.earlier_look("seed", ["ep:a", "ep:b"], key="exposure-seed")
+
+        def judge(_bench, program, *args, **kwargs):
+            return {"status": "ok", "score": 0.3, "interval": None, "coverage": 1, "origins": 1, "cells": []}, object()
+
+        with (patch.object(verify, "_key_bench"), patch.object(verify, "_open"),
+              patch.object(verify, "exposure_key", side_effect=lambda _, harness, *a, **kw: f"exposure-{harness}"),
+              patch.object(verify, "discover_runtime", return_value=None),
+              patch.object(verify, "_extract", side_effect=lambda _l, look, scratch: (
+                  [(episode, scratch / episode) for episode in look.episodes], [])),
+              patch.object(verify, "judge_program", side_effect=judge) as judged,
+              patch.object(verify, "save_predictions", side_effect=lambda path, *_: path.write_text("synthetic")),
+              patch.object(verify, "_evaluations", return_value=(object(), object())),
+              patch.object(verify, "_compare", return_value=None)):
+            body, = verify.check_adoptions(self.ledger, self.run)
+        self.assertNotIn("error", body)
+        self.assertEqual(body["missing"], [])
+        self.assertEqual(judged.call_count, 2)  # the adopted version's two programs; the replaced one is reused
+        self.assertEqual(body["versions"]["parent"]["tasks"]["train"]["source_run"], "evo:earlier")
+        self.assertEqual(verify.program_episodes(body["versions"]["parent"]["tasks"]["train"]), ["ep:a", "ep:b"])
+        self.assertEqual(verify.program_episodes(body["versions"]["adopted"]["tasks"]["train"]), ["ep:e", "ep:f"])
 
 
 if __name__ == "__main__":

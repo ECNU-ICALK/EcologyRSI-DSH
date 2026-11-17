@@ -215,6 +215,47 @@ def look_key(bench: Bench, look: Look, stage: str) -> str:
     return exposure_key(bench, look.harness, stage, SEALED, conditions=look.conditions)
 
 
+def _key_bench(task_id: str, benches: dict[str, Bench]) -> Bench:
+    """A task's bench for exposure keys only (its frame, task and partitions; nothing is evaluated)."""
+
+    if task_id not in benches:
+        benches[task_id] = Bench.open(task_spec(task_id))
+    return benches[task_id]
+
+
+def _first_looks(ledger: Ledger, looks: Sequence[Look], stage: str) -> tuple[list[Look], set[tuple[str, str]]]:
+    """Each look as ``stage`` first saw it, and the (label, task) of the looks this replaced.
+
+    A version judged on the stage before under the same conditions keeps that result, whichever run took it
+    (``adoption_sources``): a run that starts from an earlier run's final version, or checks an adoption whose
+    replaced version was judged before, plans the programs of that look. Planning its own instead would find the
+    exposure taken by other programs (``prior_exposure_differs``) and could never complete: on the 2026-11-17
+    ledger every run that started from a verified version was in that state."""
+
+    judged = _judged(ledger)
+    benches: dict[str, Bench] = {}
+    first, replaced = [], set()
+    for look in looks:
+        found = _reused(ledger, judged, _key_bench(look.task, benches), look, stage)
+        planned = (found or {}).get("plan")
+        episodes = tuple(planned["episodes"]) if planned else tuple(program_episodes(found))
+        if not episodes or set(episodes) == set(look.episodes):
+            first.append(look)
+            continue
+        if planned:
+            earlier: Look | None = Look(look.label, look.harness, look.task, episodes, look.conditions,
+                                        dict(planned.get("program_digests") or {}), planned.get("bench_identity"))
+        else:  # recorded before looks kept their plan: its program is read from the episode record
+            resolved, _ = _looks(ledger, [(look.label, look.harness, look.task, episodes)])
+            earlier = resolved[0] if resolved and resolved[0].conditions == look.conditions else None
+        if earlier is None:  # unreadable: the seal reports the conflict (prior_exposure_differs)
+            first.append(look)
+            continue
+        first.append(earlier)
+        replaced.add((look.label, look.task))
+    return first, replaced
+
+
 def _result_conditions(ledger: Ledger, result: dict[str, Any]) -> dict[str, Any] | None:
     """The conditions a recorded sealed result measured: recorded with it, or (results recorded before looks
     named them) those of the episode whose program it judged."""
@@ -506,8 +547,9 @@ def sealed_plan(ledger: Ledger, view: dict[str, Any], suite: Any, stage: str
                 ) -> tuple[list[Look], list[dict[str, Any]]]:
     """What a run's verification on ``stage`` judges, fixed before anything is judged: every version (seed and
     final) on every task of the suite. Use its first plan if it already opened a training task, or the programs
-    in its latest finished round. A holdout task uses its holdout episode. On ``final_test``, use the programs
-    judged on ``validation``. The (version, task) pairs without programs are listed with why: ``no_program``
+    in its latest finished round; a version some run already judged on ``validation`` under the same conditions
+    keeps that look and its programs (``_first_looks``). A holdout task uses its holdout episode. On
+    ``final_test``, use the programs judged on ``validation``. The (version, task) pairs without programs are listed with why: ``no_program``
     (no scored episode on a training task: it will never have one), ``awaiting_holdout`` (holdout not verified,
     or not scored there yet) and ``awaiting_validation``."""
 
@@ -526,9 +568,6 @@ def sealed_plan(ledger: Ledger, view: dict[str, Any], suite: Any, stage: str
                 episodes, reason = program_episodes(result), "awaiting_validation"
             elif task in train:
                 episodes, reason = frozen.get((harness, task), trained.get(task, [])), "no_program"
-                if 0 < len(set(episodes)) < config.repeats:
-                    missing.append({"version": label, "task": task, "reason": "missing_replicates",
-                                    "episodes": list(episodes), "expected": config.repeats})
             else:
                 entry = ((holdout.get("versions") or {}).get(label, {}).get("episodes") or {}).get(task) or {}
                 scored = entry.get("status") in SCORED_STATUSES and entry.get("episode")
@@ -542,6 +581,12 @@ def sealed_plan(ledger: Ledger, view: dict[str, Any], suite: Any, stage: str
             else:
                 missing.append({"version": label, "task": task, "reason": reason})
     looks, unresolved = _looks(ledger, wanted)
+    if stage == "validation":  # final_test takes the programs validation judged
+        looks, replaced = _first_looks(ledger, looks, stage)
+        missing.extend({"version": look.label, "task": look.task, "reason": "missing_replicates",
+                        "episodes": list(look.episodes), "expected": config.repeats}
+                       for look in looks if look.task in train and (look.label, look.task) not in replaced
+                       and len(set(look.episodes)) < config.repeats)
     return looks, [*missing, *unresolved]
 
 
@@ -897,10 +942,6 @@ def check_adoptions(ledger_path: Path, run_id: str, *, generations: list[int] | 
         tasks = [task for task in train if theirs.get(task) and mine.get(task)]
         missing = [{"version": label, "task": task, "reason": "no_program"} for task in train
                    for label, side in (("parent", theirs), ("adopted", mine)) if not side.get(task)]
-        missing.extend({"version": label, "task": task, "reason": "missing_replicates",
-                        "episodes": side[task], "expected": config.repeats}
-                       for task in tasks for label, side in (("parent", theirs), ("adopted", mine))
-                       if len(set(side[task])) < config.repeats)
         body: dict[str, Any] = {"generation": generation, "digest": adopted, "parent": parent,
                                 "stage": ADOPTION_STAGE, "tasks": tasks}
         try:
@@ -908,6 +949,11 @@ def check_adoptions(ledger_path: Path, run_id: str, *, generations: list[int] | 
                 looks, unresolved = _looks(ledger, [(label, harness, task, side[task]) for task in tasks
                                                     for label, harness, side in (("parent", parent, theirs),
                                                                                  ("adopted", adopted, mine))])
+                looks, replaced = _first_looks(ledger, looks, ADOPTION_STAGE)
+            missing.extend({"version": look.label, "task": look.task, "reason": "missing_replicates",
+                            "episodes": list(look.episodes), "expected": config.repeats}
+                           for look in looks if (look.label, look.task) not in replaced
+                           and len(set(look.episodes)) < config.repeats)
             results, evaluations, unavailable = _seal(
                 ledger_path, run_id, ADOPTION_STAGE, looks, limits=config.limits,
                 store=ecogym_home() / "verifications" / tag / ADOPTION_STAGE / "adoptions",
