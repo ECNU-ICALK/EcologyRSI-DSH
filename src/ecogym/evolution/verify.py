@@ -6,31 +6,33 @@
   Each (harness, task, model and budget) exposure is registered in the ledger
   right before its episode starts, so a version meets a holdout task once per
   model and budget across all runs; a later verification of the same version
-  under the same conditions reuses the recorded episode. An
-  exposure whose episode failed for service reasons, was interrupted or went
-  stale may run again, and verifying a run again fills in exactly those.
+  under the same conditions reuses the recorded episode. An exposure whose
+  episode failed for service reasons, was interrupted or went stale may run
+  again, and verifying a run again fills in exactly those.
 * ``verify_sealed``: the programs those versions submitted are fitted on
   every row before ``validation`` (or ``final_test``) and streamed through
   it; ``final_test`` needs all of ``validation`` first. Nobody looked at these
   periods while the harness evolved, so they measure transfer forward in
   time. The plan is fixed before anything is judged: every version on every
   task of the suite (training and holdout tasks), and for each the programs
-    of every replicate in the run's first look, or its latest finished round
-    if no look was taken (a holdout task: its holdout episode). A harness is a policy whose
-  episodes write different programs; its last replicate alone would stand
-  for whichever replicate happened to be stored last. Each task's result is
-    recorded program by program (``sealed_task``): an interrupted verification
-    keeps what it finished, and only resumes unjudged programs of the frozen
-    look. What the
-  plan could not judge is listed (``missing``) and the record says whether
-  it is ``complete``; verifying again fills in what has become possible since
-  (a holdout task verified later), never what was judged.
+  of every replicate in the run's first look, or its latest finished round if
+  no look was taken (a holdout task: its holdout episode). A harness is a
+  policy whose episodes write different programs; its last replicate alone
+  would stand for whichever replicate happened to be stored last. Each task's
+  result is recorded program by program (``sealed_task``): an interrupted
+  verification keeps what it finished, and only resumes unjudged programs of
+  the frozen look. What the plan could not judge is listed (``missing``) and
+  the record says whether it is ``complete``; verifying again fills in what
+  has become possible since (a holdout task verified later), never what was
+  judged.
 * ``check_adoptions``: each adoption of a run against the version it
   replaced, on the training tasks' ``validation`` period, with the programs
   of the adopting round on both sides (every replicate; the replaced version's
-  latest earlier round where it has none there). The loop runs it after every
-  adopting round. People read the result; the evolver never does, and
-  ``final_test`` stays for the verification above.
+  latest earlier round where it has none there). When the run enables it
+  (``EvolveConfig.check_adoptions``, off by default since 0.4.0, because each
+  check spends a look at ``validation`` on programs chosen by the adoption),
+  the loop runs it after every adopting round. People read the result; the
+  evolver never does, and ``final_test`` stays for the verification above.
 
 A sealed stage is looked at once per (version, model and budget, task, stage)
 across all runs (``look_key``): the model and budget the programs' episodes
@@ -38,12 +40,11 @@ ran with are part of what a version's result means, so a version verified
 under other conditions gets a look of its own instead of reusing one that
 measured something else (2026-10-29: the seed's 4-minute deepseek-v4-flash
 programs stood in for its 8-minute pjlab ones in evo:9eca5239360b). Only
-    those explicit conditions open a new look: changing programs, guidance or
-    code does not, so the sealed periods cannot be reopened at will. A previous
-    look is usable only when it covers the planned episode and program identities.
-    Every program is checked against the
-digest it was scored with before it is judged again
-(``trajectory.extract_submission``).
+those explicit conditions open a new look: changing programs, guidance or
+code does not, so the sealed periods cannot be reopened at will. A previous
+look is usable only when it covers the planned episode and program
+identities. Every program is checked against the digest it was scored with
+before it is judged again (``trajectory.extract_submission``).
 
 A run must have finished to be verified; a stopped one can be finished where
 it is (``loop.finish_run``).
