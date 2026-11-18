@@ -2,7 +2,7 @@
 
 **让大模型研究智能体在生态预测任务上自己做研究，并在严格的统计检验下，一代代改进它的工作方式。**
 
-![ecogym 0.4.0](https://img.shields.io/badge/ecogym-0.4.0-2ea44f)
+![ecogym 0.4.1](https://img.shields.io/badge/ecogym-0.4.1-2ea44f)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![macOS](https://img.shields.io/badge/agents-macOS-555555)
 ![DeepSeek Harness 0.1.5-rc.2](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5--rc.2-4d6bfe)

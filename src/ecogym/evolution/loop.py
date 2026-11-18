@@ -27,7 +27,10 @@ otherwise left out: service failures are not harness effects. Before a retry
 the loop sends the model one test request (``ServiceGate``): when that gets no
 answer either, the service is down, no session starts until it answers again
 (for up to ``outage_minutes``), and the episode the outage cut short runs
-again without using up its retries. A candidate missing usable episodes on
+again without using up its retries. When the test request is answered but the
+episode still ended ``infra_failed`` (an unstable provider failing many calls),
+it also runs again without using up its retries, up to ``SERVICE_RERUNS``
+times. A candidate missing usable episodes on
 any training task is not adopted that round. An evolver session that got no
 reply, or that failed model calls kept from working for more than
 ``STALL_SHARE`` of its time while it left no candidate to compare, is reviewed
@@ -287,6 +290,9 @@ def _require_replies(entries: list[dict[str, Any]]) -> None:
 
 PROBE_EVERY = 60.0  # seconds between test requests while a model service is down
 OUTAGE_RERUNS = 3  # reruns of one episode after confirmed outages, on top of ``retries``
+# reruns of one episode that ended ``infra_failed`` while the service answered a test request (a provider that
+# fails many calls, not all), on top of ``retries``: such an attempt says nothing about the harness either
+SERVICE_RERUNS = 3
 
 
 class ServiceGate:
@@ -1245,13 +1251,15 @@ class Evolution:
         entry: dict[str, Any] = {"task": task.id, "harness": harness.digest, "role": role, "candidate": name,
                                  "replicate": replicate, "guidance": snapshot.guidance[task.id]}
         gate = self._gate(self.config.model or harness.agent.model)
-        failures = outages = 0  # attempts that count against ``retries``; reruns after a confirmed outage
+        # attempts that count against ``retries``; reruns after a confirmed outage; reruns after a service failure
+        # that no outage explains
+        failures = outages = unstable = 0
         while True:
             if self.cancel.is_set():
                 raise Cancelled("the run was cancelled")
             if gate is not None:
                 gate.wait(self.cancel)  # no episode starts while the service is down
-            attempt = first_attempt + failures + outages
+            attempt = first_attempt + failures + outages + unstable
             label = f"{run_id} 第{generation}代 {'在任' if role == 'incumbent' else f'候选{name}'} {task.id}"
             config = EpisodeConfig(
                 task=task.id, harness=harness.digest, minutes=self.config.minutes, tokens=self.config.tokens,
@@ -1286,11 +1294,21 @@ class Evolution:
             if gate is not None and outages < OUTAGE_RERUNS and gate.confirm(entry["upstream_error"]):
                 outages += 1  # the service was down: this attempt says nothing about the harness
                 continue
+            if unstable < SERVICE_RERUNS:
+                # the service answers a test request, yet the session got no reply or spent most of its time on
+                # failed calls: an unstable provider, not the harness. Counted against ``retries`` these lost the
+                # slot after two attempts, and with it the round's comparison on that task (both sides need every
+                # replicate): on 2026-11-17/18 pjlab failed most calls for hours and 31-46 % of the attempts of a
+                # round ended this way
+                unstable += 1
+                continue
             failures += 1
             if failures > self.config.retries:
                 break
         if outages:
             entry["outage_reruns"] = outages
+        if unstable:
+            entry["service_reruns"] = unstable
         self._notify("episode", entry)
         return entry
 
