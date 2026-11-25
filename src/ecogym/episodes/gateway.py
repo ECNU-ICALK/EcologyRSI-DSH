@@ -59,6 +59,8 @@ CAPTURE_LIMIT = 16_000_000  # bytes of one response kept for assembly
 RAW_LOG_LIMIT = 200_000  # characters of a response that cannot be assembled
 CACHE_WEIGHT = 0.1  # budget weight of a prompt token served from the provider's cache
 DRAIN_SECONDS = 10.0  # how long ``close`` waits for cut-off calls to finish and be recorded
+UPSTREAM_TIMEOUT = 75.0  # connect, response headers, and first byte (TTFB) from the provider
+STREAM_TIMEOUT = 45.0  # idle silence between chunks once the upstream response has started
 
 
 def _abort(connection: Any) -> None:
@@ -194,7 +196,8 @@ class Gateway:
 
     def __init__(self, *, key: str | None, token: str, log_path: Path, upstream: str = "https://api.deepseek.com",
                  token_budget: int = 3_000_000, deadline: float | None = None, proxy: str | None = None,
-                 routes: dict[str, tuple[str, str, dict[str, str]]] | None = None, chat: str | None = None) -> None:
+                 routes: dict[str, tuple[str, str, dict[str, str]]] | None = None, chat: str | None = None,
+                 upstream_timeout: float = UPSTREAM_TIMEOUT, stream_timeout: float = STREAM_TIMEOUT) -> None:
         self.token = token
         self.chat = chat
         self.search_enabled = True
@@ -207,6 +210,8 @@ class Gateway:
         self.token_budget = token_budget
         self.deadline = deadline
         self.proxy = urlparse(proxy) if proxy else None
+        self.upstream_timeout = float(upstream_timeout)
+        self.stream_timeout = float(stream_timeout)
         self.tokens = 0  # every token the provider reported
         self.metered = 0  # cost-weighted tokens, what the budget counts
         self.calls = 0
@@ -214,8 +219,7 @@ class Gateway:
         self.failed = 0  # upstream error status, no response, or an empty 200 (a provider in trouble)
         self.refused = 0
         self.last_failure = ""  # status and provider message of the latest failed call, for the session record
-        self._stalled = 0.0  # awake seconds of finished runs of failed calls (see stalled_seconds)
-        self._failing_since: float | None = None  # awake start of the current run of failed calls
+        self._outcomes: list[tuple[float, bool]] = []  # (awake start, answered) for chronological stall accounting
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self.on_call: Callable[[dict[str, Any]], None] | None = None
@@ -326,16 +330,27 @@ class Gateway:
         """Whether the latest model calls failed (a run of failed calls has not ended)."""
 
         with self._lock:
-            return self._failing_since is not None
+            return bool(self._outcomes) and not max(self._outcomes)[1]
 
     def stalled_seconds(self, until: float | None = None) -> float:
         """Awake seconds the session waited on failed model calls: from the first of a run of consecutive failed
         calls to the start of the next answered one, or to ``until`` (default now) if the run has not ended."""
 
         with self._lock:
-            open_run = 0.0 if self._failing_since is None else (clock.now() if until is None else until) - \
-                self._failing_since
-            return self._stalled + max(0.0, open_run)
+            ordered = sorted(self._outcomes)
+        stalled = 0.0
+        failing_since: float | None = None
+        for began, answered in ordered:
+            if answered:
+                if failing_since is not None:
+                    stalled += max(0.0, began - failing_since)
+                    failing_since = None
+            elif failing_since is None:
+                failing_since = began
+        if failing_since is not None:
+            end = clock.now() if until is None else until
+            stalled += max(0.0, end - failing_since)
+        return stalled
 
     def refusal(self) -> str | None:
         if self.deadline is not None and clock.now() > self.deadline:  # awake time: a sleep spends no budget
@@ -348,14 +363,14 @@ class Gateway:
         host = upstream.hostname or ""
         port = upstream.port or (443 if upstream.scheme == "https" else 80)
         if upstream.scheme == "http":
-            return http.client.HTTPConnection(host, port, timeout=900)
+            return http.client.HTTPConnection(host, port, timeout=self.upstream_timeout)
         context = ssl.create_default_context()
         if self.proxy is not None:
             connection = http.client.HTTPSConnection(self.proxy.hostname or "", self.proxy.port or 80,
-                                                     timeout=900, context=context)
+                                                     timeout=self.upstream_timeout, context=context)
             connection.set_tunnel(host, port)
             return connection
-        return http.client.HTTPSConnection(host, port, timeout=900, context=context)
+        return http.client.HTTPSConnection(host, port, timeout=self.upstream_timeout, context=context)
 
     def record(self, entry: dict[str, Any], *, started: float | None = None) -> None:
         """Count and log one call; ``started`` is its start on the awake clock (default: now)."""
@@ -372,13 +387,10 @@ class Gateway:
             # only "answers" were empty would otherwise count as having run
             if entry.get("status") == 200 and "error" not in entry and ("reply" in entry or "response" in entry):
                 self.answered += 1
-                if self._failing_since is not None:  # a run of failed calls ends when this call started
-                    self._stalled += max(0.0, began - self._failing_since)
-                    self._failing_since = None
+                self._outcomes.append((began, True))
             else:
                 self.failed += 1
-                if self._failing_since is None:
-                    self._failing_since = began
+                self._outcomes.append((began, False))
                 detail = entry.get("error") or entry.get("response") or ("an empty reply" if entry.get("status") == 200
                                                                          else "")
                 self.last_failure = f"{entry.get('status') or 'no response'}: {str(detail).strip()[:400]}"
@@ -484,6 +496,8 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                     chunk = response.read1(65536)
                     if not chunk:
                         break
+                    if not captured and connection.sock is not None:
+                        connection.sock.settimeout(gateway.stream_timeout)
                     if len(captured) < CAPTURE_LIMIT:
                         captured.extend(chunk[: CAPTURE_LIMIT - len(captured)])
                     self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
@@ -518,5 +532,5 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-__all__ = ["CACHE_WEIGHT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH", "Gateway", "assemble", "metered_tokens",
-           "tokens_of", "usage_of"]
+__all__ = ["CACHE_WEIGHT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH", "STREAM_TIMEOUT", "UPSTREAM_TIMEOUT",
+           "Gateway", "assemble", "metered_tokens", "tokens_of", "usage_of"]

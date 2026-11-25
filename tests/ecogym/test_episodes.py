@@ -133,6 +133,9 @@ class _FakeUpstream:
 
         self.seen_auth: list[str | None] = []
         self.hits = 0
+        import threading as _threading
+
+        self.unblock = _threading.Event()
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -146,6 +149,22 @@ class _FakeUpstream:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 upstream.hits += 1
                 upstream.seen_auth.append(self.headers.get("Authorization"))
+                if body.get("stall_headers"):
+                    upstream.unblock.wait(5.0)
+                    return
+                if body.get("stall_stream"):
+                    first = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(f"{len(first):X}\r\n".encode() + first + b"\r\n")
+                        self.wfile.flush()
+                        upstream.unblock.wait(5.0)
+                    except OSError:
+                        pass
+                    return
                 if body.get("stream"):
                     payload = (b'data: {"type":"message_start","message":{"usage":{"input_tokens":40}}}\n\n'
                                b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
@@ -162,15 +181,14 @@ class _FakeUpstream:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
-        import threading
-
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        _threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def stop(self):
+        self.unblock.set()
         self.server.shutdown()
         self.server.server_close()
 
@@ -249,6 +267,58 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("event-stream", ctype)
         self.assertIn("[DONE]", data.decode())
         self.assertEqual(gateway.tokens, 47)
+
+    def test_cuts_off_unresponsive_upstream_before_headers(self):
+        gateway = self._gateway(upstream_timeout=0.25, stream_timeout=0.25)
+        started = time.monotonic()
+        status, body, _ = _post(gateway.port, "/deepseek/v1/chat/completions",
+                                {"stall_headers": True, "messages": []}, self.TOKEN)
+        elapsed = time.monotonic() - started
+        self._settle(1)
+        self.assertEqual(status, 502)
+        self.assertLess(elapsed, 2.0)
+        self.assertIn("TimeoutError", json.loads(body)["error"]["message"])
+        self.assertEqual(gateway.failed, 1)
+        self.assertTrue(gateway.failing)
+
+    def test_cuts_off_stalled_upstream_stream(self):
+        gateway = self._gateway(upstream_timeout=5.0, stream_timeout=0.25)
+        started = time.monotonic()
+        connection = http.client.HTTPConnection("127.0.0.1", gateway.port, timeout=5)
+        try:
+            connection.request("POST", "/deepseek/v1/chat/completions",
+                               body=json.dumps({"stall_stream": True, "messages": []}).encode(),
+                               headers={"Content-Type": "application/json",
+                                        "Authorization": f"Bearer {self.TOKEN}"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            with self.assertRaises(http.client.IncompleteRead):
+                response.read()
+        finally:
+            connection.close()
+        elapsed = time.monotonic() - started
+        self._settle(1)
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(gateway.failed, 1)
+        self.assertIn("TimeoutError", gateway.last_failure)
+
+    def test_stalled_seconds_handles_out_of_order_late_failures(self):
+        gateway = self._gateway()
+        # Call 1 fails at t=100; Call 2 starts at t=224 and hangs; Call 3 fails at t=536; Call 4 succeeds at t=545;
+        # then Call 2 is finally aborted and recorded out of order with started=224.
+        gateway.record({"status": None, "error": "RemoteDisconnected"}, started=100.0)
+        gateway.record({"status": None, "error": "SSLEOFError"}, started=536.0)
+        gateway.record({"status": 200, "reply": {"message": {"role": "assistant", "content": "ok"}}}, started=545.0)
+        self.assertFalse(gateway.failing)
+        self.assertAlmostEqual(gateway.stalled_seconds(until=591.0), 445.0)
+        # Late-recorded failure that started during the already-closed failure run must not double-count or flip failing
+        gateway.record({"status": 200, "error": "BrokenPipeError"}, started=224.0)
+        self.assertFalse(gateway.failing)
+        self.assertAlmostEqual(gateway.stalled_seconds(until=591.0), 445.0)
+        # A subsequent failure starting after the last answered call opens a new run from its own start time
+        gateway.record({"status": 200, "error": "BrokenPipeError"}, started=556.0)
+        self.assertTrue(gateway.failing)
+        self.assertAlmostEqual(gateway.stalled_seconds(until=591.0), 480.0)
 
 
 class McpTests(unittest.TestCase):
