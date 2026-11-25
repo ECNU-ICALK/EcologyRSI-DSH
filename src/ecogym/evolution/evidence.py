@@ -48,6 +48,7 @@ from typing import Any
 import numpy as np
 
 from ..episodes.history import fold_episode
+from ..episodes.tools import SINGLE_WINDOW_SELECTION, selection_rule_text
 from ..episodes.trajectory import submission_files
 from ..episodes.transcripts import session_threads
 from ..kernel.ledger import Ledger
@@ -190,6 +191,73 @@ def _cell_order(key: str) -> tuple[str, int]:
     return (target, int(horizon)) if horizon.isdigit() else (key, 0)
 
 
+REPLACEMENT_LINES = 12  # episodes whose submission replaced the template, listed worst first
+
+
+def _attribution_rows(attribution: dict[str, Any], round_: dict[str, Any], records: dict[str, dict[str, Any]],
+                      names: dict[str, str]) -> list[str]:
+    """Per version and task: the fixed template's score, how far the episodes ended above it, how many replicates
+    scored and how many kept the template; then every episode whose submission replaced the template, its local
+    gain against the template next to its hidden-stage one. The baseline round has no comparison, so without these
+    rows its diagnostic read only "matched 5/8" (2026-11-18 review), and the evolver never saw that the three
+    submissions that replaced the template were each worse on the hidden stage."""
+
+    arms = attribution.get("arms") or {}
+    if not arms:
+        return []
+    rows = [row for arm in arms.values() for row in arm["tasks"].values()]
+    expected = attribution.get("expected_episodes")
+    planned = f"/{len(rows) * expected}" if isinstance(expected, int) else ""
+    lines = ["", f"有成绩的重复回合 {sum(row.get('episode_count', 0) for row in rows)}{planned}"
+                 "（服务故障或中断的回合不算）。",
+             "", "| 版本 | 任务 | 固定模板 | 回合均分 − 模板 | 有成绩的重复 | 其中按模板评分 |",
+             "|---|---|---|---|---|---|"]
+    templates: dict[tuple[str, str], float] = {}
+    for label, arm in arms.items():
+        version = f"{label} `{arm.get('harness', '')[:12]}`" if label != "incumbent" else "在任"
+        for task, row in arm["tasks"].items():
+            reference = row.get("template") or {}
+            if reference.get("status") == "ok" and isinstance(reference.get("score"), (int, float)):
+                templates[(label, task)] = reference["score"]
+            template = _signed(reference.get("score"), 4) if reference.get("status") == "ok" else \
+                f"–（{reference.get('status', '无')}）"
+            gain = _signed(row.get("episode_over_template"), 4) if row.get("episode_over_template") is not None \
+                else "–"
+            lines.append(f"| {version} | `{task}` | {template} | {gain} | {row.get('episode_count', 0)}/"
+                         f"{expected if isinstance(expected, int) else '?'} | {row.get('scored_start_count', 0)} |")
+    replaced = []
+    for entry in round_.get("episodes") or []:
+        record = records.get(entry.get("episode") or "") or {}
+        scored = record.get("scored") or {}
+        label = "incumbent" if entry.get("role") == "incumbent" else entry.get("candidate")
+        template = templates.get((label, entry.get("task")))
+        if (entry.get("status") not in SCORED_STATUSES or scored.get("start") or scored.get("auto")
+                or type(scored.get("n")) is not int or template is None
+                or not isinstance(scored.get("score"), (int, float))):
+            continue
+        submission = next((item for item in record.get("submissions") or [] if item.get("n") == scored["n"]), {})
+        local = (submission.get("local_selection") or {}).get("delta")
+        if not isinstance(local, (int, float)):
+            start = ((record.get("start") or {}).get("local") or {}).get("score")
+            score = (submission.get("local") or {}).get("score")
+            local = score - start if isinstance(score, (int, float)) and isinstance(start, (int, float)) else None
+        replaced.append((scored["score"] - template, entry, scored["n"], local))
+    if replaced:
+        replaced.sort(key=lambda item: item[0])
+        worse = sum(1 for hidden, *_ in replaced if hidden < 0)
+        lines += ["", f"提交替换了模板的回合 {len(replaced)} 个：隐藏期上比模板好 {len(replaced) - worse} 个、"
+                      f"差 {worse} 个，平均 {_signed(_mean([hidden for hidden, *_ in replaced]), 4)}。从最差的开始列出"
+                      "（本地增益是这次提交在本地检验期上相对模板的增益）："]
+        for hidden, entry, number, local in replaced[:REPLACEMENT_LINES]:
+            version = "在任" if entry.get("role") == "incumbent" else f"候选 {entry.get('candidate')}"
+            lines.append(f"- {version} `{entry.get('task')}` 重复 {entry.get('replicate', 0)}"
+                         f"（`{entry.get('episode')}`）：第 {number} 次提交，本地 {_signed(local, 4)} → "
+                         f"隐藏期 {_signed(hidden, 4)}")
+        if len(replaced) > REPLACEMENT_LINES:
+            lines.append(f"- 另有 {len(replaced) - REPLACEMENT_LINES} 个，见各回合的 summary.md。")
+    return lines
+
+
 def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Sequence[str],
              names: dict[str, str], ensembles: dict[str, dict[str, dict[str, Any]]] | None = None) -> str:
     """Scores of every version on every training task, its episodes' averaged forecasts (``ensembles``, see
@@ -232,7 +300,10 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
         lines.append(f"| {names.get(harness, '')} `{harness[:12]}`{mark} | " + " | ".join(row)
                      + f" | {_signed(_mean(means))} |")
     if kept:
-        lines += ["", "被评分的是最后一次被接受、且本地比起始程序（模板）高出足够多的提交，否则是模板本身。"
+        # the rule the run's episodes were scored by, as the agents read it (a run before 0.4.0: the latest
+        # passing submission); 0.4.0 wrote "the latest" here for every run, while best_local/1 picks the highest
+        policy = (view.get("config") or {}).get("local_selection") or SINGLE_WINDOW_SELECTION
+        lines += ["", f"回合评分用哪个程序（`{policy}`）：{selection_rule_text(policy)}"
                       "按模板评分的回合：" + "；".join(f"{names.get(harness, '')} `{harness[:12]}` {done}/{total}"
                                                 for harness, (done, total) in kept.items()) + "。"]
     measured = [round_ for round_ in view["rounds"] if round_["finished"] and round_.get("template_attribution")]
@@ -246,7 +317,7 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
             lines.append("本代诊断未能完成。")
         else:
             lines.append(f"匹配 {attribution['matched_arm_tasks']}/{attribution['expected_arm_tasks']} "
-                         "个版本与任务组合。")
+                         "个版本与任务组合（版本在任务上的全部重复回合都有成绩、模板有稳定参考时才算匹配）。")
             for name, comparison in attribution.get("comparisons", {}).items():
                 mean = comparison["mean_on_matched_tasks"]
                 lines.append(f"- 候选 {name} 的回合分差 {_signed(mean['episode_gain'], 4)}，其中模板分差 "
@@ -257,6 +328,7 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
                 drift = [task for task, row in arm["tasks"].items() if row["template"]["status"] == "drift"]
                 if drift:
                     lines.append(f"- {name} 的固定模板在 {', '.join(drift)} 产生不同预测，该处缺少稳定参考。")
+            lines += _attribution_rows(attribution, round_, records, names)
     if incumbent in cells:
         keys = sorted({key for by_cell in cells[incumbent].values() for key in by_cell}, key=_cell_order)
         header = "| 格 | " + " | ".join(f"`{task}`" for task in tasks) + " |"

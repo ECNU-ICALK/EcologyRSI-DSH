@@ -154,6 +154,47 @@ class TemplateAttributionTests(unittest.TestCase):
         self.assertEqual(folded["rounds"][0]["template_attribution"]["status"], "error")
         self.assertIn("诊断未能完成", overview(folded, {}, [self.task], {}))
 
+    def test_overview_shows_the_baseline_rounds_counterexamples_and_the_runs_own_rule(self):
+        """The baseline round has no comparison; its diagnostic used to read only "matched 1/2" and the rule text
+        said "the latest submission" whatever the run's policy (2026-11-18 review)."""
+
+        attribution = {"status": "partial", "matched_arm_tasks": 1, "expected_arm_tasks": 2, "expected_episodes": 2,
+                       "comparisons": {}, "arms": {"incumbent": {"harness": "seed", "tasks": {
+                           "t1": {"episode_count": 2, "scored_start_count": 1, "episode_over_template": -0.01,
+                                  "template": {"status": "ok", "score": 0.25}},
+                           "t2": {"episode_count": 1, "scored_start_count": 1, "episode_over_template": None,
+                                  "template": {"status": "ok", "score": 0.17}}}}}}
+
+        def entry(episode, task, replicate, status="finished"):
+            return {"episode": episode, "task": task, "role": "incumbent", "candidate": None,
+                    "replicate": replicate, "status": status, "harness": "seed"}
+
+        start = {"local": {"score": 0.20}}
+        records = {
+            "ep:1": {"start": start, "scored": {"n": 3, "start": False, "score": 0.23, "cells": []},
+                     "submissions": [{"n": 3, "local": {"score": 0.222}, "local_selection": {"delta": 0.022031}}]},
+            "ep:2": {"start": start, "scored": {"n": None, "start": True, "score": 0.25, "cells": []},
+                     "submissions": []},
+            "ep:3": {"start": start, "scored": {"n": None, "start": True, "score": 0.17, "cells": []},
+                     "submissions": []},
+        }
+        rounds = [{"generation": 0, "finished": True, "template_attribution": attribution,
+                   "episodes": [entry("ep:1", "t1", 0), entry("ep:2", "t1", 1), entry("ep:3", "t2", 0),
+                                entry("ep:4", "t2", 1, "infra_failed")]}]
+        text = overview({"incumbent": "seed", "config": {"local_selection": BEST_LOCAL_SELECTION}, "rounds": rounds},
+                        records, ["t1", "t2"], {})
+        self.assertIn(f"（`{BEST_LOCAL_SELECTION}`）", text)
+        self.assertIn("本地总分最高者用于评分", text)
+        self.assertNotIn("最后一次被接受", text)
+        self.assertIn("有成绩的重复回合 3/4", text)
+        self.assertIn("| 在任 | `t1` | +0.2500 | -0.0100 | 2/2 | 1 |", text)
+        self.assertIn("| 在任 | `t2` | +0.1700 | – | 1/2 | 1 |", text)
+        self.assertIn("提交替换了模板的回合 1 个：隐藏期上比模板好 0 个、差 1 个", text)
+        self.assertIn("在任 `t1` 重复 0（`ep:1`）：第 3 次提交，本地 +0.0220 → 隐藏期 -0.0200", text)
+        legacy = overview({"incumbent": "seed", "config": {}, "rounds": rounds}, records, ["t1", "t2"], {})
+        self.assertIn(f"（`{SINGLE_WINDOW_SELECTION}`）", legacy)
+        self.assertIn("最后一次被接受", legacy)
+
     def test_local_selection_defaults_for_new_and_legacy_rounds(self):
         self.assertEqual(self.evolution.config.local_selection, BEST_LOCAL_SELECTION)
         self.assertEqual(EvolveConfig.from_dict({"suite": "legacy"}).local_selection, SINGLE_WINDOW_SELECTION)
