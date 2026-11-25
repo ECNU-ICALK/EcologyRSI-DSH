@@ -10,6 +10,7 @@ size and modification time of every source file.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -70,21 +71,35 @@ def _cache_key(spec: DatasetSpec, directory: Path) -> str:
 
 
 def _save(frame: Frame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write the cache file atomically. Each writer has a temporary file of its own: two processes (or threads)
+    opening the same dataset at a cold start shared one temporary name, and the second rename failed with
+    FileNotFoundError (2026-11-18 review). A cache that cannot be written is skipped; the frame is loaded."""
+
     names = sorted(frame.columns)
     values = np.stack([frame.columns[name] for name in names], axis=1) if names else np.zeros((len(frame), 0))
-    temporary = path.with_name(path.name + ".tmp.npz")
-    np.savez_compressed(
-        temporary,
-        time=frame.time,
-        episode=frame.episode,
-        present=frame.present,
-        episode_ids=np.array(frame.episode_ids, dtype=str),
-        names=np.array(names, dtype=str),
-        values=values,
-        digest=np.array(frame.digest),
-    )
-    temporary.replace(path)
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp.npz", dir=path.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as stream:
+            np.savez_compressed(
+                stream,
+                time=frame.time,
+                episode=frame.episode,
+                present=frame.present,
+                episode_ids=np.array(frame.episode_ids, dtype=str),
+                names=np.array(names, dtype=str),
+                values=values,
+                digest=np.array(frame.digest),
+            )
+        temporary.replace(path)
+        temporary = None
+    except OSError:
+        pass
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _load(path: Path, spec: DatasetSpec) -> Frame | None:

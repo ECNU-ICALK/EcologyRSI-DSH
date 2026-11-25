@@ -167,5 +167,34 @@ class FrameTests(unittest.TestCase):
         np.testing.assert_array_equal(subset.columns["y"], frame.columns["y"][frame.episode_rows("B")])
 
 
+class CacheTests(unittest.TestCase):
+    def test_a_second_writer_between_write_and_rename_breaks_neither(self):
+        """Two processes opening one dataset at a cold start shared one temporary file; the later rename failed
+        with FileNotFoundError (2026-11-18 review)."""
+
+        from unittest.mock import patch
+
+        from ecogym.data import catalog
+
+        frame = synthetic_frame(days=3)
+        real = np.savez_compressed
+        interleaved = []
+
+        def write(target, **arrays):
+            real(target, **arrays)
+            if not interleaved:  # another writer saves the same cache before this one renames its file
+                interleaved.append(True)
+                catalog._save(frame, path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cache" / "frame.npz"
+            with patch.object(catalog.np, "savez_compressed", side_effect=write):
+                catalog._save(frame, path)
+            self.assertTrue(interleaved)
+            with np.load(path) as stored:
+                self.assertEqual(str(stored["digest"]), frame.digest)
+            self.assertEqual([item.name for item in path.parent.iterdir()], ["frame.npz"])
+
+
 if __name__ == "__main__":
     unittest.main()
