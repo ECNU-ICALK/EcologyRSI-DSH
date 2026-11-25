@@ -956,7 +956,7 @@ def cmd_expert_note(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from .episodes.tools import BEST_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES
+    from .episodes.tools import DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES
 
     parser = argparse.ArgumentParser(prog="ecogym", description="Ecological forecasting training ground")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1060,7 +1060,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="override the harness model: <provider>/<model> (see `ecogym models`) or a "
                                   "DeepSeek model id")
     run_episode.add_argument("--label", default="")
-    run_episode.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=BEST_LOCAL_SELECTION)
+    run_episode.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=DEFAULT_LOCAL_SELECTION)
     run_episode.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
     episode_command("list", cmd_episode_list, "episodes in the ledger")
     episode_command("show", cmd_episode_show, "an episode's events").add_argument("episode")
@@ -1095,10 +1095,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--evolver-tokens", type=int, default=4_000_000)
     start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
     start.add_argument("--method-research", choices=("internal", "supplied", "autonomous"), default="autonomous",
-                       help="investigate external methods (generation 1 first runs a research session, on time and "
-                            "tokens beyond the evolver's), use supplied methods, or use internal evidence")
+                       help="investigate external methods (generation 1 or after stagnation first runs a research "
+                            "session, on time and tokens beyond the evolver's), use supplied methods, or use internal "
+                            "evidence")
     start.add_argument("--method-registry", help="host-approved method directory (or ECOGYM_METHOD_REGISTRY)")
-    start.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=BEST_LOCAL_SELECTION)
+    start.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=DEFAULT_LOCAL_SELECTION)
     start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
     start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
     start.add_argument("--outage-minutes", type=float, default=120.0,

@@ -42,12 +42,18 @@ import numpy as np
 
 from ..evaluation.gates import objective_interval
 from ..evaluation.harness import Bench, Evaluation, StageData
-from ..protocol.views import SealedAccess
+from ..protocol.baselines import baseline_values
+from ..protocol.origins import blocks, eligible
+from ..protocol.partitions import Partitions
+from ..protocol.views import SealedAccess, open_stage
 from ..solvers.base import Genome
 from .agent import Cancelled
 from .sandbox import Runtime, confine, program_profile, scratch_root, thread_limits
 
 JUDGE_PROTOCOL = "causal_stream/2"
+PRE_LOCAL_STAGE = "calibration_pre"
+PRE_FIT_SHARE = 0.55
+PRE_MIN_BLOCKS = 4
 RUNNER = "_ecogym_runner.py"
 WRITE_GRACE = 5.0  # seconds past the total deadline before the watchdog kills a program the host cannot reach
 CLOSE_SECONDS = 10.0  # a finished run's program gets this long to exit after "end"
@@ -122,10 +128,68 @@ def predictor_spec(bench: Bench) -> dict[str, Any]:
     }
 
 
-def stage_stream(bench: Bench, stage: str, *, sealed: SealedAccess | None = None) -> tuple[Stream, StageData]:
-    data = bench.stage(stage, sealed=sealed)  # raises for a sealed stage without access
+def calibration_pre_stage(bench: Bench) -> tuple[tuple[int, int], StageData] | None:
+    """Causal pre-check fold carved from the second portion of calibration_fit, fitted on the earlier prefix.
+
+    Returns ``((start, end), StageData)`` when ``calibration_fit`` has enough history rows and calendar blocks
+    after an embargo gap; ``None`` on short synthetic or minimal-history tasks.
+    """
+
     episode = episode_of(bench)
-    start, end = bench.partitions.intervals[stage][episode]
+    fit_start, fit_end = bench.partitions.intervals["calibration_fit"][episode]
+    rows = bench.frame.episode_rows(episode)
+    times = bench.frame.time[rows]
+    in_fit = np.flatnonzero((times >= fit_start) & (times < fit_end))
+    min_fit_rows = max(30, bench.task.history_steps + bench.task.max_horizon)
+    cut = int(in_fit.size * PRE_FIT_SHARE)
+    if cut < min_fit_rows:
+        return None
+    fit_last = int(times[in_fit[cut - 1]])
+    pre_start = fit_last + bench.task.protocol.embargo
+    in_pre = in_fit[times[in_fit] >= pre_start]
+    if in_pre.size < bench.task.max_horizon + max(12, bench.task.block_steps * PRE_MIN_BLOCKS):
+        return None
+    interval = (int(times[in_pre[0]]), int(times[in_pre[-1]]) + 1)
+    if PRE_LOCAL_STAGE in bench._stages:
+        return interval, bench._stages[PRE_LOCAL_STAGE]
+    intervals = {**bench.partitions.intervals, PRE_LOCAL_STAGE: {episode: interval}}
+    stage_rows = {**bench.partitions.rows, PRE_LOCAL_STAGE: {episode: int(in_pre.size)}}
+    parts = Partitions(bench.task.id, intervals, stage_rows, bench.partitions.calendar, bench.partitions.evidence,
+                       "pre")
+    opened = open_stage(bench.frame, parts, bench.task, PRE_LOCAL_STAGE)
+    origins = opened.take(eligible(opened, bench.task))
+    if origins.size == 0:
+        return None
+    stage_blocks = blocks(origins.time, bench.task.block_steps)
+    if np.unique(stage_blocks).size < PRE_MIN_BLOCKS:
+        return None
+    cells = bench.task.cells
+    observed = np.stack([origins.label(cell.target, cell.horizon) for cell in cells])
+    naive = baseline_values(origins, bench.task, bench.baselines)
+    data = StageData(
+        name=PRE_LOCAL_STAGE,
+        origins=origins,
+        cells=cells,
+        observed=observed,
+        baseline=np.stack([naive[cell.key] for cell in cells]),
+        blocks=stage_blocks,
+        scales=np.array([bench.scales[cell.target] for cell in cells]),
+        weights=np.array([bench.task.cell_weight(cell) for cell in cells]),
+    )
+    bench._stages[PRE_LOCAL_STAGE] = data
+    return interval, data
+
+
+def stage_stream(bench: Bench, stage: str, *, sealed: SealedAccess | None = None) -> tuple[Stream, StageData]:
+    episode = episode_of(bench)
+    if stage == PRE_LOCAL_STAGE:
+        built = calibration_pre_stage(bench)
+        if built is None:
+            raise ValueError(f"{bench.task.id}: {PRE_LOCAL_STAGE} has insufficient calibration_fit history")
+        (start, end), data = built
+    else:
+        data = bench.stage(stage, sealed=sealed)  # raises for a sealed stage without access
+        start, end = bench.partitions.intervals[stage][episode]
     rows = bench.frame.episode_rows(episode)
     times = bench.frame.time[rows]
     columns = visible_columns(bench)
@@ -523,6 +587,7 @@ def reference_scores(bench: Bench, stage: str) -> dict[str, float]:
     return scores
 
 
-__all__ = ["JUDGE_PROTOCOL", "SUBMISSION", "Limits", "Run", "Stream", "average", "file_digest", "judge",
-           "judge_program", "load_predictions", "missing", "predictor_spec", "reference_scores", "report_of",
-           "run_predictor", "save_predictions", "score", "stage_stream", "timestamps", "visible_columns"]
+__all__ = ["JUDGE_PROTOCOL", "PRE_LOCAL_STAGE", "SUBMISSION", "Limits", "Run", "Stream", "average",
+           "calibration_pre_stage", "file_digest", "judge", "judge_program", "load_predictions", "missing",
+           "predictor_spec", "reference_scores", "report_of", "run_predictor", "save_predictions", "score",
+           "stage_stream", "timestamps", "visible_columns"]

@@ -153,12 +153,16 @@ def episode_summary(record: dict[str, Any], *, role: str) -> str:
                   "|---|---|---|---|---|"]
         for action, item in timeline:
             local = item.get("local") or {}
+            sel = item.get("local_selection") or {}
             accepted = "" if action == "检验" else (
                 "，未接受" if not item.get("accepted") else
                 "，已接受，不替换起始程序" if item.get("replaces_start") is False else "，已接受")
+            pre_d = sel.get("pre_delta")
+            pre_tag = f"（早折 {_signed(pre_d, 4)}）" if isinstance(pre_d, (int, float)) else ""
+            reused = " [复用缓存]" if sel.get("reused_local") else ""
             note = _clip(item.get("note", ""), 200).replace("|", "/").replace("\n", " ")
-            lines.append(f"| {_minutes(item['at'], record['started_at'])} | {action}{accepted} | "
-                         f"{_signed(local.get('score'), 4)} | {local.get('status', '')} | {note} |")
+            lines.append(f"| {_minutes(item['at'], record['started_at'])} | {action}{accepted}{reused} | "
+                         f"{_signed(local.get('score'), 4)}{pre_tag} | {local.get('status', '')} | {note} |")
         lines.append("")
     if record["notes"]:
         lines += ["## 智能体的笔记", ""]
@@ -360,9 +364,15 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
                 continue
             per_task = "；".join(f"`{item['task']}` {_signed(item['delta'])}" for item in decision["tasks"])
             low, high = decision["interval"]
+            horizons = decision.get("horizons") or {}
+            ordered_h = sorted(
+                ((int(k), float(v)) for k, v in horizons.items() if str(k).isdigit() and isinstance(v, (int, float))),
+                key=lambda kv: kv[0],
+            )
+            per_horizon = "；各时距：" + "，".join(f"h={h} {_signed(val)}" for h, val in ordered_h) if ordered_h else ""
             lines.append(f"- 候选 {candidate['name']} `{candidate.get('digest', '')[:12]}`：{candidate['status']}，"
                          f"Δ {_signed(decision['delta'], 4)}，区间 [{_signed(low)}, {_signed(high)}]，"
-                         f"{decision['reason']}。各任务：{per_task}")
+                         f"{decision['reason']}。各任务：{per_task}{per_horizon}")
     return "\n".join(lines) + "\n"
 
 
@@ -460,6 +470,18 @@ def archive(view: dict[str, Any], archived: Mapping[str, Any] | None = None) -> 
                 lines.append(f"- 结果：Δ {_signed(decision['delta'], 4)} [{_signed(low)}, {_signed(high)}]，"
                              f"{decision['reason']}；各任务 {per_task}"
                              f"（{better}/{len(decision['tasks'])} 个任务好于当时的在任版本）")
+                horizons = decision.get("horizons") or {}
+                ordered_h = sorted(
+                    (
+                        (int(k), float(v))
+                        for k, v in horizons.items()
+                        if str(k).isdigit() and isinstance(v, (int, float))
+                    ),
+                    key=lambda kv: kv[0],
+                )
+                if ordered_h:
+                    h_text = "，".join(f"h={h} {_signed(val)}" for h, val in ordered_h)
+                    lines.append(f"- 分时距平均变化：{h_text}")
                 label = f"g{round_['generation']}{candidate['name']}"
                 if candidate.get("digest") and archived.get(label) == candidate["digest"]:
                     lines.append(f"- 完整内容在工作区的 `archive/{label}/`，"

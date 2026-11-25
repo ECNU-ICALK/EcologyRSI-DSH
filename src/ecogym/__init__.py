@@ -18,4 +18,4 @@ Domain packs live in ``ecogym.domains`` and register datasets, tasks, suites
 and solvers; framework code never names a dataset, column or target.
 """
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"

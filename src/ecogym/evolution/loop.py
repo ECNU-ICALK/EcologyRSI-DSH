@@ -85,7 +85,7 @@ from ..episodes.judge import JUDGE_PROTOCOL, Limits, judge_program, load_predict
 from ..episodes.mcp import ToolError
 from ..episodes.runner import STALL_SHARE, EpisodeConfig, run_episode
 from ..episodes.sandbox import discover_runtime, scratch_root
-from ..episodes.tools import BEST_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES, SINGLE_WINDOW_SELECTION
+from ..episodes.tools import DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES, SINGLE_WINDOW_SELECTION
 from ..episodes.tools import snapshot as snapshot_program
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench, Evaluation
@@ -144,7 +144,7 @@ class EvolveConfig:
     limits: Limits = field(default_factory=Limits)
     method_research: str = "autonomous"
     method_registry: str | None = None
-    local_selection: str = BEST_LOCAL_SELECTION
+    local_selection: str = DEFAULT_LOCAL_SELECTION
 
     def __post_init__(self) -> None:
         if self.generations < 1 or self.repeats < 1 or self.concurrency < 1 or self.retries < 0:

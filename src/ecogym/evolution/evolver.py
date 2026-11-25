@@ -49,6 +49,7 @@ import difflib
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -72,7 +73,7 @@ from ..episodes.judge import Limits, judge_program, reference_scores
 from ..episodes.mcp import Tool, ToolError
 from ..episodes.runner import Events
 from ..episodes.sandbox import Runtime, check_workers, discover_runtime, ecogym_home, scratch_root
-from ..episodes.tools import BEST_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, selection_rule_text
+from ..episodes.tools import DEFAULT_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, selection_rule_text
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench
 from ..evaluation.suite import adjusted_confidence, signed_rank_critical
@@ -360,7 +361,9 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
              "本次运行的细节见 `evidence/archive.md`，其他运行见 `evidence/prior_runs.md`。"
              "标 ★ 的版本在当时的全部训练任务上都好于在任版本，只是平均增益不够大或区间跨 0，没被采纳："
              "这样的改动多半是真的但很小，在它上面再加一处有效的改动，或把两个 ★ 版本的改动合在一起，"
-             "最可能通过门槛（先用 `screen_templates` 在本地检验期上看叠加后是否还有效）。", "",
+             "最可能通过门槛（先用 `screen_templates` 在本地检验期上看叠加后是否还有效）。"
+             "标 ◇ 的版本虽然总分未通过，但在最远预报时距上明显优于当时在任版本且总分未明显退化，"
+             "适合抽取其长时距结构与当前版本组合。", "",
              "| 目录 | 摘要 | 当时的结果 | 好于当时在任的任务 | 当时的在任 |", "|---|---|---|---|---|"]
     by_label = {version_label(other["run_id"], round_["generation"], candidate["name"], current=view["run_id"]):
                 candidate for other in (*prior, view) for round_, candidate in _compared(other)}
@@ -371,8 +374,16 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
         everywhere = bool(tasks) and not candidate.get("missing") and all((item.get("delta") or 0) > 0
                                                                           for item in tasks)
         stack = everywhere and candidate.get("status") not in ("adopted", "passed")
-        result = (("★ " if stack else "") + f"Δ {decision['delta']:+.4f}，{decision.get('reason')}"
-                  + ("（采纳）" if candidate.get("status") == "adopted" else "")
+        horizons = decision.get("horizons") or {}
+        parsed_h = sorted((int(k), float(v)) for k, v in horizons.items() if str(k).isdigit()
+                          and isinstance(v, (int, float)))
+        long_stone = (not stack and candidate.get("status") not in ("adopted", "passed")
+                      and bool(parsed_h) and parsed_h[-1][1] >= 0.005
+                      and isinstance(decision.get("delta"), (int, float)) and decision["delta"] > -0.01)
+        badge = "★ " if stack else "◇ " if long_stone else ""
+        h_note = f"（h={parsed_h[-1][0]} {parsed_h[-1][1]:+.4f}）" if long_stone else ""
+        result = ((badge + f"Δ {decision['delta']:+.4f}，{decision.get('reason')}{h_note}"
+                  + ("（采纳）" if candidate.get("status") == "adopted" else ""))
                   if isinstance(decision.get("delta"), (int, float)) else "起点版本" if label == "seed" else "–")
         better = f"{sum(1 for item in tasks if (item.get('delta') or 0) > 0)}/{len(tasks)}" if tasks else "–"
         parent = str(candidate.get("parent") or "")
@@ -707,9 +718,14 @@ class EvolverTools:
                                              for bench in (self.smoke, *self.others)}
                 else:
                     reports = self._judge_template(template, self.root / "checks" / "incumbent")
-                    self._incumbent_smoke = {task: {"status": report["status"], "score": report["score"]
-                                                    if report["status"] == "ok" else None}
-                                             for task, report in reports.items()}
+                    self._incumbent_smoke = {
+                        task: {
+                            "status": report["status"],
+                            "score": report["score"] if report["status"] == "ok" else None,
+                            "horizons": _report_horizons(report) if report["status"] == "ok" else {},
+                        }
+                        for task, report in reports.items()
+                    }
             return self._incumbent_smoke
 
     def model_problem(self, ref: str) -> str:
@@ -827,13 +843,28 @@ class EvolverTools:
     def _screen_result(name: str, reports: dict[str, dict[str, Any]],
                        reference: dict[str, dict[str, Any]]) -> dict[str, Any]:
         tasks, failed = {}, []
+        horizon_deltas: dict[int, list[float]] = {}
         for task, report in reports.items():
-            incumbent = (reference.get(task) or {}).get("score")
+            ref_task = reference.get(task) or {}
+            incumbent = ref_task.get("score")
             ok = report["status"] == "ok" and report["coverage"] >= 0.999
             score = report["score"] if ok else None
-            tasks[task] = {"score": score, "incumbent": incumbent,
-                           "delta": score - incumbent if isinstance(score, float) and isinstance(incumbent, float)
-                           else None}
+            cand_h = _report_horizons(report) if ok else {}
+            ref_h = ref_task.get("horizons") or (_report_horizons(ref_task) if ref_task.get("cells") else {})
+            task_h_delta = {}
+            for h, c_val in sorted(cand_h.items()):
+                if h in ref_h and isinstance(ref_h[h], float):
+                    d_val = c_val - ref_h[h]
+                    task_h_delta[str(h)] = round(d_val, 4)
+                    horizon_deltas.setdefault(h, []).append(d_val)
+            entry: dict[str, Any] = {
+                "score": score,
+                "incumbent": incumbent,
+                "delta": score - incumbent if isinstance(score, float) and isinstance(incumbent, float) else None,
+            }
+            if task_h_delta:
+                entry["horizons"] = task_h_delta
+            tasks[task] = entry
             if not ok:
                 failed.append(f"{task}：状态 {report['status']}，覆盖率 {report['coverage']:.0%}，"
                               f"错误 {report['errors'][:1]}")
@@ -841,11 +872,21 @@ class EvolverTools:
             return {"name": name, "status": "failed", "problem": "；".join(failed[:3]), "tasks": tasks}
         values = [item["score"] for item in tasks.values()]
         deltas = [item["delta"] for item in tasks.values() if item["delta"] is not None]
-        return {"name": name, "status": "ok", "mean": float(sum(values) / len(values)),
-                "gain": float(sum(deltas) / len(deltas)) if deltas else None,  # over the tasks the incumbent scored
-                "better": sum(1 for delta in deltas if delta > SCREEN_TIE),
-                "worse": sum(1 for delta in deltas if delta < -SCREEN_TIE),
-                "worst": min(deltas) if deltas else None, "tasks": tasks}
+        mean_horizons = {str(h): round(float(sum(vals) / len(vals)), 4) for h, vals in sorted(horizon_deltas.items())}
+        out: dict[str, Any] = {
+            "name": name,
+            "status": "ok",
+            "mean": float(sum(values) / len(values)),
+            "gain": float(sum(deltas) / len(deltas)) if deltas else None,  # over the tasks the incumbent scored
+            "better": sum(1 for delta in deltas if delta > SCREEN_TIE),
+            "worse": sum(1 for delta in deltas if delta < -SCREEN_TIE),
+            "worst": min(deltas) if deltas else None,
+            "tasks": tasks,
+        }
+        if mean_horizons:
+            out["horizons"] = mean_horizons
+            out["worst_horizon"] = min(mean_horizons.values())
+        return out
 
     def probe_method(self, source: str, digest: str = "", variant: str = "") -> dict[str, Any]:
         self._open()
@@ -1062,11 +1103,55 @@ def _archive_rows(archived: dict[str, Harness]) -> list[str]:
             ""]
 
 
+def _report_horizons(report: dict[str, Any]) -> dict[int, float]:
+    """Mean cell objective (or skill) per forecast horizon from a judge report."""
+
+    by_horizon: dict[int, list[float]] = {}
+    for cell in report.get("cells") or []:
+        if not isinstance(cell, dict):
+            continue
+        _, sep, h_text = str(cell.get("cell", "")).rpartition("@")
+        if not sep or not h_text.isdigit():
+            continue
+        val = cell.get("objective", cell.get("skill"))
+        if isinstance(val, (int, float)) and math.isfinite(val):
+            by_horizon.setdefault(int(h_text), []).append(float(val))
+    return {h: float(sum(vals) / len(vals)) for h, vals in sorted(by_horizon.items())}
+
+
+STAGNATION_DISCOVERY_ROUNDS = 2
+
+
+def _should_discover_methods(method_research: str, generation: int, view: dict[str, Any]) -> bool:
+    """Run independent autonomous discovery at generation 1, or after >=2 consecutive stagnant rounds."""
+
+    if method_research != "autonomous":
+        return False
+    if generation == 1:
+        return True
+    if generation <= STAGNATION_DISCOVERY_ROUNDS:
+        return False
+    finished = sorted(
+        (
+            item
+            for item in (view.get("rounds") or [])
+            if item.get("finished") and 0 < int(item.get("generation") or 0) < generation
+        ),
+        key=lambda item: int(item["generation"]),
+    )
+    if len(finished) < STAGNATION_DISCOVERY_ROUNDS:
+        return False
+    recent = finished[-STAGNATION_DISCOVERY_ROUNDS:]
+    if any(item.get("outcome") == "adopted" for item in recent):
+        return False
+    return not any(((item.get("evolver") or {}).get("method_research") or {}).get("discovery") for item in recent)
+
+
 def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], benches: dict[str, Bench],
           names: Sequence[str], repeats: int, episode_minutes: float, episode_tokens: int, model: str | None,
           incumbent: Harness, limits: Limits, forbidden: Sequence[str], minutes: float, tokens: int,
           deadline: float, archived: dict[str, Harness] | None = None,
-          local_selection: str = BEST_LOCAL_SELECTION) -> str:
+          local_selection: str = DEFAULT_LOCAL_SELECTION) -> str:
     gates = suite.gates
     confidence = adjusted_confidence(gates.confidence, len(names))
     critical = signed_rank_critical(len(tasks), (1 - confidence) / 2) if gates.test == "signed_rank" else -1
@@ -1411,7 +1496,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
                 repeats: int, episode_minutes: float, episode_tokens: int, model: str | None, limits: Limits,
                 expert_text: str = "", cancel: threading.Event | None = None, workers: int = 4,
                 method_research: str = "internal", method_registry: MethodRegistry | None = None,
-                local_selection: str = BEST_LOCAL_SELECTION) -> dict[str, Any]:
+                local_selection: str = DEFAULT_LOCAL_SELECTION) -> dict[str, Any]:
     if method_research not in METHOD_RESEARCH_MODES:
         raise ValueError(f"method_research must be one of {', '.join(METHOD_RESEARCH_MODES)}")
     if method_research == "internal":
@@ -1443,7 +1528,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
     if method_registry is not None:
         method_registry.check_agent_isolation(root, runtime)
     discovery = discovery_session = None
-    if method_research == "autonomous" and generation == 1:
+    if _should_discover_methods(method_research, generation, view):
         if search_available:
             discovery_root = root.with_name(name + "-discovery")
             if method_registry is not None:

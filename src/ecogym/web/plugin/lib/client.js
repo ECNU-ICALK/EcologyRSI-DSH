@@ -2416,7 +2416,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           ["内循环模型", config.model || "由 Harness 决定"],
           ["评审智能体", `${config.evolver_model}，${config.evolver_minutes} 分钟，${Number(config.evolver_tokens || 0).toLocaleString()} 计费 token`],
           ["方法调查", ({ autonomous: "由评审智能体自主调查", supplied: "提供已登记的外部方法" })[config.method_research] || "沿用内部证据与存档"],
-          ["提交选择", ({ "best_local/1": "保留最高分合格提交", "rolling_blocks/1": "要求多窗口一致" })[config.local_selection] || "使用最后一次合格提交"],
+          ["提交选择", ({ "walk_forward/1": "双折因果前滚检验", "best_local/1": "保留最高分合格提交", "rolling_blocks/1": "要求多窗口一致" })[config.local_selection] || "使用最后一次合格提交"],
           ["并发 / 重试", `${config.concurrency} / ${config.retries}`],
           ["模型服务故障时", `${!isNum(config.outage_minutes) ? "–" : config.outage_minutes > 0 ? `最多等 ${config.outage_minutes} 分钟` : "不等"}`
             + `${config.auto_resume ? "；停下后后端自动继续" : ""}`],
@@ -2595,6 +2595,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               h("span", { className: "eg-hint" }, "根据适用性和实测结果决定是否借鉴外部方法。")) : null,
             defaults.local_selection ? h("label", { className: "eg-field" }, h("span", null, "提交选择"),
               h("select", { className: "eg-input", value: values.local_selection, onChange: set("local_selection") },
+                h("option", { value: "walk_forward/1" }, "双折因果前滚检验（推荐）"),
                 h("option", { value: "best_local/1" }, "保留最高分合格提交"),
                 h("option", { value: "rolling_blocks/1" }, "要求多窗口一致"),
                 h("option", { value: "single_window/1" }, "使用最后一次合格提交"))) : null,
@@ -2709,8 +2710,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h(Table, { head: [["分钟", "num"], "动作", ["本地总分", "num"], "状态", "说明"] }, timeline.map(([action, item], index) => h("tr", { key: index },
             h("td", { className: "num" }, start !== null && timeOf(item.at) !== null ? ((timeOf(item.at) - start) / 60000).toFixed(1) : "–"),
             h("td", null, action, action === "提交" ? h(Fragment, null, " ", !item.accepted ? h(Tag, { tone: "danger" }, "未接受")
-              : item.replaces_start === false ? h(Tag, { tone: "neutral" }, "已接受，不替换模板") : h(Tag, { tone: "success" }, "已接受")) : null),
-            h("td", { className: `num ${toneClass(item.local?.score, 4)}` }, signed(item.local?.score)),
+              : item.replaces_start === false ? h(Tag, { tone: "neutral" }, "已接受，不替换模板") : h(Tag, { tone: "success" }, "已接受")) : null,
+              item.local_selection?.reused_local ? h(Fragment, null, " ", h(Tag, { tone: "neutral" }, "复用缓存")) : null),
+            h("td", { className: `num ${toneClass(item.local?.score, 4)}` }, signed(item.local?.score),
+              isNum(item.local_selection?.pre_delta) ? h("div", { className: "eg-faint" }, `早折 ${signed(item.local_selection.pre_delta)}`) : null),
             h("td", null, item.local?.status || ""),
             h("td", null, item.note || ""))))) : null,
         (record.notes || []).length ? h(Card, { title: "智能体的笔记", hint: "回合中记下的发现；导出训练数据时进入经验库。" },
@@ -3156,7 +3159,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     };
     const EPISODE_FACTS = [
       ["工作区", "TASK.md（目标、评分、接口、时限、预算），AGENTS.md（Harness 的说明和经验），data/（可见数据、列说明、领域背景、专家意见），submission/（Harness 的起始代码）"],
-      ["起始程序", "智能体开始前，宿主先在本地检验期上运行 submission/ 里原有的程序（模板）；一次提交只有在本地总分比它高至少 0.02 时才替换它，否则评分用模板"],
+      ["起始程序", "智能体开始前，宿主先在本地检验期上运行 submission/ 里原有的程序（模板）；默认按双折因果前滚检验（walk_forward/1）：近期检验窗高至少 0.02、更早拟合折不退化、双折均值高至少 0.015 且单时距退化不超 0.05 时才替换模板，否则评分用模板"],
       ["工具", "task_info（剩余时间、预算、现在评分用哪个程序）、evaluate_local（本地检验）、submit（提交，告诉你是否替换了起始程序）、note（记下发现和教训）、ask_expert（给专家留言，不等回答）"],
       ["沙箱", "只能读写自己的回合目录，只能连本机的模型网关和工具服务"],
       ["模型网关", "真实密钥留在本机；按成本计 token，到预算或截止时间就拒绝调用；每次请求和回复都记进轨迹"],

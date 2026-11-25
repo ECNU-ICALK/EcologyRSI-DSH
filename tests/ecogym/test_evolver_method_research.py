@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, Mock, patch
 from ecogym.episodes.agent import Session
 from ecogym.episodes.judge import Limits
 from ecogym.episodes.mcp import ToolError
+from ecogym.evolution.evidence import archive, overview
 from ecogym.evolution.evolver import (
     EvolverSettings,
     EvolverTools,
@@ -23,6 +24,8 @@ from ecogym.evolution.evolver import (
     _include_discovery,
     _method_guidance,
     _publish_adapter,
+    _should_discover_methods,
+    archive_readme,
     run_evolver,
 )
 from ecogym.evolution.loop import _builder_stalled
@@ -298,6 +301,53 @@ class BuilderBudgetTests(unittest.TestCase):
                                            "method_research": {"discovery": {"status": "search_unavailable"}}}),
                          500.0)
         self.assertEqual(_builder_stalled({"session": {"stalled_seconds": None}}), 0.0)
+
+    def test_stagnation_triggers_autonomous_discovery_with_cooldown(self):
+        r1_disc = {"generation": 1, "finished": True, "outcome": "kept",
+                   "evolver": {"method_research": {"discovery": {"status": "complete"}}}}
+        r2_kept = {"generation": 2, "finished": True, "outcome": "kept", "evolver": {"method_research": {}}}
+        r3_kept = {"generation": 3, "finished": True, "outcome": "kept", "evolver": {"method_research": {}}}
+        r3_adopted = {"generation": 3, "finished": True, "outcome": "adopted", "evolver": {"method_research": {}}}
+        self.assertTrue(_should_discover_methods("autonomous", 1, {"rounds": []}))
+        self.assertFalse(_should_discover_methods("internal", 1, {"rounds": []}))
+        self.assertFalse(_should_discover_methods("autonomous", 2, {"rounds": [r1_disc]}))
+        # Gen 3 has r1_disc in its last 2 rounds -> cooldown prevents back-to-back discovery
+        self.assertFalse(_should_discover_methods("autonomous", 3, {"rounds": [r1_disc, r2_kept]}))
+        # Gen 4 after two consecutive non-adopting non-discovery rounds (r2, r3) -> triggers!
+        self.assertTrue(_should_discover_methods("autonomous", 4, {"rounds": [r1_disc, r2_kept, r3_kept]}))
+        # Gen 4 when r3 adopted -> does not trigger
+        self.assertFalse(_should_discover_methods("autonomous", 4, {"rounds": [r1_disc, r2_kept, r3_adopted]}))
+
+    def test_screen_result_and_evidence_expose_per_horizon_gains_and_stepping_stones(self):
+        ref = {"t1": {"score": 0.10, "horizons": {1: 0.20, 6: 0.05, 24: 0.05}}}
+        rep = {"t1": {"status": "ok", "score": 0.12, "coverage": 1.0,
+                      "cells": [{"cell": "y@1", "objective": 0.21},
+                                {"cell": "y@6", "objective": 0.06},
+                                {"cell": "y@24", "objective": 0.09}]}}
+        screened = EvolverTools._screen_result("v1", rep, ref)
+        self.assertEqual(screened["horizons"], {"1": 0.01, "6": 0.01, "24": 0.04})
+        self.assertEqual(screened["worst_horizon"], 0.01)
+
+        decision = {
+            "delta": -0.002,
+            "interval": [-0.01, 0.008],
+            "reason": "below_practical_delta",
+            "tasks": [{"task": "t1", "delta": 0.01}, {"task": "t2", "delta": -0.014}],
+            "horizons": {1: -0.015, 6: -0.003, 24: 0.012},
+            "cells": {},
+        }
+        cand = {"name": "a", "digest": "b" * 64, "status": "rejected", "parent": "c" * 64, "decision": decision}
+        view = {"run_id": "evo:1", "incumbent": "c" * 64, "suite": {"train": ["t1", "t2"]},
+                "rounds": [{"generation": 1, "finished": True, "incumbent": "c" * 64, "candidates": [cand],
+                            "episodes": [], "notes": []}]}
+        ov = overview(view, {}, ["t1", "t2"], {})
+        self.assertIn("各时距：h=1 -0.015，h=6 -0.003，h=24 +0.012", ov)
+        ar = archive(view, {"g1a": "b" * 64})
+        self.assertIn("分时距平均变化：h=1 -0.015，h=6 -0.003，h=24 +0.012", ar)
+        readme = archive_readme(view, {"g1a": SimpleNamespace(digest="b" * 64, summary="long horizon model")},
+                                incumbent="c" * 64)
+        self.assertIn("◇ Δ -0.0020", readme)
+        self.assertIn("h=24 +0.0120", readme)
 
 
 if __name__ == "__main__":

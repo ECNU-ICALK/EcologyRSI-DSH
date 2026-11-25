@@ -1,5 +1,13 @@
 # Changelog
 
+## ecogym 0.5.0 — 双折因果前滚选拔、回合内同摘要缓存、分时距归因与停滞期方法调研
+
+- **双折因果前滚提交选择成为新建运行默认规则**（`episodes/tools.py`、`episodes/judge.py`）：新增 `walk_forward/1`（`calibration_pre` + `calibration_uq`）。仅在候选通过近期窗口 `calibration_uq`（总分提升 ≥ 0.02、单时距退化不超过 0.05）后，惰性在拟合期内部切分出的更早因果前滚折 `calibration_pre` 上复验，要求早折不退化（≥ 0.0）、单时距退化不超过 0.05 且双折均值提升 ≥ 0.015，按双折均分排序选优；拟合期过短的任务自动退回近期窗口最高分规则。已记录运行仍保持各自的 `local_selection` 不变。48 个历史回合重放中，有害替换从 8 个降至 4 个（4 个番茄过拟合回合全部拦截），全回合均分由 +0.1987 升至 +0.2002；在 `thermal` 与 `mobility` 公开基准上均选出隐藏验证期正收益方案。
+- **回合内相同提交摘要的确定性评测结果直接复用**（`episodes/tools.py`）：同一回合内 `start`、`evaluate_local` 与 `submit` 遇到内容摘要相同的健康程序时复用同一本地阶段评测结果（仍保存快照与账本事件，标记 `reused_local`），消除生产账本中约 44%–58% 的重复子进程开销。
+- **修复 `seed` 工具包双重拟合与在线流式偏差**（`harness/seed/template/ecotk/backtest.py`、`harness/seed/instructions.md`）：`backtest.windows` 默认留出 `evaluate_local` 检验期尾部、只在拟合期内部取滚动窗口；`backtest.run` 按裁判流式协议在窗口内每一步调用 `forecast`（即使该时刻存在缺失值），并返回分时距均值；更新 `instructions.md` 与回合提示词，避免对未改动的起始程序重复跑 `evaluate_local` + `submit`。
+- **模板筛选、证据包与存档说明显式输出分时距变化与长时距踏脚石**（`evolution/evolver.py`、`evolution/evidence.py`、`evolution/evolver.md`）：`screen_templates` 返回跨任务分时距平均增益（`horizons`）与最差时距变化；`overview.md` 和 `archive.md` 展示 `SuiteDecision.horizons`；`archive/README.md` 为最远时距显著占优且总分未明显退化的未采纳版本标注 `◇`，便于组合突破 6h/24h 瓶颈。
+- **连续停滞时触发独立预算的自主方法调研**（`evolution/evolver.py`）：`autonomous` 模式除第 1 代外，当最近连续 2 个已完成轮次均未采纳且均未执行独立调研时，再次启动独立计时的外部方法调研会话，打破局部参数平台期。
+
 ## ecogym 0.4.3 — 方法调查单独计时
 
 - **自主模式第 1 代的调查会话不再从评审预算里扣**（`evolution/evolver.py`）。调查仍用评审时间和计费 token 的 30%（`DISCOVERY_SHARE`），但这是额外的一份：评审员在调查结束后才开始计时，拿到完整的 `evolver_minutes` 和 `evolver_tokens`。以前调查从评审员的预算里扣：`evo:ee1aa9c321df` 第 1 代评审 15 分钟，调查用了 272 秒，评审员开始时只剩 8.4 分钟，写好的 5 个模板变体只评了 1 个，候选只改了说明和笔记，比较 −0.0026；没有调查的 `evo:d3f6ea3ea937` 第 1 代（同一提供方、15 分钟）5 个变体都评完，采纳 +0.0165。现在第 1 代的评审一步最多用 1.3 倍的时间和 token。

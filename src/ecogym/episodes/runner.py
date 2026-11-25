@@ -64,13 +64,20 @@ from .judge import (
 )
 from .mcp import ToolError
 from .sandbox import discover_runtime, ecogym_home, scratch_root
-from .tools import BEST_LOCAL_SELECTION, REPLACE_MARGIN, EpisodeTools, selection_rule_text, snapshot, starting_program
+from .tools import (
+    DEFAULT_LOCAL_SELECTION,
+    REPLACE_MARGIN,
+    EpisodeTools,
+    selection_rule_text,
+    snapshot,
+    starting_program,
+)
 from .workspace import LOCAL_STAGE, SCORED_STAGE, export_visible, task_brief
 
 EVENT_KINDS = frozenset({"episode_started", "episode_evaluated", "episode_submitted", "episode_note",
                          "expert_question", "episode_scored", "episode_finished"})
 PROMPT = ("请先阅读当前目录下的 TASK.md 和 AGENTS.md，然后独立完成任务：研究数据，编写并改进 submission/ 中的预测程序，"
-          "用 ecogym 工具检验和提交。截止前务必至少成功提交一次。")
+          "用 ecogym 工具检验，并在找到跨时间窗稳定改进时提交（已有有效起始程序时无需为保底重复提交原模板）。")
 PREDICTIONS = "scored.npz"
 CONTINUE_SHARE = 0.25  # an agent that ends with more than this share of its time left gets a follow-up session
 MAX_CONTINUATIONS = 3
@@ -121,7 +128,7 @@ class EpisodeConfig:
     limits: Limits = field(default_factory=Limits)
     context: dict[str, Any] = field(default_factory=dict)  # who ran it: evolution run, round, role, candidate
     expert_until: int | None = None  # expert guidance recorded up to this ledger sequence number (None: all)
-    local_selection: str = BEST_LOCAL_SELECTION
+    local_selection: str = DEFAULT_LOCAL_SELECTION
 
 
 class Events:

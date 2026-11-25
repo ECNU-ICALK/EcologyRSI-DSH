@@ -125,7 +125,11 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
                limits: Limits, start_local: float | None = None, selection_policy: str | None = None) -> str:
     """Describe the task, including the active submission policy and any starting score."""
 
-    from .tools import BEST_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, selection_rule_text  # tools imports this module
+    from .tools import (  # tools imports this module
+        DEFAULT_LOCAL_SELECTION,
+        SINGLE_WINDOW_SELECTION,
+        selection_rule_text,
+    )
 
     task = bench.task
     known_now = ("`action` 角色的列（控制设定值等）在起点已知；其余输入列也只用到起点为止。"
@@ -150,7 +154,7 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
     limit_line = (f"- 时限：`fit` ≤ {limits.fit_seconds:.0f} 秒；"
                   f"单次 `forecast` ≤ {limits.forecast_seconds:.0f} 秒；"
                   f"拟合加全部预报 ≤ {limits.total_seconds:.0f} 秒。结果要确定（固定随机种子）。")
-    policy = selection_policy or BEST_LOCAL_SELECTION
+    policy = selection_policy or DEFAULT_LOCAL_SELECTION
     rule = "按上面的规则评分"
     if start_local is None:
         rule_line = ("- **评分用哪个程序**：没有起始程序。"

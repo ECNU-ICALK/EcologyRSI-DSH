@@ -2,7 +2,7 @@
 
 **让大模型研究智能体在生态预测任务上自己做研究，并在严格的统计检验下，一代代改进它的工作方式。**
 
-![ecogym 0.4.3](https://img.shields.io/badge/ecogym-0.4.3-2ea44f)
+![ecogym 0.5.0](https://img.shields.io/badge/ecogym-0.5.0-2ea44f)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![macOS](https://img.shields.io/badge/agents-macOS-555555)
 ![DeepSeek Harness 0.1.5-rc.2](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5--rc.2-4d6bfe)
@@ -41,7 +41,7 @@ ecogym 是一个训练场。给它一组生态预测任务，例如“根据温�
 - 在进化中谁都没看过的封存期上，前三次运行把成绩从 0.093 提到 0.175，每一步的区间都在 0 以上。只有 2 个留出隔间时，留出任务上的区间都跨 0。
 - 第 4 次运行停在第 10 代，还没有做最终验证；它的起点版本的封存结果和留出回合是 0.4.0 之前的裁判协议下的，0.4.0 不混比也不重评，所以在 0.4.0 下得不到完整的验证（[docs/evolution.md](docs/evolution.md) 第 5 节）。它的三次采纳各在训练隔间的封存期上复核过：+0.011、+0.014、+0.004，区间都在 0 以上。三次历史复核共享中间版本，每个隔间每方只评一份程序。+0.028 是这八个隔间上固定程序的端点差，跨季节与智能体的独立收益仍待验证。
 - 作为参照：宿主内置的人工专家模型（只用拟合期的数据）在 8 个训练隔间的隐藏期上是 +0.140；第 4 次运行第 9 代采纳的版本在同样的隔间上是 +0.218。两者用的历史不同：被评分的程序用隐藏期之前的全部可见数据拟合，专家参照只用拟合期。2026-11-18 的审阅把专家参照的算法、参数和计分起点都保持不变、只补齐同样的历史，8 个隔间的专家均分从 0.139 升到 0.146（+0.007，超过门槛的 0.005），比较两者时要算上这一段。
-- 研究智能体和评审智能体都用 DeepSeek V4.1 Flash，每个回合 8 分钟。过程和分析见 [docs/evolution.md](docs/evolution.md) 第 14、19 至 27 节。
+- 研究智能体和评审智能体都用 DeepSeek V4.1 Flash，每个回合 8 分钟。过程和分析见 [docs/evolution.md](docs/evolution.md) 第 14、19 至 28 节。
 - 表中的封存结果是 0.3.7 之前的规则下评的：每个版本每个任务只评最后一个重复回合的程序。第 1 次运行（`evo:9eca5239360b`）里，起点版本在 3 个隔间上用的是另一次冒烟运行（4 分钟、deepseek-v4-flash）的程序，与本次的 8 分钟 pjlab 条件不同；按 0.3.7 的规则再验证这次运行时，2 个训练隔间会在本次条件下重新评，留出隔间 Sonoma 记为条件不同、缺这一项（第 23 节）。
 
 ## 目录
@@ -153,14 +153,14 @@ flowchart TB
 - **工具**：ecogym 通过 MCP 提供 `task_info`（剩余时间和预算）、`classical_reference`（持久、季节朴素和任务登记的经典方法的本地成绩）、`evaluate_local`（本地检验）、`submit`（提交）、`note`（记下发现和经验）、`ask_expert`（给专家留言，不等回答）。
 - **隔离**：会话只能读写自己的回合目录，只能连本机的模型网关和工具服务。网关按 token 预算和截止时间拒绝调用，并记录每次请求和回复。时限只按机器醒着的时间计。
 - **续跑**：智能体在剩余时间超过四分之一时就结束的，宿主开一段新会话请它继续，最多续跑 3 次。
-- **评分哪个程序**：开始前，宿主先在本地检验期上运行模板。一次提交只有在覆盖完整、本地总分比模板高至少 0.02 时才能替换它；被评分的是这样的提交里本地分最高的一次（`best_local/1`；旧运行沿用“最后一次”的 `single_window/1`），没有就是模板本身。本地检验期比隐藏期短得多，本地的小幅提升常常不能在隐藏期上成立，所以门槛不低。
+- **评分哪个程序**：开始前，宿主先在本地检验期上运行模板；同一回合内遇到字节摘要完全相同的健康程序会直接复用评测结果，不重复拉起子进程。新建运行默认采用**双折因果前滚检验**（`walk_forward/1`）：候选须完整覆盖计分格、近期本地检验期（`calibration_uq`）总分比模板高至少 0.02，且在拟合期内部切分出的更早因果前滚折（`calibration_pre`）上不退化、双折平均增益至少 0.015、单时距退化不超过 0.05，满足条件的提交中双折均分最高者用于评分（可选 `best_local/1`、`rolling_blocks/1`；旧运行沿用各自已记录的规则），没有通过则用模板本身。
 - **裁判**：用隐藏期之前的全部数据拟合被评分的程序，然后逐个时间步送入新观测，每一步都要求预报，只在计分起点计分（`causal_stream/2`）。程序看不到起点之后的值，也看不出哪些时刻会被计分，没有网络。
 
 ### 一代
 
-1. **评审会话**：评审智能体在自己的工作区里读证据，包括各回合的成绩、程序、笔记和会话记录，同一版本好坏回合的对照，以往候选的改动和结果，以往运行的经验和专家意见。然后它在 `candidates/<名字>/` 里改出候选，在 `proposals/` 里写理由。候选可以从在任版本出发，也可以从存档里任何比较过的版本出发。新运行默认在第 1 代的评审之前先开一个独立的调查会话查公开方法（另用评审时间和计费 token 的 30%，不占评审自己的预算），把有来源的记录交给评审员借鉴或跳过（`--method-research`；对成绩的作用还没有验证，见 docs/evolution.md 第 3 节）。每代结束后，宿主把这一代的增益拆成模板的贡献和智能体相对模板的贡献，写进下一代的证据。
+1. **评审会话**：评审智能体在自己的工作区里读证据，包括各回合的成绩、程序、笔记和会话记录，同一版本好坏回合的对照，以往候选的改动、分时距变化和结果，以往运行的经验和专家意见。然后它在 `candidates/<名字>/` 里改出候选，在 `proposals/` 里写理由。候选可以从在任版本出发，也可以从存档里任何比较过的版本（含全任务正增益的 `★` 踏脚石与长时距特长的 `◇` 踏脚石）出发。新运行默认在第 1 代以及连续 2 代未采纳的停滞期后，在评审之前先开一个独立的调查会话查公开方法（另用评审时间和计费 token 的 30%，不占评审自己的预算），把有来源的记录交给评审员借鉴或跳过（`--method-research`；见 docs/evolution.md 第 3、27、28 节）。每代结束后，宿主把这一代的增益拆成模板的贡献和智能体相对模板的贡献，写进下一代的证据。
 2. **宿主工具**：
-   - `screen_templates`：在每个训练任务的本地检验期上一次试多个模板变体，按平均增益排序（只用本地检验期，不涉及隐藏期）。
+   - `screen_templates`：在每个训练任务的本地检验期上一次试多个模板变体，按平均增益排序并返回分时距增益（`horizons`；只用本地检验期，不涉及隐藏期）。
    - `check_candidate`：检查候选能否加载、是否超限、有没有写死任务名；模板改了就实际运行一遍。
    - `reset_candidate`：把候选换成某个存档版本，再在上面修改。
    - 同一个模板在一次会话里只评一次。会话剩下的时间不够时，宿主停止试新的变体，给评审留出做候选的时间。
@@ -312,7 +312,7 @@ ecogym expert list | answer | note                  # 专家的问题、回答�
 ecogym export --out <目录>                          # 导出训练数据
 ```
 
-`evolve run` 的常用选项：`--harness`（起点版本，默认 `seed`）、`--generations`、`--candidates`、`--repeats`、`--minutes`、`--tokens`、`--model`、`--evolver-model`、`--evolver-minutes`、`--concurrency`、`--outage-minutes`、`--label`；0.4.0 起还有 `--method-research autonomous|internal|supplied`（默认 `autonomous`，见 docs/evolution.md 第 3 节）、`--method-registry`、`--local-selection best_local/1|rolling_blocks/1|single_window/1`（默认 `best_local/1`）和 `--check-adoptions`（默认关闭，`--no-check-adoptions` 照旧可用）。开始前，宿主检查每个模型的提供方和密钥，并发一个很小的测试请求：调用不了的模型不能开始运行。
+`evolve run` 的常用选项：`--harness`（起点版本，默认 `seed`）、`--generations`、`--candidates`、`--repeats`、`--minutes`、`--tokens`、`--model`、`--evolver-model`、`--evolver-minutes`、`--concurrency`、`--outage-minutes`、`--label`；还有 `--method-research autonomous|internal|supplied`（默认 `autonomous`，见 docs/evolution.md 第 3、27、28 节）、`--method-registry`、`--local-selection walk_forward/1|best_local/1|rolling_blocks/1|single_window/1`（默认 `walk_forward/1`）和 `--check-adoptions`（默认关闭，`--no-check-adoptions` 照旧可用）。开始前，宿主检查每个模型的提供方和密钥，并发一个很小的测试请求：调用不了的模型不能开始运行。
 
 ### 服务接口
 

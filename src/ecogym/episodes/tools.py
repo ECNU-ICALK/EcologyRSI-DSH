@@ -34,7 +34,7 @@ import numpy as np
 from ..evaluation.harness import Bench, Evaluation
 from ..kernel import clock
 from .classical import classical_reference_tool
-from .judge import Limits, judge_program
+from .judge import PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
 from .mcp import Tool, ToolError
 from .sandbox import Runtime
 from .workspace import LOCAL_STAGE
@@ -47,16 +47,34 @@ REPLACE_MARGIN = 0.02  # local-score gain a submission needs over the starting p
 SINGLE_WINDOW_SELECTION = "single_window/1"
 BEST_LOCAL_SELECTION = "best_local/1"
 ROLLING_SELECTION = "rolling_blocks/1"
-LOCAL_SELECTION_POLICIES = (SINGLE_WINDOW_SELECTION, BEST_LOCAL_SELECTION, ROLLING_SELECTION)
+WALK_FORWARD_SELECTION = "walk_forward/1"
+DEFAULT_LOCAL_SELECTION = WALK_FORWARD_SELECTION
+LOCAL_SELECTION_POLICIES = (
+    SINGLE_WINDOW_SELECTION,
+    BEST_LOCAL_SELECTION,
+    ROLLING_SELECTION,
+    WALK_FORWARD_SELECTION,
+)
 WINDOW_COUNT = 3
 MIN_BLOCKS = 2 * WINDOW_COUNT
 WINDOW_LOSS_CAP = 0.02
+WALK_FORWARD_MEAN_MARGIN = 0.015
+WALK_FORWARD_PRE_FLOOR = 0.0
+WALK_FORWARD_HORIZON_CAP = 0.05
 SCORE_TOLERANCE = 1e-12
 
 
 def selection_rule_text(policy: str) -> str:
     if policy == SINGLE_WINDOW_SELECTION:
         return f"评分用最后一次被接受、且本地总分比起始程序高至少 {REPLACE_MARGIN:g} 的提交，否则用起始程序。"
+    if policy == WALK_FORWARD_SELECTION:
+        return (
+            f"候选须完成本地检验并覆盖所有计分格；相对有效起始程序，近期本地窗口总分须提高至少 {REPLACE_MARGIN:g}，"
+            f"且在拟合期内部留出的更早因果前滚折上不退化（≥ {WALK_FORWARD_PRE_FLOOR:+.2g}）、"
+            f"两折平均增益至少 {WALK_FORWARD_MEAN_MARGIN:g}、任一时距退化不超过 {WALK_FORWARD_HORIZON_CAP:g}。"
+            "满足条件的提交中双折均分最高者用于评分，没有通过则继续用起始程序；"
+            "拟合期过短不足以切分前滚折时退回近期窗口最高分规则；起始程序无效时可用通过完整性检验的提交恢复。"
+        )
     if policy not in (BEST_LOCAL_SELECTION, ROLLING_SELECTION):
         raise ValueError(f"unknown local selection policy {policy!r}")
     windows = (f"将至少 {MIN_BLOCKS} 个时间块顺序分成 {WINDOW_COUNT} 个窗口，至少两个窗口进步，"
@@ -102,6 +120,84 @@ def rolling_selection(candidate: Evaluation, start: Evaluation) -> dict[str, Any
     if sum(gain > SCORE_TOLERANCE for gain in gains) <= WINDOW_COUNT // 2:
         return {**result, "reason": "insufficient_window_wins"}
     return {**result, "passed": True, "reason": "passed"}
+
+
+def horizon_objectives(evaluation: Evaluation) -> dict[int, float]:
+    """Weighted mean cell objective per forecast horizon on ``evaluation``."""
+
+    by_cell = {row["cell"]: float(row["objective"]) for row in evaluation.cells()}
+    by_horizon: dict[int, list[tuple[float, float]]] = {}
+    for cell, weight in zip(evaluation.stage.cells, evaluation.stage.weights, strict=True):
+        by_horizon.setdefault(cell.horizon, []).append((by_cell[cell.key], float(weight)))
+    return {
+        horizon: sum(val * w for val, w in pairs) / sum(w for _, w in pairs)
+        for horizon, pairs in sorted(by_horizon.items())
+    }
+
+
+def walk_forward_selection(
+    candidate: Evaluation,
+    start: Evaluation,
+    *,
+    candidate_pre: Evaluation | None = None,
+    start_pre: Evaluation | None = None,
+    pre_available: bool = True,
+    pre_invalid: bool = False,
+) -> dict[str, Any]:
+    """Two-fold causal walk-forward selection across ``calibration_pre`` and ``calibration_uq``."""
+
+    diagnostic = rolling_selection(candidate, start)
+    uq_delta = diagnostic["delta"]
+    cand_h = horizon_objectives(candidate)
+    start_h = horizon_objectives(start)
+    uq_h_deltas = {str(h): round(cand_h[h] - start_h[h], 4) for h in start_h if h in cand_h}
+    min_uq_h = min((cand_h[h] - start_h[h] for h in start_h if h in cand_h), default=0.0)
+    base = {
+        **diagnostic,
+        "policy": WALK_FORWARD_SELECTION,
+        "passed": False,
+        "window_passed": diagnostic["passed"],
+        "window_reason": diagnostic["reason"],
+        "uq_horizons": uq_h_deltas,
+        "pre_available": pre_available,
+    }
+    if not math.isfinite(uq_delta) or not math.isfinite(min_uq_h):
+        return {**base, "reason": "nonfinite_score"}
+    if uq_delta + SCORE_TOLERANCE < REPLACE_MARGIN:
+        return {**base, "reason": "overall_gain_below_margin"}
+    if min_uq_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
+        return {**base, "reason": "horizon_loss_above_cap"}
+    if not pre_available:
+        return {**base, "passed": True, "reason": "passed_single_fold", "walk_forward_score": candidate.score()}
+    if pre_invalid or candidate_pre is None or start_pre is None:
+        return {**base, "reason": "pre_fold_invalid"}
+    pre_score = candidate_pre.score()
+    pre_base = start_pre.score()
+    pre_delta = pre_score - pre_base
+    cand_pre_h = horizon_objectives(candidate_pre)
+    start_pre_h = horizon_objectives(start_pre)
+    pre_h_deltas = {str(h): round(cand_pre_h[h] - start_pre_h[h], 4) for h in start_pre_h if h in cand_pre_h}
+    min_pre_h = min((cand_pre_h[h] - start_pre_h[h] for h in start_pre_h if h in cand_pre_h), default=0.0)
+    wf_delta = 0.5 * (uq_delta + pre_delta)
+    wf_score = 0.5 * (candidate.score() + pre_score)
+    enriched = {
+        **base,
+        "pre_score": round(pre_score, 4),
+        "pre_start": round(pre_base, 4),
+        "pre_delta": pre_delta,
+        "pre_horizons": pre_h_deltas,
+        "walk_forward_delta": wf_delta,
+        "walk_forward_score": wf_score,
+    }
+    if not math.isfinite(pre_delta) or not math.isfinite(min_pre_h):
+        return {**enriched, "reason": "nonfinite_score"}
+    if pre_delta + SCORE_TOLERANCE < WALK_FORWARD_PRE_FLOOR:
+        return {**enriched, "reason": "pre_fold_regression"}
+    if min_pre_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
+        return {**enriched, "reason": "horizon_loss_above_cap"}
+    if wf_delta + SCORE_TOLERANCE < WALK_FORWARD_MEAN_MARGIN:
+        return {**enriched, "reason": "walk_forward_gain_below_margin"}
+    return {**enriched, "passed": True, "reason": "passed"}
 
 
 def snapshot(source: Path, target: Path) -> str:
@@ -171,14 +267,15 @@ def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits,
         return None
     report, evaluation = judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
     return {"n": None, "digest": digest, "program": str(program), "start": True, "local": _summary(report),
-            "evaluation": evaluation, "healthy": _healthy(report)}
+            "report": report, "evaluation": evaluation, "healthy": _healthy(report)}
 
 
 class EpisodeTools:
     def __init__(self, *, bench: Bench, root: Path, runtime: Runtime, limits: Limits, deadline: float,
                  usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
                  start: dict[str, Any] | None = None, programs: Path | None = None,
-                 selection_policy: str = BEST_LOCAL_SELECTION) -> None:
+                 selection_policy: str = DEFAULT_LOCAL_SELECTION,
+                 reuse_local: bool | None = None) -> None:
         """``start`` is the judged starting program (``starting_program``), if any."""
 
         if selection_policy not in LOCAL_SELECTION_POLICIES:
@@ -194,11 +291,17 @@ class EpisodeTools:
         self.event = event
         self.start = start
         self.selection_policy = selection_policy
+        self._reuse_local = (runtime is not None) if reuse_local is None else reuse_local
+        self._local_cache: dict[tuple[str, str], tuple[dict[str, Any], Evaluation]] = {}
+        if (self._reuse_local and start and start.get("healthy")
+                and "digest" in start and "report" in start and "evaluation" in start):
+            self._local_cache[(start["digest"], LOCAL_STAGE)] = (start["report"], start["evaluation"])
         self.submissions: list[dict[str, Any]] = []
         self.evaluations = 0
         self.notes: list[dict[str, Any]] = []
         self.questions: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        self._pre_lock = threading.Lock()
         self._slots = threading.Semaphore(2)
         self._counter = 0
         self.closing = threading.Event()  # set when the session ends: local checks stop, nothing more is recorded
@@ -252,6 +355,40 @@ class EpisodeTools:
             self._counter += 1
             return self._counter
 
+    def _judge_stage(self, program: Path, digest: str | None, stage: str) -> tuple[dict[str, Any], Evaluation, bool]:
+        if self._reuse_local and digest:
+            with self._lock:
+                cached = self._local_cache.get((digest, stage))
+            if cached is not None:
+                return cached[0], cached[1], True
+        with self._slots:
+            self._open()
+            if self._reuse_local and digest:
+                with self._lock:
+                    cached = self._local_cache.get((digest, stage))
+                if cached is not None:
+                    return cached[0], cached[1], True
+            report, evaluation = judge_program(self.bench, program, stage, self.runtime, limits=self.limits,
+                                               cancel=self.closing)
+            if self._reuse_local and digest and _healthy(report):
+                with self._lock:
+                    self._local_cache[(digest, stage)] = (report, evaluation)
+        return report, evaluation, False
+
+    def _start_pre_evaluation(self) -> Evaluation | None:
+        if self.start is None:
+            return None
+        with self._pre_lock:
+            if "pre_evaluation" in self.start:
+                return self.start["pre_evaluation"]
+            start_program = self.start.get("program")
+            if not start_program:
+                return None
+            report, evaluation, _ = self._judge_stage(Path(start_program), self.start.get("digest"), PRE_LOCAL_STAGE)
+            result = evaluation if _healthy(report) else None
+            self.start["pre_evaluation"] = result
+            return result
+
     def _run_local(self, kind: str) -> tuple[int, str, Path, dict[str, Any], bool, dict[str, Any]]:
         self._open()
         if clock.now() > self.deadline:
@@ -260,17 +397,16 @@ class EpisodeTools:
         program = self.programs / kind / f"{number:03d}" / "program"
         program.mkdir(parents=True)
         digest = snapshot(self.root / "work" / "submission", program)
-        with self._slots:
-            self._open()
-            report, evaluation = judge_program(self.bench, program, LOCAL_STAGE, self.runtime, limits=self.limits,
-                                               cancel=self.closing)
+        report, evaluation, reused = self._judge_stage(program, digest, LOCAL_STAGE)
         summary = _summary(report)
-        accepted, selection = self._selection(report, evaluation, summary)
+        accepted, selection = self._selection(report, evaluation, summary, program=program, digest=digest)
         selection["candidate_score"] = report["score"]
+        if reused:
+            selection["reused_local"] = True
         return number, digest, program, summary, accepted, selection
 
-    def _selection(self, report: dict[str, Any], evaluation: Evaluation, summary: dict[str, Any]
-                   ) -> tuple[bool, dict[str, Any]]:
+    def _selection(self, report: dict[str, Any], evaluation: Evaluation, summary: dict[str, Any], *,
+                   program: Path | None = None, digest: str | None = None) -> tuple[bool, dict[str, Any]]:
         policy = self.selection_policy
         if policy == SINGLE_WINDOW_SELECTION:
             accepted = summary["status"] == "ok" and summary["coverage"] > 0
@@ -287,6 +423,25 @@ class EpisodeTools:
             return True, {"policy": policy, "passed": True, "reason": reason}
         if "evaluation" not in self.start:
             return True, {"policy": policy, "passed": False, "reason": "missing_start_predictions"}
+        if policy == WALK_FORWARD_SELECTION:
+            pre_stage = calibration_pre_stage(self.bench)
+            if pre_stage is None:
+                return True, walk_forward_selection(evaluation, self.start["evaluation"], pre_available=False)
+            prelim = walk_forward_selection(evaluation, self.start["evaluation"], pre_available=False)
+            if not prelim["passed"]:
+                return True, {**prelim, "passed": False, "pre_available": True}
+            start_pre = self._start_pre_evaluation()
+            if start_pre is None or program is None:
+                return True, walk_forward_selection(evaluation, self.start["evaluation"], pre_available=False)
+            pre_report, cand_pre, _ = self._judge_stage(program, digest, PRE_LOCAL_STAGE)
+            return True, walk_forward_selection(
+                evaluation,
+                self.start["evaluation"],
+                candidate_pre=cand_pre if _healthy(pre_report) else None,
+                start_pre=start_pre,
+                pre_available=True,
+                pre_invalid=not _healthy(pre_report),
+            )
         diagnostic = rolling_selection(evaluation, self.start["evaluation"])
         if policy == ROLLING_SELECTION:
             return True, diagnostic
@@ -312,7 +467,9 @@ class EpisodeTools:
         if final is not None:
             score = final["local"]["score"]
             gain = "" if self.start is None else f"，相对起始程序 {score - self.start['local']['score']:+.4f}"
-            return f"第 {final['n']} 次提交（本地 {score:+.4f}{gain}）"
+            wf = final.get("local_selection", {}).get("walk_forward_delta")
+            wf_text = f"，双折均增 {wf:+.4f}" if isinstance(wf, (int, float)) and math.isfinite(wf) else ""
+            return f"第 {final['n']} 次提交（本地 {score:+.4f}{gain}{wf_text}）"
         if self.start is not None:
             return f"起始程序（本地 {self.start['local']['score']:+.4f}）"
         return "还没有被接受的提交"
@@ -359,12 +516,24 @@ class EpisodeTools:
             verdict = f"已接受，满足替换条件，但已有本地成绩更好的提交。现在评分用{self.scored_text()}"
         else:
             gain = selection.get("delta")
-            small = (selection.get("reason") in ("below_margin", "overall_gain_below_margin")
+            reason = selection.get("reason")
+            small = (reason in ("below_margin", "overall_gain_below_margin")
                      and isinstance(gain, (int, float)) and math.isfinite(gain))
             caution = "本地检验期比隐藏期短得多，这么小的提升常常不能在隐藏期上成立。" if small and gain > 0 else ""
-            verdict = ("已接受，未达到本地替换条件"
-                       + (f"：本地比起始程序 {gain:+.4f}，替换至少要高 {REPLACE_MARGIN:g}" if small else "")
-                       + f"。现在评分用{self.scored_text()}。{caution}")
+            detail = ""
+            if small:
+                detail = f"：本地比起始程序 {gain:+.4f}，替换至少要高 {REPLACE_MARGIN:g}"
+            elif reason == "pre_fold_regression" and isinstance(selection.get("pre_delta"), (int, float)):
+                detail = (f"：近期窗口 {gain:+.4f}，但更早拟合折前滚检验 {selection['pre_delta']:+.4f}"
+                          "（发生跨时间段退化，疑似过拟合近期窗口）")
+            elif reason == "horizon_loss_above_cap":
+                detail = f"：单时距退化超过上限 {WALK_FORWARD_HORIZON_CAP:g}"
+            elif reason == "walk_forward_gain_below_margin" and isinstance(
+                selection.get("walk_forward_delta"), (int, float)
+            ):
+                detail = (f"：双折平均增益 {selection['walk_forward_delta']:+.4f}，"
+                          f"至少需要 {WALK_FORWARD_MEAN_MARGIN:g}")
+            verdict = f"已接受，未达到本地替换条件{detail}。现在评分用{self.scored_text()}。{caution}"
         return {"n": number, "digest": digest[:12], "accepted": accepted, "replaces_start": replaces,
                 "verdict": verdict, "local_selection": selection, **summary}
 
@@ -374,6 +543,16 @@ class EpisodeTools:
         passing = [item for item in self.submissions if self.replaces_start(item)]
         if self.selection_policy == SINGLE_WINDOW_SELECTION:
             return passing[-1] if passing else None
+        if self.selection_policy == WALK_FORWARD_SELECTION:
+            return max(
+                passing,
+                key=lambda item: (
+                    item["local_selection"].get("walk_forward_score", item["local_selection"]["candidate_score"]),
+                    item["local_selection"]["candidate_score"],
+                    -item["n"],
+                ),
+                default=None,
+            )
         return max(passing, key=lambda item: (item["local_selection"]["candidate_score"], -item["n"]), default=None)
 
     def note(self, kind: str, text: str, sources: list[str] | None = None) -> dict[str, Any]:
@@ -392,6 +571,7 @@ class EpisodeTools:
         return {"recorded": True, "message": "已转给专家；不会立即回答，请继续工作。"}
 
 
-__all__ = ["BEST_LOCAL_SELECTION", "LOCAL_SELECTION_POLICIES", "REPLACE_MARGIN", "ROLLING_SELECTION",
-           "SINGLE_WINDOW_SELECTION", "EpisodeTools", "rolling_selection", "selection_rule_text", "snapshot",
-           "starting_program"]
+__all__ = ["BEST_LOCAL_SELECTION", "DEFAULT_LOCAL_SELECTION", "LOCAL_SELECTION_POLICIES", "REPLACE_MARGIN",
+           "ROLLING_SELECTION", "SINGLE_WINDOW_SELECTION", "WALK_FORWARD_HORIZON_CAP", "WALK_FORWARD_MEAN_MARGIN",
+           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "horizon_objectives",
+           "rolling_selection", "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]

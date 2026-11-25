@@ -12,7 +12,13 @@ import numpy as np
 
 from ecogym.episodes.agent import Cancelled
 from ecogym.episodes.judge import JUDGE_PROTOCOL, file_digest, save_predictions
-from ecogym.episodes.tools import BEST_LOCAL_SELECTION, ROLLING_SELECTION, SINGLE_WINDOW_SELECTION, snapshot
+from ecogym.episodes.tools import (
+    BEST_LOCAL_SELECTION,
+    ROLLING_SELECTION,
+    SINGLE_WINDOW_SELECTION,
+    WALK_FORWARD_SELECTION,
+    snapshot,
+)
 from ecogym.episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ecogym.evaluation.harness import Evaluation
 from ecogym.evolution.evidence import overview
@@ -196,8 +202,10 @@ class TemplateAttributionTests(unittest.TestCase):
         self.assertIn("最后一次被接受", legacy)
 
     def test_local_selection_defaults_for_new_and_legacy_rounds(self):
-        self.assertEqual(self.evolution.config.local_selection, BEST_LOCAL_SELECTION)
+        self.assertEqual(self.evolution.config.local_selection, WALK_FORWARD_SELECTION)
         self.assertEqual(EvolveConfig.from_dict({"suite": "legacy"}).local_selection, SINGLE_WINDOW_SELECTION)
+        self.assertEqual(EvolveConfig(suite="synthetic", local_selection=BEST_LOCAL_SELECTION).local_selection,
+                         BEST_LOCAL_SELECTION)
         self.assertEqual(EvolveConfig(suite="synthetic", local_selection=ROLLING_SELECTION).local_selection,
                          ROLLING_SELECTION)
         with self.assertRaisesRegex(ValueError, "local_selection"):
