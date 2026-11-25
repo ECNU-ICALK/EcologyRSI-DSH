@@ -33,7 +33,8 @@ it also runs again without using up its retries, up to ``SERVICE_RERUNS``
 times. A candidate missing usable episodes on
 any training task is not adopted that round. An evolver session that got no
 reply, or that failed model calls kept from working for more than
-``STALL_SHARE`` of its time while it left no candidate to compare, is reviewed
+``STALL_SHARE`` of its time (the builder's: generation 1's research session
+has its own) while it left no candidate to compare, is reviewed
 once more, after the outage; a second such session, or an outage longer than
 ``outage_minutes``, stops the run (``ServiceDown``, resumable, and resumed by
 the service itself with ``auto_resume``): its generation runs again rather
@@ -214,6 +215,16 @@ def _scored_program(scored: dict[str, Any]) -> dict[str, Any]:
     return {"program_digest": scored.get("digest"), "scored_start": bool(scored.get("start")),
             "score_stage": scored.get("stage"), "judge_protocol": scored.get("judge_protocol"),
             "score_status": scored.get("status")}
+
+
+def _builder_stalled(outcome: dict[str, Any]) -> float:
+    """Seconds an evolver's builder waited on failed model calls. The round's session record also holds generation
+    1's research session (``evolver._include_discovery``), which has its own time on top of the builder's
+    (``evolver.DISCOVERY_SHARE``), so its waiting does not count against the builder's budget."""
+
+    research = ((outcome.get("method_research") or {}).get("discovery") or {}).get("session") or {}
+    stalled = float(outcome["session"].get("stalled_seconds") or 0.0)
+    return max(0.0, stalled - float(research.get("stalled_seconds") or 0.0))
 
 
 def _forecast_fingerprint(evaluation: Evaluation) -> str:
@@ -1133,7 +1144,7 @@ class Evolution:
                 raise
             session = outcome["session"]
             budget = config.evolver_minutes * 60
-            stalled = float(session.get("stalled_seconds") or 0.0)
+            stalled = _builder_stalled(outcome)
             # failed calls kept the evolver from working for most of its time and it left nothing to compare: the
             # provider decided this generation, not the evidence (evo:0f0d4068b8b1 generation 5: 871 of 900 s, two
             # duplicates without proposals), so the generation is reviewed again rather than spent

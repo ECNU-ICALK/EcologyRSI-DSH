@@ -116,6 +116,10 @@ METHOD_RESEARCH_MODES = ("internal", "supplied", "autonomous")
 METHOD_RESEARCH_MARKER = "\n<!-- ecogym-method-research -->\n"
 METHOD_RECORD_LIMIT = 12
 METHOD_DECISIONS = ("direct", "adapt", "skip")
+# generation 1's research session (method_research = autonomous) runs before the builder on this share of the
+# evolver's minutes and tokens, on top of them: the builder then gets its whole budget. Until 0.4.2 the share was
+# taken out of the builder's: evo:ee1aa9c321df's builder began with 8.4 of its 15 minutes and screened one of the
+# five template variants it had written (the 11-09 run without research screened all five and was adopted).
 DISCOVERY_SHARE = 0.30
 DISCOVERY_LANES = ("competitive", "practical")
 DISCOVERY_PROMPT = ("阅读 TASK_PROFILE.md。本阶段只调研公开方法。第一步用 web_search 提交两条独立查询，"
@@ -1449,7 +1453,10 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
                 settings=settings, tasks=tasks, benches=benches, limits=limits, started=started, cancel=cancel,
                 observe_search=observe_search)
             discovery["search_responses"] = dict(search_responses)
-            gateway.token_budget = max(0, settings.tokens - discovery_session.metered_tokens)
+            # the research had its own time and tokens: the builder's budget starts now and whole, as in any other
+            # generation (its gateway, made before the research only so that an unusable model fails first, has
+            # spent nothing yet)
+            deadline = gateway.deadline = clock.now() + settings.minutes * 60
         else:
             discovery = {"status": "search_unavailable", "records": []}
 
@@ -1490,11 +1497,10 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
         evidence = write_evidence(work / "evidence", ledger=ledger, view=view, tasks=[task.id for task in tasks],
                                   names=_names(view, incumbent), expert_text=expert_text,
                                   ensembles=ensemble_scores(view, benches.__getitem__), archived=archived, prior=prior)
-    build_minutes = max(0.0, (deadline - clock.now()) / 60) if discovery_session is not None else settings.minutes
     (work / "EVOLVE.md").write_text(brief(
         generation=generation, suite=suite, tasks=tasks, benches=benches, names=names, repeats=repeats,
         episode_minutes=episode_minutes, episode_tokens=episode_tokens, model=model, incumbent=incumbent,
-        limits=limits, forbidden=forbidden, minutes=build_minutes, tokens=gateway.token_budget, deadline=deadline,
+        limits=limits, forbidden=forbidden, minutes=settings.minutes, tokens=gateway.token_budget, deadline=deadline,
         archived=archived, local_selection=local_selection,
     ), encoding="utf-8")
     events = Events(ledger_path, run_id, frozenset({"evolver_note", "expert_question"}))
@@ -1507,7 +1513,7 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
     agent = AgentSpec(model=settings.model, reasoning_effort=settings.reasoning_effort,
                       web_search=method_research != "supplied" and discovery is None,
                       subagent_depth=1, parallel_tool_calls=10)
-    follow_up = evolver_follow_up(deadline=deadline, minutes=build_minutes, widest=evidence.get("widest"))
+    follow_up = evolver_follow_up(deadline=deadline, minutes=settings.minutes, widest=evidence.get("widest"))
     session = None
     try:
         if discovery is not None:

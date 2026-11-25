@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from ecogym.episodes.agent import Session
 from ecogym.episodes.judge import Limits
@@ -23,7 +23,9 @@ from ecogym.evolution.evolver import (
     _include_discovery,
     _method_guidance,
     _publish_adapter,
+    run_evolver,
 )
+from ecogym.evolution.loop import _builder_stalled
 from ecogym.kernel import clock
 
 SOURCE = "https://doi.org/10.1234/example"
@@ -202,6 +204,100 @@ class ResearchTests(unittest.TestCase):
                          "complete")
         self.assertEqual(_discovery_handoff(records, sources, year=2030, queries=["q", "different"])["status"],
                          "partial")
+
+
+class BuilderBudgetTests(unittest.TestCase):
+    """Generation 1's research session runs on its own time and tokens and the builder then gets its whole budget.
+    Until 0.4.2 the research came out of the builder's: in evo:ee1aa9c321df generation 1 it took 272 s of a
+    15-minute session, the builder began with 8.4 minutes and screened one of its five template variants."""
+
+    MINUTES, TOKENS, RESEARCH, OPENED = 15.0, 4_000_000, 272.0, 10_000.0
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+
+    def evolve(self, generation: int, method_research: str = "autonomous"):
+        now = [self.OPENED]
+        seen = {}
+        gateway = SimpleNamespace(has_deepseek=True, on_call=None, usage=dict)
+
+        def make_gateway(trajectory, *, tokens, deadline, model):
+            gateway.token_budget, gateway.deadline = tokens, deadline
+            return gateway
+
+        def research(**kwargs):
+            seen["research_started"] = kwargs["started"]
+            now[0] += self.RESEARCH
+            session = Session("timeout", 0, True, self.RESEARCH, 280_000, 270_000, 30, 25, 5, 0, "", {}, {},
+                              stalled_seconds=65.5)
+            return {"status": "partial", "records": [], "search_leads": [], "session": session.to_dict()}, session
+
+        def builder(**kwargs):
+            seen["builder"] = {"deadline": kwargs["deadline"], "gateway_deadline": gateway.deadline,
+                               "tokens": gateway.token_budget}
+            now[0] += 600.0
+            return Session("finished", 0, False, 600.0, 900_000, 860_000, 21, 15, 6, 0, "", {}, {},
+                           stalled_seconds=180.0)
+
+        tools = Mock(method_probes=[], method_records=[])
+        tools.collect.return_value = []
+        make_tools, write_brief, follow_up = Mock(return_value=tools), Mock(return_value=""), Mock(return_value=None)
+        task = SimpleNamespace(id="greenhouse.example")
+        incumbent = SimpleNamespace(digest="d" * 64, name="seed")
+        with (patch.object(clock, "now", side_effect=lambda: now[0]),
+              patch.multiple("ecogym.evolution.evolver", discover_runtime=Mock(return_value=None),
+                             scratch_root=Mock(return_value=self.root / "scratch"),
+                             ecogym_home=Mock(return_value=self.root / "home"), make_gateway=make_gateway,
+                             _discover_methods=research, run_agent=builder, fork=Mock(), Ledger=MagicMock(),
+                             related_runs=Mock(return_value=[]), archive_versions=Mock(return_value={}),
+                             forbidden_terms=Mock(return_value=[]), write_evidence=Mock(return_value={}),
+                             ensemble_scores=Mock(return_value={}), known_versions=Mock(return_value={}),
+                             brief=write_brief, evolver_follow_up=follow_up, Events=Mock(), EvolverTools=make_tools)):
+            outcome = run_evolver(
+                run_id="evo:test", generation=generation, incumbent=incumbent, suite=None, tasks=[task],
+                benches={task.id: None}, view={"rounds": [], "seed": {"digest": incumbent.digest}},
+                ledger_path=self.root / "ledger.sqlite3",
+                settings=EvolverSettings(minutes=self.MINUTES, tokens=self.TOKENS), repeats=2, episode_minutes=8,
+                episode_tokens=3_000_000, model=None, limits=Limits(), method_research=method_research)
+        budgets = {"brief": write_brief.call_args.kwargs, "tools": make_tools.call_args.kwargs,
+                   "follow_up": follow_up.call_args.kwargs}
+        return seen, outcome, budgets
+
+    def test_builder_starts_its_whole_budget_after_the_research(self):
+        seen, outcome, budgets = self.evolve(generation=1)
+        self.assertEqual(seen["research_started"], self.OPENED)
+        after_research = self.OPENED + self.RESEARCH + self.MINUTES * 60
+        self.assertEqual(seen["builder"], {"deadline": after_research, "gateway_deadline": after_research,
+                                           "tokens": self.TOKENS})
+        self.assertEqual((budgets["brief"]["minutes"], budgets["brief"]["tokens"], budgets["brief"]["deadline"]),
+                         (self.MINUTES, self.TOKENS, after_research))
+        self.assertEqual(budgets["tools"]["deadline"], after_research)
+        self.assertEqual((budgets["follow_up"]["minutes"], budgets["follow_up"]["deadline"]),
+                         (self.MINUTES, after_research))
+        # the round's record holds both sessions; the stall rule reads the builder's waiting alone
+        self.assertEqual((outcome["session"]["seconds"], outcome["session"]["stalled_seconds"]), (872.0, 245.5))
+        self.assertEqual(outcome["session"]["metered_tokens"], 1_130_000)
+        self.assertEqual(_builder_stalled(outcome), 180.0)
+
+    def test_generations_without_research_keep_the_budget_from_the_start(self):
+        for generation, mode in ((2, "autonomous"), (1, "internal")):
+            seen, outcome, budgets = self.evolve(generation=generation, method_research=mode)
+            self.assertNotIn("research_started", seen)
+            start = self.OPENED + self.MINUTES * 60
+            self.assertEqual(seen["builder"], {"deadline": start, "gateway_deadline": start, "tokens": self.TOKENS})
+            self.assertEqual(budgets["brief"]["minutes"], self.MINUTES)
+            self.assertEqual(_builder_stalled(outcome), 180.0)
+
+    def test_stall_rule_ignores_only_the_research_sessions_waiting(self):
+        merged = {"session": {"stalled_seconds": 500.0},
+                  "method_research": {"discovery": {"session": {"stalled_seconds": 200.0}}}}
+        self.assertEqual(_builder_stalled(merged), 300.0)  # under half of 900 s: the builder was not crippled
+        self.assertEqual(_builder_stalled({"session": {"stalled_seconds": 500.0},
+                                           "method_research": {"discovery": {"status": "search_unavailable"}}}),
+                         500.0)
+        self.assertEqual(_builder_stalled({"session": {"stalled_seconds": None}}), 0.0)
 
 
 if __name__ == "__main__":

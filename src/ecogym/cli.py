@@ -1095,7 +1095,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--evolver-tokens", type=int, default=4_000_000)
     start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
     start.add_argument("--method-research", choices=("internal", "supplied", "autonomous"), default="autonomous",
-                       help="investigate external methods, use supplied methods, or use internal evidence")
+                       help="investigate external methods (generation 1 first runs a research session, on time and "
+                            "tokens beyond the evolver's), use supplied methods, or use internal evidence")
     start.add_argument("--method-registry", help="host-approved method directory (or ECOGYM_METHOD_REGISTRY)")
     start.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=BEST_LOCAL_SELECTION)
     start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
