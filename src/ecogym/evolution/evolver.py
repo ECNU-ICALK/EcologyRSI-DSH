@@ -267,19 +267,32 @@ def archive_versions(view: dict[str, Any], incumbent: Harness,
     return found
 
 
+def comparison_conditions(config: dict[str, Any]) -> tuple[Any, ...]:
+    """What a run's comparisons measured besides the versions and tasks: the episodes' model (None: each harness
+    its own), their time and token budget, and the submission selection policy."""
+
+    model = config.get("model")
+    if model:
+        with contextlib.suppress(ValueError):
+            model = providers.canonical(model)
+    return (model or None, float(config.get("minutes") or 0.0), int(config.get("tokens") or 0),
+            config.get("local_selection") or SINGLE_WINDOW_SELECTION)
+
+
 def known_versions(view: dict[str, Any], incumbent: Harness, prior: Sequence[dict[str, Any]] = ()) -> dict[str, str]:
     """Behavior digest -> label of every version that will not run again: the seed, the incumbent, every candidate
     compared in a finished round of this run (the loop's ``State.tried``) and of the ``prior`` runs on exactly
-    the same training tasks and submission selection policy. A version compared on fewer tasks, or under a
-    different selection policy, may run once
-    here: the test on more tasks is a stronger one, as in staged evaluation (the Darwin Gödel Machine evaluates a
-    promising agent on more tasks), and once compared here it is known like any other."""
+    the same training tasks under the same conditions (``comparison_conditions``: model, budget and selection
+    policy). A version compared on fewer tasks, or under other conditions, may run once here: the test on more
+    tasks is a stronger one, as in staged evaluation (the Darwin Gödel Machine evaluates a promising agent on more
+    tasks), a version measured with another model or budget has not been measured with this one (2026-11-18
+    review: a candidate compared with 2-minute episodes of one model blocked a 20-minute test with another), and
+    once compared here it is known like any other."""
 
     known = {view["seed"].get("behavior") or "": "起点版本"}
-    policy = (view.get("config") or {}).get("local_selection", SINGLE_WINDOW_SELECTION)
+    conditions = comparison_conditions(view.get("config") or {})
     for other in prior:
-        previous_policy = (other.get("config") or {}).get("local_selection", SINGLE_WINDOW_SELECTION)
-        if not same_tasks(view, other) or previous_policy != policy:
+        if not same_tasks(view, other) or comparison_conditions(other.get("config") or {}) != conditions:
             continue
         for round_, candidate in _compared(other, finished_only=True):
             if candidate.get("behavior"):
