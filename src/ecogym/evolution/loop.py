@@ -275,6 +275,26 @@ def _guidance_digest(entries: list[dict[str, Any]]) -> str | None:
     return digest({"schema": "ecogym.expert-guidance/1", "entries": entries}) if entries else None
 
 
+# every file of these layers is part of a round's measurement: the code that runs the episodes and the judge, and
+# what the agents read (a domain pack's task background, presets, knowledge and expert; the seed harness). Until
+# 0.4.2 only the *.py files of data, episodes, evaluation, harness, protocol and solvers counted, so a resumed round
+# could mix episodes that read another task background or ran under other task or ledger code (2026-11-18 review)
+MEASURED_LAYERS = ("data", "domains", "episodes", "evaluation", "harness", "kernel", "protocol", "solvers", "task")
+
+
+def measured_sources(package: Path) -> list[Path]:
+    """The files whose bytes a round's measurement identity (``Evolution._measurement``) covers."""
+
+    sources = [package / "evolution" / name for name in ("loop.py", "evolver.py", "evolver.md", "methods.py")]
+    for layer in MEASURED_LAYERS:
+        root = package / layer
+        # hidden files (.DS_Store) and byte code come and go without changing anything
+        sources.extend(sorted(path for path in root.rglob("*") if path.is_file() and path.suffix != ".pyc"
+                              and not any(part.startswith(".") or part == "__pycache__"
+                                          for part in path.relative_to(root).parts)))
+    return sources
+
+
 def _require_replies(entries: list[dict[str, Any]]) -> None:
     """Stop the run (resumably) when no episode of a round ran: no model reply (the provider is down or
     refusing) or a host error, after retries; the reasons say which."""
@@ -713,10 +733,7 @@ class Evolution:
         """Identity of the inputs and local software allowed to fill the same round plan."""
 
         package = Path(__file__).resolve().parents[1]
-        sources = [Path(__file__).resolve()]
-        sources.extend(package / "evolution" / name for name in ("evolver.py", "evolver.md", "methods.py"))
-        for layer in ("data", "episodes", "evaluation", "harness", "protocol", "solvers"):
-            sources.extend(sorted((package / layer).glob("*.py")))
+        sources = measured_sources(package)
         runtime = discover_runtime()
         interpreters = {}
         for executable in (runtime.python, runtime.dsh):

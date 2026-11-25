@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from ecogym.episodes.agent import Cancelled
 from ecogym.evolution.evidence import archive
-from ecogym.evolution.loop import Evolution, EvolveConfig
+from ecogym.evolution.loop import Evolution, EvolveConfig, measured_sources
 from ecogym.kernel.ledger import Ledger
 
 from .helpers import synthetic_bench
@@ -136,6 +136,20 @@ class EvolutionResumeTests(unittest.TestCase):
         with Ledger(self.path) as ledger:
             plans = [event.body["id"] for event in ledger.events("evo:run") if event.kind == "round_planned"]
         self.assertEqual(plans, [first["id"], plan["id"]])
+
+    def test_the_measurement_covers_what_agents_read_and_the_task_code(self):
+        """A domain pack's task background, knowledge and expert, and the task and ledger code, are part of what a
+        round measured; until 0.4.2 only some layers' *.py files were."""
+
+        import ecogym
+
+        package = Path(ecogym.__file__).resolve().parent
+        names = {str(path.relative_to(package)) for path in measured_sources(package)}
+        for name in ("evolution/loop.py", "evolution/evolver.md", "episodes/predictor_runner.py", "task/spec.py",
+                     "kernel/canonical.py", "domains/greenhouse/knowledge.md", "domains/greenhouse/expert.py",
+                     "domains/greenhouse/tasks/cucumber_climate.toml", "harness/seed/instructions.md"):
+            self.assertIn(name, names)
+        self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") or "/." in f"/{name}" for name in names))
 
     def test_a_plan_for_another_incumbent_is_refused(self):
         evolution = self.evolution
