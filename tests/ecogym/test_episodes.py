@@ -269,6 +269,9 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("event-stream", ctype)
         self.assertIn("[DONE]", data.decode())
         self.assertEqual(gateway.tokens, 47)
+        logged, = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        phases = [logged[key] for key in ("connect_seconds", "headers_seconds", "first_byte_seconds", "seconds")]
+        self.assertEqual(phases, sorted(phases))  # each phase is timed, in order
 
     def test_cuts_off_unresponsive_upstream_before_headers(self):
         gateway = self._gateway(upstream_timeout=0.25, stream_timeout=0.25)

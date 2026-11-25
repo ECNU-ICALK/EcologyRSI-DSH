@@ -491,11 +491,15 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 if not gateway._attach(ident, connection):  # the session ended before this call went upstream
                     raise ConnectionAbortedError("the session ended before the call went upstream")
                 connection.connect()  # TCP, proxy tunnel and TLS handshake, within connect_timeout
+                # each phase's time is logged, so the timeouts can be set from data (a call's total time alone
+                # cannot tell a slow prefill from a dead stream)
+                entry["connect_seconds"] = round(time.monotonic() - started, 3)
                 if connection.sock is not None:
                     connection.sock.settimeout(gateway.upstream_timeout)
                 connection.request(method, path, body=body or None, headers=headers)
                 response = connection.getresponse()
                 entry["status"] = response.status
+                entry["headers_seconds"] = round(time.monotonic() - started, 3)
                 content_type = response.getheader("Content-Type", "")
                 self.send_response(response.status)
                 for key, value in response.getheaders():
@@ -507,8 +511,10 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                     chunk = response.read1(65536)
                     if not chunk:
                         break
-                    if not captured and connection.sock is not None:
-                        connection.sock.settimeout(gateway.stream_timeout)
+                    if not captured:
+                        entry["first_byte_seconds"] = round(time.monotonic() - started, 3)
+                        if connection.sock is not None:
+                            connection.sock.settimeout(gateway.stream_timeout)
                     if len(captured) < CAPTURE_LIMIT:
                         captured.extend(chunk[: CAPTURE_LIMIT - len(captured)])
                     self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
