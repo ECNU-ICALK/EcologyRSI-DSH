@@ -1687,7 +1687,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         error ? h(Alert, { tone: "warning" }, `读不到评审会话：${error.message}`) : null,
         research ? h(Fragment, null,
           h("div", { className: "eg-label" }, "方法调查"),
-          hint(`网页检索 ${research.web_search_calls || 0} 次，登记方法试跑 ${(research.probes || []).filter((item) => item.status === "evaluated").length} 次。`),
+          hint(`${isNum(research.discovery_web_search_calls) && research.discovery ? `独立调查会话网页检索 ${research.discovery_web_search_calls} 次，评审会话` : "网页检索"} ${research.web_search_calls || 0} 次，登记方法试跑 ${(research.probes || []).filter((item) => item.status === "evaluated").length} 次。`),
           (research.records || []).map((item, i) => h("div", { key: i, className: "eg-note" },
             h("span", { className: "eg-chip" }, ({ direct: "直接复用", adapt: "改造借鉴", skip: "本轮跳过" })[item.decision] || item.decision),
             " ", item.name, item.rationale ? ` · ${item.rationale}` : "")),

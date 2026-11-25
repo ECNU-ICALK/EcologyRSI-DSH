@@ -19,6 +19,7 @@ from ecogym.evolution.evolver import (
     EvolverTools,
     _discover_methods,
     _discovery_handoff,
+    _discovery_sources,
     _include_discovery,
     _method_guidance,
     _publish_adapter,
@@ -172,6 +173,24 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual((builder.seconds, builder.metered_tokens, builder.llm_calls), (8, 220, 6))
         self.assertEqual(builder.final_text, "candidate")
         self.assertEqual(builder.activity["web_queries"], session.activity["web_queries"])
+
+    def test_every_search_query_counts_though_only_two_become_leads(self):
+        """evo:ee1aa9c321df's researcher ran 14 distinct queries; the handoff reported 2 (the leads)."""
+
+        trajectory = self.root / "searches"
+        trajectory.mkdir()
+        with gzip.open(trajectory / "llm_calls.jsonl.gz", "wt", encoding="utf-8") as log:
+            for index, query in enumerate(("first", "second", "Second", "third")):
+                body = {"content": [{"type": "web_search_tool_result", "content": [
+                    {"type": "web_search_result", "url": f"https://example.test/{index}", "title": f"T{index}"}]}]}
+                log.write(json.dumps({"path": "/anthropic/v1/messages", "status": 200, "response": json.dumps(body),
+                                      "request": {"messages": [{"content": [{
+                                          "text": f"Perform a web search for the query: {query}"}]}]}}) + "\n")
+        sources, leads, queries = _discovery_sources(trajectory)
+        self.assertEqual(len(sources), 4)
+        self.assertEqual([lead["query"] for lead in leads], ["first", "second"])
+        self.assertEqual(queries, ["first", "second", "third"])
+        self.assertEqual(_discovery_handoff([], sources, year=2026, queries=queries)["distinct_queries"], 3)
 
     def test_discovery_completion_requires_recent_and_distinct_evidence(self):
         other = "https://example.test/method"

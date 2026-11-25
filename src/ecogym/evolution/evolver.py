@@ -1207,9 +1207,14 @@ def _search_source_results(call: dict[str, Any]) -> dict[str, str]:
     return sources
 
 
-def _discovery_sources(trajectory: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
+def _discovery_sources(trajectory: Path) -> tuple[dict[str, str], list[dict[str, Any]], list[str]]:
+    """The sources the search tool returned, the first two queries with their first three sources (the leads
+    handed over), and every query that returned sources. The count of distinct queries used to come from the two
+    leads, so it could never exceed 2 (evo:ee1aa9c321df: 14 queries, reported as 2)."""
+
     sources: dict[str, str] = {}
     leads: dict[str, dict[str, Any]] = {}
+    queries: dict[str, str] = {}
     log = trajectory / "llm_calls.jsonl.gz"
     with contextlib.suppress(OSError, ValueError), gzip.open(log, "rt", encoding="utf-8") as stream:
         for line in stream:
@@ -1218,16 +1223,16 @@ def _discovery_sources(trajectory: Path) -> tuple[dict[str, str], list[dict[str,
             if not found:
                 continue
             sources.update(found)
-            if len(leads) >= 2:
-                continue
             with contextlib.suppress(IndexError, KeyError, TypeError):
                 text = call["request"]["messages"][0]["content"][0]["text"]
                 prefix = "Perform a web search for the query: "
                 if isinstance(text, str) and text.startswith(prefix) and (query := text[len(prefix):].strip()[:300]):
-                    leads.setdefault(query.casefold(), {"query": query, "sources": [
-                        {"source": source, "title": title} for source, title in list(found.items())[:3]
-                    ]})
-    return sources, list(leads.values())
+                    queries.setdefault(query.casefold(), query)
+                    if len(leads) < 2:
+                        leads.setdefault(query.casefold(), {"query": query, "sources": [
+                            {"source": source, "title": title} for source, title in list(found.items())[:3]
+                        ]})
+    return sources, list(leads.values()), list(queries.values())
 
 
 def _discovery_handoff(records: list[dict[str, Any]], sources: dict[str, str], *, year: int,
@@ -1316,10 +1321,9 @@ def _discover_methods(*, root: Path, trajectory: Path, runtime: Runtime, setting
             session.killed = True
     finally:
         subprocess.run(["rm", "-r", "-f", str(root)], check=False)
-    sources, search_leads = _discovery_sources(trajectory)
+    sources, search_leads, queries = _discovery_sources(trajectory)
     with lock:
-        handoff = _discovery_handoff(records, sources, year=publication_year,
-                                     queries=[item["query"] for item in search_leads])
+        handoff = _discovery_handoff(records, sources, year=publication_year, queries=queries)
     return {**handoff, "minutes_budget": minutes, "token_budget": tokens, "sealed_at": time.time(),
             "search_leads": search_leads, "session": session.to_dict()}, session
 
@@ -1510,6 +1514,9 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
         raise
     finally:
         subprocess.run(["rm", "-r", "-f", str(root)], check=False)
+    # the builder's own searches, counted before the discovery session's activity is merged into the round's record
+    # (the merged count read as the builder searching while its search was off)
+    builder_searches = (session.activity.get("tool_calls") or {}).get("web_search", 0)
     if discovery_session is not None:
         _include_discovery(session, discovery_session)
     outcome = {"session": session.to_dict(), "candidates": candidates}
@@ -1518,7 +1525,9 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
         queries = (activity.get("web_queries") or [])[:METHOD_RECORD_LIMIT]
         outcome["method_research"] = {
             "mode": method_research, "search_available": search_available,
-            "web_search_calls": (activity.get("tool_calls") or {}).get("web_search", 0),
+            "web_search_calls": builder_searches,
+            "discovery_web_search_calls": (discovery_session.activity.get("tool_calls") or {}).get("web_search", 0)
+            if discovery_session is not None else 0,
             "web_queries": [query[:300] for query in queries if isinstance(query, str)],
             "search_responses": search_responses, "probes": tools.method_probes, "records": tools.method_records,
         }
