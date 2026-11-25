@@ -149,6 +149,8 @@ class _FakeUpstream:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 upstream.hits += 1
                 upstream.seen_auth.append(self.headers.get("Authorization"))
+                if body.get("delay"):
+                    time.sleep(float(body["delay"]))
                 if body.get("stall_headers"):
                     upstream.unblock.wait(5.0)
                     return
@@ -301,6 +303,55 @@ class GatewayTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
         self.assertEqual(gateway.failed, 1)
         self.assertIn("TimeoutError", gateway.last_failure)
+
+    def test_gives_up_on_a_stalled_tls_handshake_within_the_connect_timeout(self):
+        """A provider that accepts the connection and never completes the TLS handshake (98 calls of
+        evo:27d3aaf8aee2 waited the whole 75 s) fails after ``connect_timeout``."""
+
+        import contextlib
+        import socket
+        import threading
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        accepted: list[socket.socket] = []
+
+        def accept() -> None:
+            with contextlib.suppress(OSError):
+                while True:
+                    accepted.append(listener.accept()[0])  # never answers the client hello
+
+        threading.Thread(target=accept, daemon=True).start()
+
+        def close() -> None:
+            listener.close()
+            for connection in accepted:
+                connection.close()
+
+        self.addCleanup(close)
+        gateway = Gateway(key=self.REAL, token=self.TOKEN, log_path=self.log,
+                          upstream=f"https://127.0.0.1:{listener.getsockname()[1]}", connect_timeout=0.25,
+                          upstream_timeout=5.0).start()
+        gateway.on_call = self.logged.append
+        self.addCleanup(gateway.stop)
+        started = time.monotonic()
+        status, body, _ = _post(gateway.port, "/deepseek/v1/chat/completions", {"messages": []}, self.TOKEN)
+        elapsed = time.monotonic() - started
+        self._settle(1)
+        self.assertEqual(status, 502)
+        self.assertIn("upstream failed", json.loads(body)["error"]["message"])
+        self.assertLess(elapsed, 2.0)
+        self.assertIn("timed out", gateway.last_failure)
+        self.assertEqual(gateway.failed, 1)
+
+    def test_a_slow_answer_after_connecting_gets_the_upstream_timeout(self):
+        gateway = self._gateway(connect_timeout=0.2, upstream_timeout=5.0)
+        status, _, _ = _post(gateway.port, "/deepseek/v1/chat/completions", {"delay": 0.6, "messages": []},
+                             self.TOKEN)
+        self._settle(1)
+        self.assertEqual(status, 200)
+        self.assertEqual((gateway.answered, gateway.failed), (1, 0))
 
     def test_stalled_seconds_handles_out_of_order_late_failures(self):
         gateway = self._gateway()

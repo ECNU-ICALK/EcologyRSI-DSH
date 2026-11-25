@@ -59,7 +59,10 @@ CAPTURE_LIMIT = 16_000_000  # bytes of one response kept for assembly
 RAW_LOG_LIMIT = 200_000  # characters of a response that cannot be assembled
 CACHE_WEIGHT = 0.1  # budget weight of a prompt token served from the provider's cache
 DRAIN_SECONDS = 10.0  # how long ``close`` waits for cut-off calls to finish and be recorded
-UPSTREAM_TIMEOUT = 75.0  # connect, response headers, and first byte (TTFB) from the provider
+# TCP connect, proxy tunnel and TLS handshake. A healthy handshake takes a second or two; in evo:27d3aaf8aee2 98 of
+# 2,130 calls (2026-11-24/25) hung in the handshake until the 75 s limit below, 7,352 s spent waiting on nothing
+CONNECT_TIMEOUT = 15.0
+UPSTREAM_TIMEOUT = 75.0  # response headers, and the first byte (TTFB) from the provider, once connected
 STREAM_TIMEOUT = 45.0  # idle silence between chunks once the upstream response has started
 
 
@@ -197,7 +200,8 @@ class Gateway:
     def __init__(self, *, key: str | None, token: str, log_path: Path, upstream: str = "https://api.deepseek.com",
                  token_budget: int = 3_000_000, deadline: float | None = None, proxy: str | None = None,
                  routes: dict[str, tuple[str, str, dict[str, str]]] | None = None, chat: str | None = None,
-                 upstream_timeout: float = UPSTREAM_TIMEOUT, stream_timeout: float = STREAM_TIMEOUT) -> None:
+                 upstream_timeout: float = UPSTREAM_TIMEOUT, stream_timeout: float = STREAM_TIMEOUT,
+                 connect_timeout: float = CONNECT_TIMEOUT) -> None:
         self.token = token
         self.chat = chat
         self.search_enabled = True
@@ -212,6 +216,7 @@ class Gateway:
         self.proxy = urlparse(proxy) if proxy else None
         self.upstream_timeout = float(upstream_timeout)
         self.stream_timeout = float(stream_timeout)
+        self.connect_timeout = min(float(connect_timeout), self.upstream_timeout)
         self.tokens = 0  # every token the provider reported
         self.metered = 0  # cost-weighted tokens, what the budget counts
         self.calls = 0
@@ -360,17 +365,20 @@ class Gateway:
         return None
 
     def connection(self, upstream: Any) -> http.client.HTTPConnection:
+        """A connection whose timeout covers connecting only (``connect_timeout``): ``_relay`` connects it, then
+        allows ``upstream_timeout`` for the response."""
+
         host = upstream.hostname or ""
         port = upstream.port or (443 if upstream.scheme == "https" else 80)
         if upstream.scheme == "http":
-            return http.client.HTTPConnection(host, port, timeout=self.upstream_timeout)
+            return http.client.HTTPConnection(host, port, timeout=self.connect_timeout)
         context = ssl.create_default_context()
         if self.proxy is not None:
             connection = http.client.HTTPSConnection(self.proxy.hostname or "", self.proxy.port or 80,
-                                                     timeout=self.upstream_timeout, context=context)
+                                                     timeout=self.connect_timeout, context=context)
             connection.set_tunnel(host, port)
             return connection
-        return http.client.HTTPSConnection(host, port, timeout=self.upstream_timeout, context=context)
+        return http.client.HTTPSConnection(host, port, timeout=self.connect_timeout, context=context)
 
     def record(self, entry: dict[str, Any], *, started: float | None = None) -> None:
         """Count and log one call; ``started`` is its start on the awake clock (default: now)."""
@@ -482,6 +490,9 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 connection = gateway.connection(upstream)
                 if not gateway._attach(ident, connection):  # the session ended before this call went upstream
                     raise ConnectionAbortedError("the session ended before the call went upstream")
+                connection.connect()  # TCP, proxy tunnel and TLS handshake, within connect_timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(gateway.upstream_timeout)
                 connection.request(method, path, body=body or None, headers=headers)
                 response = connection.getresponse()
                 entry["status"] = response.status
@@ -532,5 +543,5 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-__all__ = ["CACHE_WEIGHT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH", "STREAM_TIMEOUT", "UPSTREAM_TIMEOUT",
-           "Gateway", "assemble", "metered_tokens", "tokens_of", "usage_of"]
+__all__ = ["CACHE_WEIGHT", "CONNECT_TIMEOUT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH", "STREAM_TIMEOUT",
+           "UPSTREAM_TIMEOUT", "Gateway", "assemble", "metered_tokens", "tokens_of", "usage_of"]
