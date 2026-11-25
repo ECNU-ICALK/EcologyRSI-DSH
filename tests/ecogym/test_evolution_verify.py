@@ -243,6 +243,44 @@ class VerificationTests(unittest.TestCase):
         result = body["versions"]["seed"]["tasks"]["train"]
         self.assertEqual((result["reused"], result["source_run"]), (True, "evo:earlier"))
 
+    def test_too_few_programs_open_no_look_at_the_sealed_stage(self):
+        """2026-11-18 review: a version with one program where the run asks for two used to be judged anyway,
+        spending its only look at the stage on whichever replicate scored."""
+
+        self.start(final="seed", episodes=[self.episode("ep:c", "seed")])
+        with (patch.object(verify, "_key_bench"), patch.object(verify, "_open"),
+              patch.object(verify, "exposure_key", return_value="exposure"),
+              patch.object(verify, "_extract", return_value=([("ep:c", self.root)], [])) as extract,
+              patch.object(verify, "judge_program") as judge):
+            body = verify.verify_sealed(self.ledger, self.run, "validation")
+        extract.assert_not_called()
+        judge.assert_not_called()
+        self.assertFalse(body["complete"])
+        self.assertIsNone(body["decision"])
+        self.assertEqual([(item["reason"], item["episodes"], item["expected"]) for item in body["missing"]],
+                         [("missing_replicates", ["ep:c"], 2)])
+        with Ledger(self.ledger) as db:
+            self.assertEqual(db.exposures(), [])
+            self.assertEqual(db.events(self.run, "sealed_task"), [])
+
+    def test_an_earlier_single_program_look_cannot_complete_a_two_replicate_plan(self):
+        self.start(final="seed", episodes=[self.episode(episode, "seed") for episode in ("ep:c", "ep:d")])
+        self.episode("ep:a", "seed")
+        self.earlier_look("seed", ["ep:a"], key="same-exposure")
+        with (patch.object(verify, "_key_bench"), patch.object(verify, "_open"),
+              patch.object(verify, "exposure_key", return_value="same-exposure"),
+              patch.object(verify, "judge_program") as judge,
+              patch.object(verify, "_evaluations", return_value=(object(),))):
+            body = verify.verify_sealed(self.ledger, self.run, "validation")
+        judge.assert_not_called()
+        self.assertFalse(body["complete"])
+        self.assertIsNone(body["decision"])
+        item, = body["missing"]
+        self.assertEqual((item["reason"], item["episodes"], item["expected"], item["recorded_before"]),
+                         ("missing_replicates", ["ep:a"], 2, True))
+        shown = body["versions"]["seed"]["tasks"]["train"]  # the earlier result stays visible, as evidence only
+        self.assertEqual((shown["source_run"], verify.program_episodes(shown)), ("evo:earlier", ["ep:a"]))
+
     def test_adoption_check_keeps_the_replaced_versions_earlier_look(self):
         self.append("evolve_started", {"seed": {"digest": "seed"}, "suite": {"digest": "suite"},
                                       "config": self.config.to_dict()})

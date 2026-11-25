@@ -583,11 +583,28 @@ def sealed_plan(ledger: Ledger, view: dict[str, Any], suite: Any, stage: str
     looks, unresolved = _looks(ledger, wanted)
     if stage == "validation":  # final_test takes the programs validation judged
         looks, replaced = _first_looks(ledger, looks, stage)
-        missing.extend({"version": look.label, "task": look.task, "reason": "missing_replicates",
-                        "episodes": list(look.episodes), "expected": config.repeats}
-                       for look in looks if look.task in train and (look.label, look.task) not in replaced
-                       and len(set(look.episodes)) < config.repeats)
+    else:
+        replaced = set()
+    missing.extend(_short(looks, set(train), config.repeats, replaced))
     return looks, [*missing, *unresolved]
+
+
+def _short(looks: Sequence[Look], train: set[str], repeats: int,
+           replaced: set[tuple[str, str]]) -> list[dict[str, Any]]:
+    """The training-task looks with fewer programs than the run's replicates, as ``missing_replicates``: one
+    program stands for whichever replicate happened to score, so such a look neither completes a plan nor opens a
+    new look at a sealed stage (``reuse_only``). A look recorded before (``replaced``) counts the same way: a
+    single-program result from an earlier run cannot complete a plan that asks for every replicate."""
+
+    return [{"version": look.label, "task": look.task, "reason": "missing_replicates", "episodes": list(look.episodes),
+             "expected": repeats, **({"recorded_before": True} if (look.label, look.task) in replaced else {})}
+            for look in looks if look.task in train and len(set(look.episodes)) < repeats]
+
+
+def reuse_only(missing: Sequence[dict[str, Any]]) -> frozenset[tuple[str, str]]:
+    """(version, task) cells whose looks may show a recorded result but must not be judged anew."""
+
+    return frozenset((item["version"], item["task"]) for item in missing if item.get("reason") == "missing_replicates")
 
 
 def _ran_under(conditions: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -657,7 +674,8 @@ def verify_sealed(ledger_path: Path, run_id: str, stage: str, *,
                 return recorded
         results, evaluations, unavailable = _seal_locked(
             ledger_path, run_id, stage, looks, limits=config.limits, store=base / stage,
-            filename=lambda look, index: f"{look.label}-{look.task.replace(':', '_')}-{index}.npz", cancel=cancel)
+            filename=lambda look, index: f"{look.label}-{look.task.replace(':', '_')}-{index}.npz", cancel=cancel,
+            reuse_only=reuse_only(missing))
         missing = [*missing, *unavailable]
         results = {label: results.get(label, {}) for label, _ in versions(view)}
         with Ledger(ledger_path) as ledger:
@@ -680,18 +698,20 @@ def verify_sealed(ledger_path: Path, run_id: str, stage: str, *,
 
 
 def _seal(ledger_path: Path, run_id: str, stage: str, looks: Sequence[Look], *, limits: Any, store: Path,
-          filename: Callable[[Look, int], str], cancel: threading.Event | None = None
+          filename: Callable[[Look, int], str], cancel: threading.Event | None = None,
+          reuse_only: frozenset[tuple[str, str]] = frozenset()
           ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, tuple[Evaluation, ...]]],
                      list[dict[str, Any]]]:
     """Judge ``looks`` on a sealed stage, once per (version, conditions, task, stage) across all runs: a result
     recorded before, by any run, can be reused if its plan matches. Each program result is recorded as soon as
     it is judged (``sealed_task``). The stage lock serializes work in the same run. Results and evaluations by
-    label and task, and the unresolved cells of the plan."""
+    label and task, and the unresolved cells of the plan. The (label, task) cells in ``reuse_only`` show a result
+    recorded before but are never judged: no look at the stage is opened for them."""
 
     tag = run_id.partition(":")[2] or run_id
     with _stage_lock(ecogym_home() / "verifications" / tag / f"{stage}.lock", run_id, stage):
         return _seal_locked(ledger_path, run_id, stage, looks, limits=limits, store=store, filename=filename,
-                            cancel=cancel)
+                            cancel=cancel, reuse_only=reuse_only)
 
 
 @contextlib.contextmanager
@@ -749,7 +769,8 @@ def _extract(ledger_path: Path, look: Look, scratch: Path) -> tuple[list[tuple[s
 
 
 def _seal_locked(ledger_path: Path, run_id: str, stage: str, looks: Sequence[Look], *, limits: Any, store: Path,
-                 filename: Callable[[Look, int], str], cancel: threading.Event | None = None
+                 filename: Callable[[Look, int], str], cancel: threading.Event | None = None,
+                 reuse_only: frozenset[tuple[str, str]] = frozenset()
                  ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, tuple[Evaluation, ...]]],
                             list[dict[str, Any]]]:
     results: dict[str, dict[str, dict[str, Any]]] = {look.label: {} for look in looks}
@@ -784,6 +805,8 @@ def _seal_locked(ledger_path: Path, run_id: str, stage: str, looks: Sequence[Loo
         recorded_programs = (found.get("programs") or [found]) if found else []
         judged = {item["episode"]: item for item in recorded_programs if item.get("episode")}
         remaining = tuple(episode for episode in look.episodes if episode not in judged)
+        if remaining and (look.label, look.task) in reuse_only:
+            continue  # too few programs for the plan (listed as missing_replicates): no new look at the stage
         if remaining and found is not None and found["run_id"] != run_id:
             unavailable.append({**cell, "reason": "pending_in_source_run", "source_run": found["run_id"],
                                 "episodes": list(remaining)})
@@ -950,15 +973,13 @@ def check_adoptions(ledger_path: Path, run_id: str, *, generations: list[int] | 
                                                     for label, harness, side in (("parent", parent, theirs),
                                                                                  ("adopted", adopted, mine))])
                 looks, replaced = _first_looks(ledger, looks, ADOPTION_STAGE)
-            missing.extend({"version": look.label, "task": look.task, "reason": "missing_replicates",
-                            "episodes": list(look.episodes), "expected": config.repeats}
-                           for look in looks if (look.label, look.task) not in replaced
-                           and len(set(look.episodes)) < config.repeats)
+            short = _short(looks, set(train), config.repeats, replaced)
+            missing.extend(short)
             results, evaluations, unavailable = _seal(
                 ledger_path, run_id, ADOPTION_STAGE, looks, limits=config.limits,
                 store=ecogym_home() / "verifications" / tag / ADOPTION_STAGE / "adoptions",
                 filename=lambda look, index: f"{look.harness[:12]}-{look.task.replace(':', '_')}-{index}.npz",
-                cancel=cancel)
+                cancel=cancel, reuse_only=reuse_only(short))
             missing = [*missing, *unresolved, *unavailable]
             frozen.update({(look.harness, look.task): list(look.episodes) for look in looks
                            if results.get(look.label, {}).get(look.task)})
