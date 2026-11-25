@@ -638,6 +638,9 @@ class Evolution:
             providers.probe(ref)  # and one tiny request: settings may list a model the key cannot use
         self._log(run_id, "evolve_started", {
             "label": label, "config": self.config.to_dict(), "ecogym": __version__,
+            # the process that runs it, from the start: one that dies before its first round (opening the benches
+            # takes a while) reads as stale and is resumed by the service, instead of looking ownerless forever
+            "owner": owner(),
             **({"method_registry_digest": self.method_registry.identity()} if self.method_registry is not None else {}),
             "suite": {"id": self.suite.id, "title": self.suite.title, "digest": self.suite.digest,
                       "train": list(self.suite.train), "holdout_tasks": len(self.suite.holdout)},

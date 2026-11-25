@@ -22,7 +22,7 @@ class EvolutionResumeTests(unittest.TestCase):
         self.path = Path(self.directory) / "ledger.sqlite3"
         bench = synthetic_bench()
         self.task = bench.task.id
-        suite = SimpleNamespace(id="synthetic", train=[self.task], digest="suite",
+        suite = SimpleNamespace(id="synthetic", title="synthetic", train=[self.task], holdout=[], digest="suite",
                                 gates=SimpleNamespace(test="t", confidence=0.95),
                                 tasks=lambda _: [bench.task])
         config = EvolveConfig(suite="synthetic", repeats=2, concurrency=1)
@@ -150,6 +150,43 @@ class EvolutionResumeTests(unittest.TestCase):
                      "domains/greenhouse/tasks/cucumber_climate.toml", "harness/seed/instructions.md"):
             self.assertIn(name, names)
         self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") or "/." in f"/{name}" for name in names))
+
+    def test_a_run_whose_process_died_before_its_first_round_is_resumable(self):
+        """2026-11-18 review: the owner was recorded only with the first round, so a service that exited while
+        a new run opened its benches left a run no automatic resume would take."""
+
+        import socket
+        import subprocess
+        import sys
+
+        from ecogym.evolution.loop import stale
+        from ecogym.service import Service
+
+        gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                              text=True, check=True)
+        config = EvolveConfig(suite="synthetic", auto_resume=True).to_dict()
+        with Ledger(self.path) as ledger:
+            ledger.append("evo:early", "evolve_started", {
+                "seed": {"digest": "seed"}, "config": config, "suite": {"digest": "suite"},
+                "owner": {"pid": int(gone.stdout), "host": socket.gethostname()}})
+        view = self.evolution.view("evo:early")
+        self.assertTrue(stale(view))
+        self.assertEqual(Service(self.path).resumable(view), "stale")
+
+        import dataclasses
+        import os
+
+        seed = SimpleNamespace(digest="seed", name="seed", summary="", agent=SimpleNamespace(model="model"))
+
+        def as_dict(value):  # the test suite's gates are a namespace, not a dataclass
+            return dataclasses.asdict(value) if dataclasses.is_dataclass(value) else vars(value)
+
+        with patch("ecogym.evolution.loop.resolve", return_value=seed), \
+                patch("ecogym.evolution.loop.providers"), \
+                patch("ecogym.evolution.loop.behavior_digest", return_value="behavior"), \
+                patch("ecogym.evolution.loop.asdict", side_effect=as_dict):
+            started = self.evolution.start(run_id="evo:started")
+        self.assertEqual(self.evolution.view(started)["owner"], {"pid": os.getpid(), "host": socket.gethostname()})
 
     def test_a_plan_for_another_incumbent_is_refused(self):
         evolution = self.evolution
