@@ -35,7 +35,8 @@ class ExportCreditTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.ledger_path = self.root / "ledger.sqlite3"
 
-    def episode(self, name, score, *, start=False, wrong_digest=False, interrupted=False, ambiguous=False):
+    def episode(self, name, score, *, start=False, wrong_digest=False, interrupted=False, ambiguous=False,
+                task="task", role=None):
         trajectory = self.root / name
         trajectory.mkdir()
         digest = "a" * 64
@@ -58,8 +59,10 @@ class ExportCreditTests(unittest.TestCase):
             for item in calls:
                 stream.write(json.dumps(item) + "\n")
         with Ledger(self.ledger_path) as ledger:
-            ledger.append(name, "episode_started", {"task_id": "task", "harness": {"digest": "h"},
-                                                   "start": {"local": {"score": 0.1}}})
+            ledger.append(name, "episode_started", {"task_id": task, "harness": {"digest": "h"},
+                                                   "start": {"local": {"score": 0.1}},
+                                                   **({"context": {"role": role}} if role else {})})
+            ledger.append(name, "episode_note", {"kind": "finding", "text": f"note of {name}"})
             ledger.append(name, "episode_submitted", {"n": 3, "digest": digest, "accepted": True,
                                                      "local": {"score": 0.13}})
             ledger.append(name, "episode_scored", {"n": 3, "digest": digest, "start": start, "score": score,
@@ -108,6 +111,53 @@ class ExportCreditTests(unittest.TestCase):
                 self.assertIsNone(samples[name]["credited_tool_call_id"])
                 self.assertEqual(samples[name]["beats"], {})
         self.assertEqual(samples["ep:fallback/1"]["episode_score"], 0.5)
+
+    def test_holdout_verification_episodes_are_never_training_data(self):
+        """A run's holdout verification (2026-11-18 review: 20 of 23 holdout episodes passed the default filters)
+        must not reach SFT, preference pairs or notes; the audit export keeps them, marked and unpaired."""
+
+        self.episode("ep:a", 0.4)
+        self.episode("ep:b", 0.3)
+        self.episode("ep:holdout", 0.5, role="holdout")
+        decision = SimpleNamespace(delta=0.1, interval=(0.05, 0.15))
+        with patch("ecogym.episodes.export.Bench.open"), patch("ecogym.episodes.export.task_spec"), \
+                patch("ecogym.episodes.export.load_predictions"), \
+                patch("ecogym.episodes.export.compare_suite", return_value=decision):
+            clean = export(self.ledger_path, self.root / "clean", evolver=False)
+            audit = export(self.ledger_path, self.root / "audit", evolver=False, include_failed=True)
+        self.assertEqual([sample["id"] for sample in self.rows(self.root / "clean" / "sft.jsonl")],
+                         ["ep:a/1", "ep:b/1"])
+        self.assertEqual(clean["skipped"]["independent validation episode (role:holdout)"], 1)
+        self.assertEqual(clean["filters"]["independent_validation"], "excluded")
+        self.assertEqual([note["session"] for note in self.rows(self.root / "clean" / "notes.jsonl")],
+                         ["ep:a", "ep:b"])
+        for target in ("clean", "audit"):
+            with self.subTest(target=target):
+                pairs = self.rows(self.root / target / "preferences.jsonl")
+                self.assertEqual([(pair["meta"]["chosen"]["session"], pair["meta"]["rejected"]["session"])
+                                  for pair in pairs], [("ep:a", "ep:b")])
+                indexed = {row["session"]: row["independent_validation"]
+                           for row in self.rows(self.root / target / "episodes.jsonl")}
+                self.assertEqual(indexed, {"ep:a": None, "ep:b": None, "ep:holdout": "role:holdout"})
+        marked = [sample["meta"] for sample in self.rows(self.root / "audit" / "sft.jsonl")
+                  if sample["meta"]["session"] == "ep:holdout"]
+        self.assertTrue(marked)
+        self.assertTrue(all(meta["independent_validation"] == "role:holdout" and not meta["passes_filters"]
+                            for meta in marked))
+        self.assertEqual(audit["filters"]["independent_validation"], "marked")
+        held_note, = [note for note in self.rows(self.root / "audit" / "notes.jsonl")
+                      if note["session"] == "ep:holdout"]
+        self.assertEqual(held_note["independent_validation"], "role:holdout")
+
+    def test_holdout_of_a_suite_leaves_out_its_holdout_tasks_whatever_the_role(self):
+        self.episode("ep:train", 0.4)
+        self.episode("ep:elsewhere", 0.4, task="held-task", role="incumbent")
+        suite = SimpleNamespace(tasks=lambda side: [SimpleNamespace(id="held-task")] if side == "holdout" else [])
+        with patch("ecogym.episodes.export.suite_spec", return_value=suite):
+            manifest = export(self.ledger_path, self.root / "clean", evolver=False, holdout_of=["suite@1"])
+        self.assertEqual([sample["id"] for sample in self.rows(self.root / "clean" / "sft.jsonl")], ["ep:train/1"])
+        self.assertEqual(manifest["skipped"]["independent validation episode (holdout_task)"], 1)
+        self.assertEqual(manifest["filters"]["holdout_tasks"], ["held-task"])
 
     def test_wrong_or_ambiguous_lineage_and_partial_reply_skip_training_only(self):
         self.episode("ep:wrong", 0.4, wrong_digest=True)

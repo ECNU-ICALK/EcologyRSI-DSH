@@ -22,6 +22,14 @@ Files written to the target directory:
     notes.jsonl        every note the agents and evolvers wrote: the experience library
     manifest.json      counts, filters and what was skipped and why
 
+Episodes of an independent validation (``context.role`` ``holdout``: a run's
+final check on tasks no evolving agent saw), and with ``holdout_of`` every
+episode on a holdout task of those suites, are no training data: they never
+enter ``sft.jsonl``, ``preferences.jsonl`` or ``notes.jsonl``. With
+``include_failed`` (the audit export) their threads and notes are written,
+marked ``independent_validation``, and still never pass the filters or pair.
+``episodes.jsonl`` lists every episode with that mark.
+
 A model call repeated with the same request (a retried stream) replaces the
 earlier reply instead of starting a second thread, and identical threads are
 written once. Scratch paths of a session are replaced by ``/workspace``. API
@@ -37,7 +45,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -47,13 +55,15 @@ from ..evaluation.harness import Bench
 from ..evaluation.suite import TaskPair, compare_suite
 from ..kernel.ledger import Ledger
 from ..task.spec import task_spec
-from ..task.suite import SuiteGates
+from ..task.suite import SuiteGates, suite_spec
 from .gateway import assemble
 from .history import episode_records
 from .judge import load_predictions
 from .sandbox import scratch_root
 
 SESSION_DIR = r"/(?:ep|evo|seal)-[A-Za-z0-9_.-]+"
+# episode roles of independent validations (``evolution.verify.HOLDOUT``; this layer does not import evolution)
+VALIDATION_ROLES = frozenset({"holdout"})
 # Per-session tokens reach the agent's own environment and DSH patch (it needs them to call the gateway and the
 # tool server); they die with the session, but credentials never belong in training data.
 REDACT = (
@@ -221,6 +231,18 @@ def _submission_calls(messages: list[dict[str, Any]], submission: dict[str, Any]
     return matched
 
 
+def validation_use(record: dict[str, Any], holdout_tasks: frozenset[str] = frozenset()) -> str | None:
+    """Why an episode is no training data, or None: it ran in an independent validation (its role), or on a holdout
+    task of a suite the export is for. Training on either would weaken the validation that reuses those tasks."""
+
+    role = (record.get("context") or {}).get("role")
+    if role in VALIDATION_ROLES:
+        return f"role:{role}"
+    if record.get("task_id") in holdout_tasks:
+        return "holdout_task"
+    return None
+
+
 def _episode_meta(record: dict[str, Any]) -> dict[str, Any]:
     scored, finished = record.get("scored") or {}, record.get("finished") or {}
     references = scored.get("references") or {}
@@ -243,13 +265,16 @@ def _episode_meta(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, include_failed: bool = False,
-           evolver: bool = True, margin: float = 0.02, cross_prompt: bool = False) -> dict[str, Any]:
-    """``min_score`` None drops the score filter (the accepted-submission requirement stays)."""
+           evolver: bool = True, margin: float = 0.02, cross_prompt: bool = False,
+           holdout_of: Sequence[str] = ()) -> dict[str, Any]:
+    """``min_score`` None drops the score filter (the accepted-submission requirement stays). ``holdout_of``:
+    suites whose holdout tasks this training data must not touch, whatever role their episodes had."""
 
     target.mkdir(parents=True, exist_ok=True)
     counts = {"sessions": 0, "sft": 0, "preferences": 0, "episodes": 0, "notes": 0}
     skipped: dict[str, int] = {}
     scratch = scratch_pattern()
+    holdout_tasks = frozenset(task.id for suite in holdout_of for task in suite_spec(suite).tasks("holdout"))
 
     def skip(reason: str) -> None:
         skipped[reason] = skipped.get(reason, 0) + 1
@@ -268,18 +293,25 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
             if session["kind"] == "episode":
                 record = session["record"]
                 meta = _episode_meta(record)
+                validation = validation_use(record, holdout_tasks)
+                meta["independent_validation"] = validation
                 episodes.write(json.dumps({**meta, "trajectory": str(session["trajectory"]),
                                            "files": (record["finished"].get("trajectory") or {}).get("files")},
                                           ensure_ascii=False) + "\n")
                 counts["episodes"] += 1
+                if validation and not include_failed:
+                    skip(f"independent validation episode ({validation})")
+                    continue
                 for note in record["notes"]:
                     notes.write(json.dumps({"source": "episode", "session": record["episode"],
                                             "task": record["task_id"], "harness": meta["harness"],
                                             "kind": note.get("kind"), "text": note.get("text"),
                                             "sources": note.get("sources", []), "at": note.get("at"),
-                                            "score": meta["score"]}, ensure_ascii=False) + "\n")
+                                            "score": meta["score"],
+                                            **({"independent_validation": validation} if validation else {})},
+                                           ensure_ascii=False) + "\n")
                     counts["notes"] += 1
-                good = meta["status"] in ("finished", "timeout")
+                good = meta["status"] in ("finished", "timeout") and validation is None
                 submission = _scored_submission(record)
                 local_score = ((submission or {}).get("local") or {}).get("score")
                 start_score = ((record.get("start") or {}).get("local") or {}).get("score")
@@ -358,7 +390,11 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
     manifest = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ecogym": __version__,
                 "ledger": str(ledger_path), "filters": {"min_score": min_score, "include_failed": include_failed,
                                                         "evolver": evolver, "margin": margin,
-                                                        "cross_prompt": cross_prompt},
+                                                        "cross_prompt": cross_prompt,
+                                                        "independent_validation": "marked" if include_failed
+                                                        else "excluded",
+                                                        "holdout_of": list(holdout_of),
+                                                        "holdout_tasks": sorted(holdout_tasks)},
                 "counts": counts, "skipped": skipped}
     (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return manifest
@@ -416,4 +452,4 @@ def _preferences(path: Path, scored: dict[str, list[dict[str, Any]]], main: dict
     return written
 
 
-__all__ = ["export", "sanitize", "threads"]
+__all__ = ["VALIDATION_ROLES", "export", "sanitize", "threads", "validation_use"]

@@ -902,7 +902,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     manifest = export(args.ledger, Path(args.out), min_score=None if args.all else args.min_score,
                       include_failed=args.all, evolver=not args.no_evolver, margin=args.margin,
-                      cross_prompt=args.cross_prompt)
+                      cross_prompt=args.cross_prompt, holdout_of=args.holdout_of)
     if args.json:
         _print_json(manifest)
         return 0
@@ -1158,6 +1158,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--cross-prompt", action="store_true",
                         help="also pair episodes whose prompts differ (they carry rejected_prompt)")
     export.add_argument("--no-evolver", action="store_true", help="leave out evolver sessions")
+    export.add_argument("--holdout-of", action="append", default=[], metavar="SUITE",
+                        help="also leave out every episode on this suite's holdout tasks, whatever its role "
+                             "(repeatable); holdout verification episodes are always left out of training data")
 
     expert = commands.add_parser("expert", help="expert questions, answers and notes")
     experts = expert.add_subparsers(dest="expert_command", required=True)

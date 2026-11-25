@@ -755,13 +755,19 @@ class Service:
 
     def start_export(self, body: dict[str, Any]) -> dict[str, Any]:
         from .episodes.export import export
+        from .task.suite import suite_spec
 
         try:
             min_score = None if body.get("min_score") is None else float(body["min_score"])
+            holdout_of = body.get("holdout_of") or []
+            if not isinstance(holdout_of, list) or not all(isinstance(item, str) for item in holdout_of):
+                raise TypeError("holdout_of must be a list of suite ids")
+            for suite in holdout_of:
+                suite_spec(suite)  # an unknown suite fails here, not in the export thread
             options = {"min_score": min_score, "include_failed": bool(body.get("include_failed", False)),
                        "evolver": bool(body.get("evolver", True)), "margin": float(body.get("margin", 0.02)),
-                       "cross_prompt": bool(body.get("cross_prompt", False))}
-        except (TypeError, ValueError) as error:
+                       "cross_prompt": bool(body.get("cross_prompt", False)), "holdout_of": holdout_of}
+        except (TypeError, ValueError, KeyError) as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"{type(error).__name__}: {error}") from None
         with self._jobs:
             if any(thread.is_alive() for thread in self._exporting.values()):
