@@ -914,13 +914,18 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const CHECK_NAMES = { holdout: "留出任务", validation: "封存 validation", final_test: "封存 final_test" };
 
     /** A run's independent verifications (its summary's ``verified``) as small tags: each gain and whether its
-     * interval clears 0, or just "已验证" when there was nothing to compare (one version); null when none was done. */
+     * interval clears 0; a verification done on part of its plan reads "未完成" (it used to read "已验证"), one
+     * with nothing to compare (one version) "无可比较"; null when none was done. */
     function GainTags({ verified, style }) {
       const gains = verified?.gains || {};
+      const incomplete = new Set(verified?.incomplete || []);
       const done = Object.keys(CHECK_NAMES).filter((name) => gains[name] || (name === "holdout" ? verified?.holdout : (verified?.sealed || []).includes(name)));
       return done.length ? h("div", { className: "eg-chips", style }, done.map((name) => {
         const gain = gains[name];
-        if (!isNum(gain?.delta)) return h(Tag, { key: name, title: "只有一个版本（没有采纳过候选），或者没有可比较的任务" }, `${CHECK_NAMES[name]} 已验证`);
+        if (incomplete.has(name) || gain?.complete === false) {
+          return h(Tag, { key: name, tone: "warning", title: "只评了计划的一部分：结论只代表评到的任务，见运行页的「独立验证」" }, `${CHECK_NAMES[name]} 未完成`);
+        }
+        if (!isNum(gain?.delta)) return h(Tag, { key: name, title: "只有一个版本（没有采纳过候选），或者没有可比较的任务" }, `${CHECK_NAMES[name]} 无可比较`);
         const side = credibility(gain.interval);
         return h(Tag, { key: name, tone: side === "above" ? "success" : side === "below" ? "danger" : "neutral",
           title: `${CHECK_NAMES[name]}：最终 − 起点 ${signed(gain.delta, 4)}，区间 [${signed(gain.interval?.[0], 3)}, ${signed(gain.interval?.[1], 3)}]，${CREDIBLE_TEXT[side]}` },
@@ -2147,17 +2152,34 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         next = "这些候选还算不上一致的改进：它们和在任版本的差别比误差范围小，或者在一部分训练任务上更好、另一部分更差。"
           + "没过门槛的候选留在存档里，以后的评审可以在它们上面接着改；要分清更小的差别，需要更多训练任务。";
       } else if (adopted.length && finished) {
+        // each independent check by its own evidence: incomplete, crossing 0, credibly worse or credibly better.
+        // Until 0.4.2 any check with two means read as "the gain is not only on the training tasks", even when it
+        // was incomplete or its interval crossed 0 (2026-11-18 review: two runs' holdout intervals [−0.004, +0.056])
         const holdout = view.verification?.holdout;
         const sealed = view.verification?.sealed?.final_test || view.verification?.sealed?.validation;
         const checks = [];
-        if (holdout && isNum(holdout.means?.seed) && isNum(holdout.means?.final)) {
-          checks.push(`在 ${(holdout.tasks || []).length} 个没参与进化的任务上${move(holdout.means.seed, holdout.means.final, holdout.decision?.interval)}`);
+        const add = (body, where) => {
+          if (!body || !isNum(body.means?.seed) || !isNum(body.means?.final)) return;
+          if (body.complete === false || !body.decision) {
+            checks.push({ side: "partial", text: `${where}只评了一部分${body.missing?.length ? `（${missingText(body.missing)}）` : ""}，`
+              + `评到的部分从 ${signed(body.means.seed, 3)} 到 ${signed(body.means.final, 3)}，不下结论` });
+            return;
+          }
+          checks.push({ side: credibility(body.decision.interval), text: `${where}${move(body.means.seed, body.means.final, body.decision.interval)}` });
+        };
+        add(holdout, `在 ${(holdout?.tasks || []).length} 个没参与进化的任务上`);
+        add(sealed, "在更晚、谁都没见过的时期上");
+        const texts = checks.map((item) => item.text).join("；");
+        if (!checks.length) {
+          next = "采纳是在训练任务上决定的；最终版本还要在没参与进化的任务和更晚的时期上各验证一次（见下面的「独立验证」）。";
+        } else if (checks.every((item) => item.side === "above")) {
+          next = `提升不只出现在训练任务上。最终版本和起点版本又各比了一次：${texts}。`;
+        } else if (checks.some((item) => item.side === "below")) {
+          next = `独立验证里有可信地变差的结果，训练任务上的提升在这里没有得到确认：${texts}。`;
+        } else {
+          next = `独立验证还不能确认训练任务上的提升：${texts}。`
+            + (checks.some((item) => item.side === "partial") ? "补齐缺项后再看（见下面的「独立验证」）。" : "差别在误差内时，需要更多独立任务或更长的时期才分得清。");
         }
-        if (sealed && isNum(sealed.means?.seed) && isNum(sealed.means?.final)) {
-          checks.push(`在更晚、谁都没见过的时期上${move(sealed.means.seed, sealed.means.final, sealed.decision?.interval)}`);
-        }
-        next = checks.length ? `提升不只出现在训练任务上。最终版本和起点版本又各比了一次：${checks.join("；")}。`
-          : "采纳是在训练任务上决定的；最终版本还要在没参与进化的任务和更晚的时期上各验证一次（见下面的「独立验证」）。";
       }
 
       const read = "成绩是预报误差比朴素预报低多少：" + (isNum(finalScore) && Math.abs(finalScore) >= 0.005

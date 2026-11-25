@@ -305,9 +305,11 @@ def summary(view: dict[str, Any], spent: dict[str, Any] | None = None) -> dict[s
         "metered_tokens": sum(item.get("metered_tokens") or 0 for item in sessions),
         "verified": {"holdout": view["verification"]["holdout"] is not None,
                      "sealed": sorted(view["verification"]["sealed"]),
-                     # sealed stages verified on part of their plan (``verify.sealed_plan``): read with care
-                     "incomplete": sorted(stage for stage, body in view["verification"]["sealed"].items()
-                                          if body.get("complete") is False),
+                     # verifications done on part of their plan (``verify.sealed_plan``; a holdout verification
+                     # with tasks lacking a scored episode): read with care
+                     "incomplete": sorted(stage for stage, body in [("holdout", view["verification"]["holdout"]),
+                                                                    *view["verification"]["sealed"].items()]
+                                          if body and body.get("complete") is False),
                      "gains": verified_gains(view)},
         "adoption_gains": [item.get("delta") for item in view["adoptions"]],
         "ended_early": bool(view.get("ended_early")),

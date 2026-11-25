@@ -112,6 +112,21 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(body["versions"]["seed"]["episodes"]["holdout"]["episode"], "ep:correct")
         self.assertEqual(body["versions"]["final"]["episodes"]["holdout"]["episode"], "ep:final")
 
+    def test_run_summary_marks_every_incomplete_verification(self):
+        """The run list read "已验证" for a holdout verification with missing tasks (2026-11-18 review)."""
+
+        self.start()
+        self.append("holdout_verified", {"tasks": ["holdout"], "versions": {}, "means": {}, "decision": None,
+                                        "missing": [{"version": "seed", "task": "holdout",
+                                                     "reason": "unscored_episode"}], "complete": False})
+        self.append("sealed_verified", {"stage": "validation", "versions": {}, "means": {}, "decision": None,
+                                       "missing": [], "complete": True})
+        with Ledger(self.ledger) as db:
+            verified = verify.fold(db.events(self.run))
+        from ecogym.evolution.fold import summary
+
+        self.assertEqual(summary(verified)["verified"]["incomplete"], ["holdout"])
+
     def test_holdout_does_not_reuse_a_different_selection_policy(self):
         expected = verify.holdout_conditions(self.config)
         archived = {"model": self.config.model, "minutes": self.config.minutes, "tokens": self.config.tokens}
