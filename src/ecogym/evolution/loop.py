@@ -128,15 +128,15 @@ class EvolveConfig:
     suite: str
     harness: str = "seed"
     generations: int = 3
-    candidates: int = 2
+    candidates: int = 1
     repeats: int = 2  # one episode per version and task makes adoptions fragile (docs/evolution.md, section 16)
-    minutes: float = 20.0
+    minutes: float = 10.0
     tokens: int = 3_000_000
     model: str | None = None  # pin the inner agents' model (<provider>/<model>); None lets each harness choose
-    evolver_minutes: float = 30.0
+    evolver_minutes: float = 20.0
     evolver_tokens: int = 4_000_000
     evolver_model: str = "deepseek-v4-pro"
-    concurrency: int = 3
+    concurrency: int = 4
     retries: int = 1
     check_adoptions: bool = False  # optional diagnostic on sealed validation, for people only
     outage_minutes: float = 120.0  # how long a round waits for the model service to answer again (0: not at all)
@@ -320,10 +320,10 @@ def _require_replies(entries: list[dict[str, Any]]) -> None:
 
 
 PROBE_EVERY = 60.0  # seconds between test requests while a model service is down
-OUTAGE_RERUNS = 3  # reruns of one episode after confirmed outages, on top of ``retries``
+OUTAGE_RERUNS = 2  # reruns of one episode after confirmed outages, on top of ``retries``
 # reruns of one episode that ended ``infra_failed`` while the service answered a test request (a provider that
-# fails many calls, not all), on top of ``retries``: such an attempt says nothing about the harness either
-SERVICE_RERUNS = 3
+# fails many calls, not all), on top of ``retries``: bounded so one congested slot does not stall a whole round
+SERVICE_RERUNS = 1
 
 
 class ServiceGate:

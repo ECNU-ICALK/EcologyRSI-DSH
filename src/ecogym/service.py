@@ -727,12 +727,19 @@ class Service:
             probes = max(1, min(12, int(body.get("probes") or 6)))
             concurrency = max(1, min(6, int(body.get("concurrency") or 3)))
             timeout = max(5.0, min(60.0, float(body.get("timeout") or 25.0)))
+            context_chars = max(0, min(16_000, int(body.get("context_chars", 4000))))
         except (TypeError, ValueError) as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
 
         def _one_call(target: str) -> dict[str, Any]:
             began = time.monotonic()
-            state, detail = providers.answers(target, timeout=timeout)
+            kwargs = {"timeout": timeout}
+            if context_chars > 0:
+                kwargs["context_chars"] = context_chars
+            try:
+                state, detail = providers.answers(target, **kwargs)
+            except TypeError:
+                state, detail = providers.answers(target, timeout=timeout)
             return {"status": state, "detail": detail, "seconds": round(time.monotonic() - began, 3)}
 
         rows: list[dict[str, Any]] = []

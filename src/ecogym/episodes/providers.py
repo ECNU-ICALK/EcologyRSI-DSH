@@ -259,13 +259,23 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
         return f"test request failed: {type(error).__name__}: {error}"
 
 
-def _test_request(route: Route, model: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector]:
-    """One tiny streamed chat request with one tool, as every agent call carries, and the opener to send it."""
+def _test_request(
+    route: Route,
+    model: str,
+    *,
+    context_chars: int = 0,
+    max_tokens: int = 16,
+) -> tuple[urllib.request.Request, urllib.request.OpenerDirector]:
+    """One streamed chat request with one tool, as every agent call carries, and the opener to send it."""
 
     if not has_secret(route.key_env):
         raise ModelError(f"{route.provider}: no {route.key_env} in the environment or DSH's credential store")
+    prompt = "ping"
+    if context_chars > 0:
+        unit = "obs_row x0=21.4 x1=72.5 x2=610.0 x3=185.2 x4=42.1\n"
+        prompt = (unit * max(1, context_chars // len(unit))) + "\nReply with OK."
     # streamed: the status arrives before any (possibly slow) reasoning
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16,
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
                        "stream": True, "tools": [PROBE_TOOL]}).encode()
     request = urllib.request.Request(route.base_url.rstrip("/") + "/chat/completions", data=body, method="POST",
                                      headers={"Content-Type": "application/json", **route.headers,
@@ -285,8 +295,14 @@ def _object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def answers(ref: str, *, timeout: float = 30.0) -> tuple[str, str]:
-    """Whether the model answers a tiny request now: ``("ok" | "down" | "refused", what happened)``.
+def answers(
+    ref: str,
+    *,
+    timeout: float = 30.0,
+    context_chars: int = 0,
+    max_tokens: int = 16,
+) -> tuple[str, str]:
+    """Whether the model answers a test request now: ``("ok" | "down" | "refused", what happened)``.
 
     Stricter than ``probe``: the reply must carry a choice, streamed (or as one JSON object from a provider that
     ignores ``stream``), within ``timeout`` seconds in all; on 2026-11-02 a gateway answered 200 with an empty body
@@ -299,7 +315,7 @@ def answers(ref: str, *, timeout: float = 30.0) -> tuple[str, str]:
     started = time.monotonic()
     try:
         route, model = resolve(ref)
-        request, opener = _test_request(route, model)
+        request, opener = _test_request(route, model, context_chars=context_chars, max_tokens=max_tokens)
         with opener.open(request, timeout=timeout) as response:
             lines: list[bytes] = []
             seen, streamed, problem = 0, False, ""
