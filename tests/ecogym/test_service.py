@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from ecogym.service import Service, make_server
 
@@ -88,6 +89,27 @@ class ServiceTests(unittest.TestCase):
     def test_non_loopback_needs_a_token(self):
         with self.assertRaises(ValueError):
             make_server(self.service, "0.0.0.0", 0)
+
+    def test_model_benchmark_endpoint_ranks_by_success_and_latency(self):
+        def fake_check(ref: str) -> str:
+            return ref
+
+        def fake_answers(ref: str, *, timeout: float = 25.0):
+            if "unstable" in ref:
+                return "down", "answered 503: upstream busy"
+            return "ok", "ok"
+
+        with (
+            patch("ecogym.episodes.providers.check", side_effect=fake_check),
+            patch("ecogym.episodes.providers.answers", side_effect=fake_answers),
+        ):
+            status, body = self.call(
+                "/api/models/benchmark",
+                {"models": ["route-a/unstable", "route-b/stable"], "probes": 4, "concurrency": 2},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["recommended"], "route-b/stable")
+        self.assertEqual([item["ok"] for item in body["results"]], [0, 4])
 
 
 if __name__ == "__main__":

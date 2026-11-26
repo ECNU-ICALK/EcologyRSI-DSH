@@ -29,11 +29,13 @@ import hmac
 import json
 import re
 import socket
+import statistics
 import sys
 import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -153,6 +155,8 @@ ROUTES = (
     Route("GET", "harnesses/{before}/diff/{after}", "harness_diff", "Harness", "两个版本逐文件的差异"),
     Route("POST", "models/check", "model_check", "模型", "{model}：现在能否调用（发一个很小的请求，结果缓存十分钟）",
           body=True),
+    Route("POST", "models/benchmark", "model_benchmark", "模型",
+          "{models, probes, concurrency}：串行与并发实测多路模型的流式工具调用稳定性与延迟", body=True),
     Route("GET", "expert", "expert", "专家", "智能体提给专家的问题、回答和主动提示"),
     Route("POST", "expert/answer", "expert_answer", "专家", "回答一个问题 {question, text, by}", status=201, body=True),
     Route("POST", "expert/note", "expert_note", "专家", "写一条主动提示 {scope, text, by}", status=201, body=True),
@@ -707,6 +711,83 @@ class Service:
             result = {"model": ref, "ok": False, "error": str(error)}
         self._model_checks[ref] = (time.monotonic(), result)
         return result
+
+    def model_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Run multi-probe sequential + concurrent stability benchmark across candidate model routes."""
+
+        from .episodes import providers
+
+        raw_models = body.get("models")
+        if not isinstance(raw_models, list):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "models must be a list of <provider>/<model> strings")
+        cleaned = [str(item).strip() for item in raw_models if str(item).strip()]
+        if not 1 <= len(cleaned) <= 6:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "benchmark needs 1 to 6 model references")
+        try:
+            probes = max(1, min(12, int(body.get("probes") or 6)))
+            concurrency = max(1, min(6, int(body.get("concurrency") or 3)))
+            timeout = max(5.0, min(60.0, float(body.get("timeout") or 25.0)))
+        except (TypeError, ValueError) as error:
+            raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
+
+        def _one_call(target: str) -> dict[str, Any]:
+            began = time.monotonic()
+            state, detail = providers.answers(target, timeout=timeout)
+            return {"status": state, "detail": detail, "seconds": round(time.monotonic() - began, 3)}
+
+        rows: list[dict[str, Any]] = []
+        for raw in cleaned:
+            try:
+                target = providers.check(raw)
+            except providers.ModelError as problem:
+                rows.append({
+                    "model": raw,
+                    "runnable": False,
+                    "total": 0,
+                    "ok": 0,
+                    "success_rate": 0.0,
+                    "median_seconds": None,
+                    "p90_seconds": None,
+                    "max_seconds": None,
+                    "errors": [str(problem)],
+                })
+                continue
+            seq_count = min(2, probes)
+            calls = [_one_call(target) for _ in range(seq_count)]
+            rest = probes - seq_count
+            if rest > 0:
+                with ThreadPoolExecutor(max_workers=min(concurrency, rest)) as pool:
+                    calls.extend(pool.map(_one_call, [target] * rest))
+            ok_times = [item["seconds"] for item in calls if item["status"] == "ok"]
+            all_times = sorted(item["seconds"] for item in calls)
+            p90 = all_times[max(0, int(len(all_times) * 0.9) - 1)] if all_times else None
+            errors = [f"{item['status']}: {item['detail']}" for item in calls if item["status"] != "ok"]
+            rows.append({
+                "model": target,
+                "runnable": True,
+                "total": len(calls),
+                "ok": len(ok_times),
+                "success_rate": round(len(ok_times) / len(calls), 4),
+                "median_seconds": round(statistics.median(ok_times), 3) if ok_times else None,
+                "p90_seconds": round(p90, 3) if p90 is not None else None,
+                "max_seconds": round(max(all_times), 3) if all_times else None,
+                "errors": errors[:5],
+            })
+
+        viable = [row for row in rows if row["ok"] > 0]
+        recommended = (
+            max(
+                viable,
+                key=lambda row: (
+                    row["success_rate"],
+                    -(row["p90_seconds"] if row["p90_seconds"] is not None else 1e9),
+                    -(row["median_seconds"] if row["median_seconds"] is not None else 1e9),
+                ),
+            )["model"]
+            if viable
+            else None
+        )
+        return {"probes": probes, "concurrency": concurrency, "results": rows, "recommended": recommended}
 
     def expert(self) -> dict[str, Any]:
         from .episodes import expert

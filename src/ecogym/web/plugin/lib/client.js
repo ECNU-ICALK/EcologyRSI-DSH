@@ -337,7 +337,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       episodes: "episodes", episode: (id) => `episodes/${enc(id)}`, episodeTranscript: (id) => `episodes/${enc(id)}/transcript`,
       roundEpisodes: (evolution, generation) => `episodes?evolution=${enc(evolution)}&generation=${enc(generation)}`,
       harness: (ref) => `harnesses/${enc(ref)}`, harnessDiff: (before, after) => `harnesses/${enc(before)}/diff/${enc(after)}`,
-      modelCheck: "models/check",
+      modelCheck: "models/check", modelBenchmark: "models/benchmark",
       expert: "expert", expertAnswer: "expert/answer", expertNote: "expert/note",
       exports: "exports", exportDetail: (id) => `exports/${enc(id)}`,
     };
@@ -579,6 +579,73 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           item.options.map((option) => h("option", { key: option.value, value: option.value, disabled: !item.runnable }, option.label))))),
         help ? h("small", null, help) : null,
         tested ? h("small", null, tested) : null);
+    }
+
+    /** Side-by-side stability benchmark for candidate model routes (sequential + concurrent streamed tool calls). */
+    function ModelBenchmarkBox({ routes, onApply }) {
+      const runnableOptions = useMemo(
+        () => routes.filter((r) => r.runnable).flatMap((r) => r.options),
+        [routes]
+      );
+      const pickDefault = (preferred, fallbackIdx) => {
+        const hit = runnableOptions.find((o) => preferred.some((p) => o.value.toLowerCase() === p.toLowerCase()));
+        return hit ? hit.value : (runnableOptions[fallbackIdx]?.value || "");
+      };
+      const [first, setFirst] = useState(() => pickDefault(["pjlab/deepseek-v4.1-flash"], 0));
+      const [second, setSecond] = useState(() => pickDefault(["token-plan/Sage-S2.1-Flash", "token-plan/sage-s2.1-flash"], 1));
+      const [probes, setProbes] = useState("6");
+      const [running, setRunning] = useState(false);
+      const [report, setReport] = useState(null);
+      const [err, setErr] = useState("");
+      useEffect(() => {
+        if (!first && runnableOptions.length) setFirst(pickDefault(["pjlab/deepseek-v4.1-flash"], 0));
+        if (!second && runnableOptions.length > 1) setSecond(pickDefault(["token-plan/Sage-S2.1-Flash", "token-plan/sage-s2.1-flash"], 1));
+      }, [runnableOptions]);
+      const runBench = async () => {
+        const chosen = [...new Set([first, second].filter(Boolean))];
+        if (!chosen.length || running) return;
+        setRunning(true);
+        setErr("");
+        try {
+          const out = await api(Api.modelBenchmark, { body: { models: chosen, probes: Number(probes) || 6, concurrency: 3 } });
+          setReport(out);
+        } catch (failure) {
+          setErr(failure.message);
+        } finally {
+          setRunning(false);
+        }
+      };
+      const renderPicker = (labelText, val, setter) => h("label", { className: "eg-field" }, h("span", null, labelText),
+        h("select", { className: "eg-input", value: val, onChange: (e) => setter(e.target.value) },
+          routes.filter((r) => r.runnable).map((item) => h("optgroup", { key: item.provider, label: `${item.name} · ${item.host}` },
+            item.options.map((opt) => h("option", { key: opt.value, value: opt.value }, opt.label))))));
+      return h(Details, { summary: "模型稳定性实测对比（串行 + 并发流式工具调用）" },
+        h("div", { className: "eg-form", style: { marginTop: "10px", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" } },
+          renderPicker("对比模型 A", first, setFirst),
+          renderPicker("对比模型 B", second, setSecond),
+          h("label", { className: "eg-field" }, h("span", null, "每路测试请求数"),
+            h("select", { className: "eg-input", value: probes, onChange: (e) => setProbes(e.target.value) },
+              h("option", { value: "6" }, "6 次（2 串行 + 4 并发）"),
+              h("option", { value: "10" }, "10 次（2 串行 + 8 并发）")))),
+        h("div", { className: "eg-actions", style: { marginTop: "10px" } },
+          h(Button, { variant: "outline", disabled: running || (!first && !second), onClick: runBench },
+            running ? "正在实测流式与并发稳定性…" : "开始实测对比"),
+          report?.recommended ? h(Button, { variant: "primary", onClick: () => {
+            onApply(report.recommended);
+            toast(`已选用更稳模型 ${report.recommended}`, "success");
+          } }, `一键选用更稳模型（${report.recommended}）`) : null),
+        err ? h(Alert, { tone: "danger" }, err) : null,
+        report?.results?.length ? h("div", { style: { marginTop: "10px" } },
+          h(Table, { head: ["模型路由", ["成功率", "num"], ["中位延迟", "num"], ["P90 延迟", "num"], "结论", "错误摘要"] },
+            report.results.map((row) => h("tr", { key: row.model },
+              h("td", null, h(Mono, null, row.model)),
+              h("td", { className: `num ${row.success_rate >= 0.9 ? "eg-good" : row.success_rate >= 0.6 ? "eg-warn" : "eg-bad"}` },
+                `${row.ok}/${row.total} (${Math.round(row.success_rate * 100)}%)`),
+              h("td", { className: "num" }, row.median_seconds !== null ? `${row.median_seconds.toFixed(2)}s` : "–"),
+              h("td", { className: "num" }, row.p90_seconds !== null ? `${row.p90_seconds.toFixed(2)}s` : "–"),
+              h("td", null, report.recommended === row.model ? h(Tag, { tone: "success" }, "更稳推荐")
+                : row.ok === 0 ? h(Tag, { tone: "danger" }, "不可用") : h(Tag, { tone: "neutral" }, "备选")),
+              h("td", { className: "eg-faint" }, (row.errors || []).slice(0, 2).join("；") || "全部成功"))))) : null);
     }
 
     /* ---- toasts and confirmation ---------------------------------------------------------------------------- */
@@ -2578,6 +2645,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               note: "固定后，每个回合都用这个模型；不固定时由各版本 Harness 的 [agent] 决定（只能是 DeepSeek 模型）。" }),
             h(ModelSelect, { label: "评审智能体（改 Harness）", value: values.evolver_model, onChange: set("evolver_model"), routes,
               note: "每一代读证据、写候选的评审会话用这个模型。" })),
+          h("div", { style: { marginTop: "12px" } },
+            h(ModelBenchmarkBox, { routes, onApply: (picked) => setValues((old) => ({ ...old, model: picked, evolver_model: picked })) })),
           catalog?.models?.error ? h(Alert, { tone: "warning" }, `读取 DSH 的模型设置失败：${catalog.models.error}`) : null),
         h(Card, null, h(Details, { summary: "高级设置：回合与评审的预算、服务故障时怎么办、复核" },
           h("div", { className: "eg-form", style: { marginTop: "10px" } },
