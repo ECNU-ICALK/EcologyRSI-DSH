@@ -77,7 +77,8 @@ from .workspace import LOCAL_STAGE, SCORED_STAGE, export_visible, task_brief
 EVENT_KINDS = frozenset({"episode_started", "episode_evaluated", "episode_submitted", "episode_note",
                          "expert_question", "episode_scored", "episode_finished"})
 PROMPT = ("请先阅读当前目录下的 TASK.md 和 AGENTS.md，然后独立完成任务：研究数据，编写并改进 submission/ 中的预测程序，"
-          "用 ecogym 工具检验，并在找到跨时间窗稳定改进时提交（已有有效起始程序时无需为保底重复提交原模板）。")
+          "用 ecogym 工具检验；每当 evaluate_local 通过替换门槛时立即调用 submit 锁定里程碑（同代码复用缓存零耗时；"
+          "已有有效起始程序时无需重复提交未修改的原模板）。")
 PREDICTIONS = "scored.npz"
 CONTINUE_SHARE = 0.25  # an agent that ends with more than this share of its time left gets a follow-up session
 MAX_CONTINUATIONS = 3
@@ -108,7 +109,7 @@ def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
             f"这是同一个回合的第 {n + 1} 段会话。上一段会话已经结束，但这个回合还剩约 {left / 60:.0f} 分钟"
             f"（共 {minutes:g} 分钟）。工作区里的文件和提交都还在，用 task_info 查看。{state}",
             "请继续改进：先读 TASK.md 和 submission/ 回顾已经做过的事，再找在拟合期内部多个滚动窗口上都稳定的改进；"
-            f"只有确实更好时才 submit。{selection_rule_text(tools.selection_policy)}"
+            f"每次 evaluate_local 通过替换门槛且更优时立即 submit 锁定。{selection_rule_text(tools.selection_policy)}"
             "截止前留出时间收尾，写最终回复。",
             "", "上一段会话的最终回复（节选）：", "", reply.strip()[-2500:] or "（没有）",
         ])

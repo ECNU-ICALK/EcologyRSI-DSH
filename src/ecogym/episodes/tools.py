@@ -71,7 +71,8 @@ def selection_rule_text(policy: str) -> str:
         return (
             f"候选须完成本地检验并覆盖所有计分格；相对有效起始程序，近期本地窗口总分须提高至少 {REPLACE_MARGIN:g}，"
             f"且在拟合期内部留出的更早因果前滚折上不退化（≥ {WALK_FORWARD_PRE_FLOOR:+.2g}）、"
-            f"两折平均增益至少 {WALK_FORWARD_MEAN_MARGIN:g}、任一时距退化不超过 {WALK_FORWARD_HORIZON_CAP:g}。"
+            f"两折平均增益至少 {WALK_FORWARD_MEAN_MARGIN:g}、"
+            f"近期折及双折平均任一时距退化均不超过 {WALK_FORWARD_HORIZON_CAP:g}。"
             "满足条件的提交中双折均分最高者用于评分，没有通过则继续用起始程序；"
             "拟合期过短不足以切分前滚折时退回近期窗口最高分规则；起始程序无效时可用通过完整性检验的提交恢复。"
         )
@@ -178,6 +179,10 @@ def walk_forward_selection(
     start_pre_h = horizon_objectives(start_pre)
     pre_h_deltas = {str(h): round(cand_pre_h[h] - start_pre_h[h], 4) for h in start_pre_h if h in cand_pre_h}
     min_pre_h = min((cand_pre_h[h] - start_pre_h[h] for h in start_pre_h if h in cand_pre_h), default=0.0)
+    shared_h = [h for h in start_h if h in cand_h and h in start_pre_h and h in cand_pre_h]
+    wf_h_raw = {h: 0.5 * ((cand_h[h] - start_h[h]) + (cand_pre_h[h] - start_pre_h[h])) for h in shared_h}
+    wf_h_deltas = {str(h): round(val, 4) for h, val in wf_h_raw.items()}
+    min_wf_h = min(wf_h_raw.values(), default=0.0)
     wf_delta = 0.5 * (uq_delta + pre_delta)
     wf_score = 0.5 * (candidate.score() + pre_score)
     enriched = {
@@ -186,14 +191,15 @@ def walk_forward_selection(
         "pre_start": round(pre_base, 4),
         "pre_delta": pre_delta,
         "pre_horizons": pre_h_deltas,
+        "walk_forward_horizons": wf_h_deltas,
         "walk_forward_delta": wf_delta,
         "walk_forward_score": wf_score,
     }
-    if not math.isfinite(pre_delta) or not math.isfinite(min_pre_h):
+    if not math.isfinite(pre_delta) or not math.isfinite(min_pre_h) or not math.isfinite(min_wf_h):
         return {**enriched, "reason": "nonfinite_score"}
     if pre_delta + SCORE_TOLERANCE < WALK_FORWARD_PRE_FLOOR:
         return {**enriched, "reason": "pre_fold_regression"}
-    if min_pre_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
+    if min_wf_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
         return {**enriched, "reason": "horizon_loss_above_cap"}
     if wf_delta + SCORE_TOLERANCE < WALK_FORWARD_MEAN_MARGIN:
         return {**enriched, "reason": "walk_forward_gain_below_margin"}
