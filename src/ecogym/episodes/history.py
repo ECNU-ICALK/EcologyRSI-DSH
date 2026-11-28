@@ -54,7 +54,11 @@ def episode_ids(ledger: Ledger) -> list[str]:
 
 
 def episode_records(ledger: Ledger, ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
-    return [fold_episode(ledger.events(run_id)) for run_id in (episode_ids(ledger) if ids is None else ids)]
+    run_ids = episode_ids(ledger) if ids is None else list(ids)
+    if not run_ids:
+        return []
+    grouped = ledger.events_by_runs(run_ids)
+    return [fold_episode(grouped[run_id]) for run_id in run_ids if grouped.get(run_id)]
 
 
 def summary(record: dict[str, Any]) -> dict[str, Any]:

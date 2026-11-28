@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +25,9 @@ from .canonical import canonical_json, jsonable
 
 SCHEMA_VERSION = "ecogym.ledger/1"
 _GENESIS = "0" * 64
+_INIT_LOCK = threading.Lock()
+_INITIALIZED: set[tuple[str, int, int]] = set()
+_SQLITE_CHUNK = 400
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -36,6 +41,7 @@ CREATE TABLE IF NOT EXISTS events (
     hash TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS events_by_run ON events (run_id, seq);
+CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
 CREATE INDEX IF NOT EXISTS episodes_by_evolution ON events (
     json_extract(body, '$.context.evolution'), json_extract(body, '$.context.generation'), seq
 ) WHERE kind = 'episode_started';
@@ -84,13 +90,31 @@ class Ledger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(self.path, isolation_level=None, timeout=30.0)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.executescript(_SCHEMA)
-        row = self._db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-        if row is None:
-            self._db.execute("INSERT INTO meta (key, value) VALUES ('schema', ?)", (SCHEMA_VERSION,))
-        elif row[0] != SCHEMA_VERSION:
-            raise LedgerError(f"{self.path} uses ledger schema {row[0]}, expected {SCHEMA_VERSION}")
+        self._db.execute("PRAGMA busy_timeout=30000")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+        key = self._file_key()
+        with _INIT_LOCK:
+            ready = key is not None and key in _INITIALIZED
+        if not ready:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.executescript(_SCHEMA)
+            row = self._db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+            if row is None:
+                self._db.execute("INSERT INTO meta (key, value) VALUES ('schema', ?)", (SCHEMA_VERSION,))
+            elif row[0] != SCHEMA_VERSION:
+                self._db.close()
+                raise LedgerError(f"{self.path} uses ledger schema {row[0]}, expected {SCHEMA_VERSION}")
+            new_key = self._file_key()
+            if new_key is not None:
+                with _INIT_LOCK:
+                    _INITIALIZED.add(new_key)
+
+    def _file_key(self) -> tuple[str, int, int] | None:
+        try:
+            info = os.stat(self.path)
+            return (str(self.path.resolve()), info.st_dev, info.st_ino)
+        except OSError:
+            return None
 
     def close(self) -> None:
         self._db.close()
@@ -175,6 +199,40 @@ class Ledger:
             f"AND event.kind IN ({kind_args}){filters} ORDER BY event.seq", args)
         return [Event(seq, run_id, kind, at, json.loads(body), event_hash)
                 for seq, run_id, kind, at, body, event_hash in rows]
+
+    def events_by_runs(self, run_ids: Sequence[str], *, kinds: Sequence[str] | None = None) -> dict[str, list[Event]]:
+        """Batch-read events for many runs in chunked queries (avoids N+1 queries)."""
+
+        unique = list(dict.fromkeys(run_ids))
+        grouped: dict[str, list[Event]] = {run_id: [] for run_id in unique}
+        if not unique or (kinds is not None and not kinds):
+            return grouped
+        kind_clause = ""
+        kind_args: tuple[str, ...] = ()
+        if kinds is not None:
+            kind_clause = f" AND kind IN ({', '.join('?' for _ in kinds)})"
+            kind_args = tuple(kinds)
+        for offset in range(0, len(unique), _SQLITE_CHUNK):
+            chunk = unique[offset : offset + _SQLITE_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._db.execute(
+                f"SELECT seq, run_id, kind, at, body, hash FROM events "
+                f"WHERE run_id IN ({placeholders}){kind_clause} ORDER BY seq",
+                (*chunk, *kind_args),
+            )
+            for seq, run_id, kind, at, body, event_hash in rows:
+                grouped[run_id].append(Event(seq, run_id, kind, at, json.loads(body), event_hash))
+        return grouped
+
+    def events_since(self, seq: int) -> list[Event]:
+        """All events with sequence number strictly greater than ``seq``, in order."""
+
+        rows = self._db.execute(
+            "SELECT seq, run_id, kind, at, body, hash FROM events WHERE seq > ? ORDER BY seq",
+            (int(seq),),
+        )
+        return [Event(s, run_id, kind, at, json.loads(body), event_hash)
+                for s, run_id, kind, at, body, event_hash in rows]
 
     def last_seq(self) -> int:
         """The sequence number of the newest event (0 for an empty ledger)."""

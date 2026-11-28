@@ -42,9 +42,24 @@ def session_events(path: Path, node: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in done.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
 
 
+def _session_version(path: Path) -> int:
+    name = path.name
+    if name == "session.jsonl.zstd":
+        return 0
+    middle = name.removeprefix("session.v").removesuffix(".jsonl.zstd")
+    return int(middle) if middle.isdigit() else -1
+
+
 def sessions(home: Path, node: Path) -> list[dict[str, Any]]:
+    by_dir: dict[Path, Path] = {}
+    for pattern in ("sessions/*/*/session.v*.jsonl.zstd", "sessions/*/*/session.jsonl.zstd"):
+        for path in sorted(home.glob(pattern)):
+            prev = by_dir.get(path.parent)
+            if prev is None or _session_version(path) > _session_version(prev):
+                by_dir[path.parent] = path
     found = []
-    for path in sorted(home.glob("sessions/*/*/session.v3.jsonl.zstd")):
+    for folder in sorted(by_dir):
+        path = by_dir[folder]
         events = session_events(path, node)
         header = events[0] if events and events[0].get("type") == "session" else {}
         found.append({"id": header.get("id", path.parent.name), "parent": header.get("parentSession"),
@@ -54,23 +69,37 @@ def sessions(home: Path, node: Path) -> list[dict[str, Any]]:
 
 def summarize(found: list[dict[str, Any]]) -> dict[str, Any]:
     tools: collections.Counter[str] = collections.Counter()
+    skills: collections.Counter[str] = collections.Counter()
     searches: list[str] = []
     usage: collections.Counter[str] = collections.Counter()
     for session in found:
         for event in session["events"]:
             kind, data = event.get("type"), event.get("data") or {}
             if kind == "tool/call":
-                tools[str(data.get("name"))] += 1
-                if data.get("name") == "web_search":
-                    with contextlib.suppress(json.JSONDecodeError, AttributeError):
-                        searches.extend(json.loads(data.get("arguments") or "{}").get("queries") or [])
+                name = str(data.get("name"))
+                tools[name] += 1
+                if name == "web_search":
+                    with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                        args = json.loads(data.get("arguments") or "{}")
+                        if isinstance(args, dict):
+                            qs = args.get("queries")
+                            if isinstance(qs, list):
+                                searches.extend(str(q) for q in qs if q)
+                            elif args.get("query"):
+                                searches.append(str(args["query"]))
+                elif name == "skill":
+                    with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                        args = json.loads(data.get("arguments") or "{}")
+                        if isinstance(args, dict) and args.get("name"):
+                            skills[str(args["name"])] += 1
             elif kind == "assistant/message":
                 found_usage = data.get("usage") or (data.get("message") or {}).get("usage") or {}
                 for key, value in found_usage.items():
                     if isinstance(value, int):
                         usage[key] += value
     return {"sessions": len(found), "subagents": sum(1 for item in found if item["depth"]),
-            "tool_calls": dict(tools.most_common()), "web_queries": searches[:200], "usage": dict(usage)}
+            "tool_calls": dict(tools.most_common()), "skills": dict(skills.most_common()),
+            "web_queries": searches[:200], "usage": dict(usage)}
 
 
 def _digest(path: Path) -> str:

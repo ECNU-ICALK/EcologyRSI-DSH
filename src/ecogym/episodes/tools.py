@@ -19,13 +19,16 @@ the latest accepted submission the session itself saw.
 
 from __future__ import annotations
 
-import hashlib
+import copy
+import json
 import math
 import os
-import stat
+import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +36,12 @@ import numpy as np
 
 from ..evaluation.harness import Bench, Evaluation
 from ..kernel import clock
+from ..kernel.canonical import digest as canonical_digest
+from ..kernel.fs import CopyError, copy_regular_tree
 from .classical import classical_reference_tool
-from .judge import PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
+from .judge import JUDGE_PROTOCOL, PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
 from .mcp import Tool, ToolError
-from .sandbox import Runtime
+from .sandbox import Runtime, SandboxUnavailable, confine_program, scratch_root, thread_limits
 from .workspace import LOCAL_STAGE
 
 MAX_FILES = 300
@@ -71,7 +76,8 @@ def selection_rule_text(policy: str) -> str:
         return (
             f"候选须完成本地检验并覆盖所有计分格；相对有效起始程序，近期本地窗口总分须提高至少 {REPLACE_MARGIN:g}，"
             f"且在拟合期内部留出的更早因果前滚折上不退化（≥ {WALK_FORWARD_PRE_FLOOR:+.2g}）、"
-            f"两折平均增益至少 {WALK_FORWARD_MEAN_MARGIN:g}、任一时距退化不超过 {WALK_FORWARD_HORIZON_CAP:g}。"
+            f"两折平均增益至少 {WALK_FORWARD_MEAN_MARGIN:g}、"
+            f"近期折及双折平均任一时距退化均不超过 {WALK_FORWARD_HORIZON_CAP:g}。"
             "满足条件的提交中双折均分最高者用于评分，没有通过则继续用起始程序；"
             "拟合期过短不足以切分前滚折时退回近期窗口最高分规则；起始程序无效时可用通过完整性检验的提交恢复。"
         )
@@ -125,14 +131,7 @@ def rolling_selection(candidate: Evaluation, start: Evaluation) -> dict[str, Any
 def horizon_objectives(evaluation: Evaluation) -> dict[int, float]:
     """Weighted mean cell objective per forecast horizon on ``evaluation``."""
 
-    by_cell = {row["cell"]: float(row["objective"]) for row in evaluation.cells()}
-    by_horizon: dict[int, list[tuple[float, float]]] = {}
-    for cell, weight in zip(evaluation.stage.cells, evaluation.stage.weights, strict=True):
-        by_horizon.setdefault(cell.horizon, []).append((by_cell[cell.key], float(weight)))
-    return {
-        horizon: sum(val * w for val, w in pairs) / sum(w for _, w in pairs)
-        for horizon, pairs in sorted(by_horizon.items())
-    }
+    return evaluation.horizon_scores()
 
 
 def walk_forward_selection(
@@ -178,6 +177,10 @@ def walk_forward_selection(
     start_pre_h = horizon_objectives(start_pre)
     pre_h_deltas = {str(h): round(cand_pre_h[h] - start_pre_h[h], 4) for h in start_pre_h if h in cand_pre_h}
     min_pre_h = min((cand_pre_h[h] - start_pre_h[h] for h in start_pre_h if h in cand_pre_h), default=0.0)
+    shared_h = [h for h in start_h if h in cand_h and h in start_pre_h and h in cand_pre_h]
+    wf_h_raw = {h: 0.5 * ((cand_h[h] - start_h[h]) + (cand_pre_h[h] - start_pre_h[h])) for h in shared_h}
+    wf_h_deltas = {str(h): round(val, 4) for h, val in wf_h_raw.items()}
+    min_wf_h = min(wf_h_raw.values(), default=0.0)
     wf_delta = 0.5 * (uq_delta + pre_delta)
     wf_score = 0.5 * (candidate.score() + pre_score)
     enriched = {
@@ -186,14 +189,15 @@ def walk_forward_selection(
         "pre_start": round(pre_base, 4),
         "pre_delta": pre_delta,
         "pre_horizons": pre_h_deltas,
+        "walk_forward_horizons": wf_h_deltas,
         "walk_forward_delta": wf_delta,
         "walk_forward_score": wf_score,
     }
-    if not math.isfinite(pre_delta) or not math.isfinite(min_pre_h):
+    if not math.isfinite(pre_delta) or not math.isfinite(min_pre_h) or not math.isfinite(min_wf_h):
         return {**enriched, "reason": "nonfinite_score"}
     if pre_delta + SCORE_TOLERANCE < WALK_FORWARD_PRE_FLOOR:
         return {**enriched, "reason": "pre_fold_regression"}
-    if min_pre_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
+    if min_wf_h < -WALK_FORWARD_HORIZON_CAP - SCORE_TOLERANCE:
         return {**enriched, "reason": "horizon_loss_above_cap"}
     if wf_delta + SCORE_TOLERANCE < WALK_FORWARD_MEAN_MARGIN:
         return {**enriched, "reason": "walk_forward_gain_below_margin"}
@@ -207,36 +211,20 @@ def snapshot(source: Path, target: Path) -> str:
         raise ToolError(f"{source.name} must be a directory")
     if not (source / "predictor.py").is_file():
         raise ToolError("submission/predictor.py is missing")
-    sha = hashlib.sha256(b"ecogym.submission/1\n")
-    count = total = 0
-    for directory, names, filenames in os.walk(source, followlinks=False):
-        for name in list(names):
-            if os.path.islink(os.path.join(directory, name)):
-                raise ToolError(f"{name}: symlinks are not allowed in a submission")
-        names[:] = sorted(name for name in names if name not in SKIP and not name.startswith("."))
-        for name in sorted(filenames):
-            path = Path(directory) / name
-            if name.startswith(".") or name.startswith("_ecogym") or name.endswith(".pyc") or name == "stderr.log":
-                continue
-            info = os.lstat(path)
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise ToolError(f"{path.relative_to(source)}: only regular files are allowed")
-            if info.st_nlink > 1:
-                raise ToolError(f"{path.relative_to(source)}: hard links are not allowed")
-            count += 1
-            total += info.st_size
-            if count > MAX_FILES or total > MAX_BYTES:
-                raise ToolError(f"submission exceeds {MAX_FILES} files or {MAX_BYTES // 1_000_000} MB")
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(descriptor, "rb") as stream:
-                data = stream.read(MAX_BYTES + 1)
-            relative = path.relative_to(source)
-            destination = target / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-            sha.update(f"{relative.as_posix()}\n{len(data)}\n".encode())
-            sha.update(data)
-    return sha.hexdigest()
+    try:
+        return copy_regular_tree(
+            source,
+            target,
+            max_files=MAX_FILES,
+            max_bytes=MAX_BYTES,
+            skip_dirs=SKIP,
+            skip_file=lambda name: (
+                name.startswith(".") or name.startswith("_ecogym") or name.endswith(".pyc") or name == "stderr.log"
+            ),
+            hash_header=b"ecogym.submission/1\n",
+        )
+    except CopyError as error:
+        raise ToolError(str(error)) from None
 
 
 def _summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -255,8 +243,74 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class StartCache:
+    """Thread-safe deterministic cache for starting-template local checks shared across replicates and rounds.
+
+    Keyed by ``(bench.digest, program_digest, limits_digest, JUDGE_PROTOCOL)``. Only healthy ``LOCAL_STAGE``
+    judgements (and their optional ``PRE_LOCAL_STAGE`` walk-forward evaluations) are cached; unhealthy runs
+    are never cached so retries can recover.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._key_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+        self._entries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def key(bench: Bench, program_digest: str, limits: Limits) -> tuple[str, str, str, str]:
+        return (bench.digest, program_digest, canonical_digest(asdict(limits)), JUDGE_PROTOCOL)
+
+    def _lock_for(self, key: tuple[str, str, str, str]) -> threading.Lock:
+        with self._guard:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = self._key_locks[key] = threading.Lock()
+            return lock
+
+    def get_or_judge(
+        self,
+        bench: Bench,
+        program_digest: str,
+        limits: Limits,
+        compute: Callable[[], tuple[dict[str, Any], Evaluation]],
+    ) -> tuple[dict[str, Any], Evaluation, dict[str, Any]]:
+        key = self.key(bench, program_digest, limits)
+        with self._lock_for(key):
+            cached = self._entries.get(key)
+            if cached is not None:
+                with self._guard:
+                    self.hits += 1
+                return cached["report"], cached["evaluation"], cached
+            report, evaluation = compute()
+            entry: dict[str, Any] = {"report": report, "evaluation": evaluation, "local": _summary(report)}
+            with self._guard:
+                self.misses += 1
+                if _healthy(report):
+                    self._entries[key] = entry
+            return report, evaluation, entry
+
+    def get_pre(self, bench: Bench, program_digest: str, limits: Limits) -> tuple[bool, Evaluation | None]:
+        key = self.key(bench, program_digest, limits)
+        with self._guard:
+            cached = self._entries.get(key)
+            if cached is not None and "pre_evaluation" in cached:
+                return True, cached["pre_evaluation"]
+        return False, None
+
+    def set_pre(self, bench: Bench, program_digest: str, limits: Limits, evaluation: Evaluation | None) -> None:
+        if evaluation is None:
+            return
+        key = self.key(bench, program_digest, limits)
+        with self._guard:
+            cached = self._entries.get(key)
+            if cached is not None and "pre_evaluation" not in cached:
+                cached["pre_evaluation"] = evaluation
+
+
 def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits, *,
-                     programs: Path | None = None) -> dict[str, Any] | None:
+                     programs: Path | None = None, cache: StartCache | None = None) -> dict[str, Any] | None:
     """Snapshot and judge ``submission/`` as the episode begins (``submissions/start``); None without a program."""
 
     program = (programs or root) / "submissions" / "start" / "program"
@@ -265,9 +319,149 @@ def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits,
         digest = snapshot(root / "work" / "submission", program)
     except ToolError:
         return None
-    report, evaluation = judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
-    return {"n": None, "digest": digest, "program": str(program), "start": True, "local": _summary(report),
-            "report": report, "evaluation": evaluation, "healthy": _healthy(report)}
+    if cache is not None:
+        report, evaluation, entry = cache.get_or_judge(
+            bench, digest, limits, lambda: judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
+        )
+        local = copy.deepcopy(entry["local"])
+        extra = {"pre_evaluation": entry["pre_evaluation"]} if "pre_evaluation" in entry else {}
+    else:
+        report, evaluation = judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
+        local = _summary(report)
+        extra = {}
+    return {"n": None, "digest": digest, "program": str(program), "start": True, "local": local,
+            "report": report, "evaluation": evaluation, "healthy": _healthy(report), **extra}
+
+
+HOOK_TIMEOUT = 5.0
+HOOK_MAX_WARNINGS = 8
+HOOK_WARNING_CHARS = 300
+RESCUE_MAX_SECONDS = 300.0
+RESCUE_SHARE = 0.25
+_HOOK_RUNNER = (
+    "import importlib.util, json, sys\n"
+    "payload = json.load(sys.stdin)\n"
+    "spec = importlib.util.spec_from_file_location('audit_submission', sys.argv[1])\n"
+    "mod = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(mod)\n"
+    "fn = getattr(mod, 'audit', None)\n"
+    "if not callable(fn):\n"
+    "    raise RuntimeError('hooks/audit_submission.py must define audit(summary, selection, files)')\n"
+    "out = fn(payload['summary'], payload['selection'], payload['files'])\n"
+    "if out is None:\n"
+    "    out = []\n"
+    "if not isinstance(out, (list, tuple)):\n"
+    "    raise TypeError('audit() must return a list of warning strings')\n"
+    "print(json.dumps([str(x)[:300] for x in out[:8] if str(x).strip()], ensure_ascii=False))\n"
+)
+
+
+def builtin_submission_audit(
+    summary: dict[str, Any],
+    selection: dict[str, Any],
+    *,
+    start_digest: str | None = None,
+    digest: str | None = None,
+) -> list[str]:
+    """Deterministic local-check warnings surfaced directly to the inner agent on evaluate_local/submit."""
+
+    warnings: list[str] = []
+    if start_digest and digest and digest == start_digest:
+        warnings.append("当前 submission/ 与起始模板内容完全相同，未产生有效代码改动。")
+    if summary.get("status") == "ok":
+        cells = summary.get("cells") or {}
+        if cells and all(abs(float(item.get("skill") or 0.0)) < 1e-4 for item in cells.values()):
+            warnings.append("全部计分格技能接近 0（与朴素基线无差），请检查残差方向或模型预测是否生效。")
+    uq_h = selection.get("uq_horizons") or {}
+    bad_h = [(k, float(v)) for k, v in uq_h.items() if isinstance(v, (int, float)) and float(v) < -0.03]
+    if bad_h:
+        desc = "、".join(f"h={k} ({v:+.4f})" for k, v in sorted(bad_h, key=lambda kv: kv[1]))
+        warnings.append(f"存在显著退化时距：{desc}，建议按短/长时距分开建模或增强长时距收缩正则。")
+    delta = selection.get("delta")
+    pre_delta = selection.get("pre_delta")
+    if (isinstance(delta, (int, float)) and isinstance(pre_delta, (int, float))
+            and float(delta) > REPLACE_MARGIN and float(pre_delta) < 0.0):
+        warnings.append(
+            f"近期检验窗增益 {delta:+.4f}，但更早拟合折前滚变化 {pre_delta:+.4f}，疑似过拟合近期窗口。"
+        )
+    return warnings
+
+
+def _read_program_texts(program: Path, *, max_files: int = 12, max_chars: int = 16_000) -> dict[str, str]:
+    files: dict[str, str] = {}
+    if not program.is_dir():
+        return files
+    for path in sorted(program.rglob("*.py"))[:max_files]:
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            files[path.relative_to(program).as_posix()] = path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        except OSError:
+            continue
+    return files
+
+
+def run_audit_hook(
+    hook_path: Path,
+    runtime: Runtime | None,
+    *,
+    summary: dict[str, Any],
+    selection: dict[str, Any],
+    program: Path | None = None,
+    timeout: float = HOOK_TIMEOUT,
+) -> tuple[list[str], str | None]:
+    """Run an optional Harness-provided ``hooks/audit_submission.py`` inside a networkless sandbox."""
+
+    if hook_path.is_symlink() or not hook_path.is_file():
+        return [], None
+    if runtime is None or not getattr(runtime, "python", None):
+        return [], "audit hook skipped: no sandbox runtime"
+    try:
+        descriptor = os.open(hook_path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            source = handle.read(64_000)
+    except OSError as error:
+        return [], f"cannot read audit hook: {error}"
+    payload = {
+        "summary": summary,
+        "selection": selection,
+        "files": _read_program_texts(program) if program is not None else {},
+    }
+    with tempfile.TemporaryDirectory(prefix="ecogym-hook-", dir=scratch_root()) as tmp:
+        stage_dir = Path(tmp)
+        target = stage_dir / "audit_submission.py"
+        target.write_bytes(source)
+        argv = [str(runtime.python), "-I", "-c", _HOOK_RUNNER, str(target)]
+        try:
+            cmd = confine_program(stage_dir, runtime, stage_dir / "hook.sb", argv)
+        except SandboxUnavailable as error:
+            return [], str(error)
+        env = {**os.environ, **thread_limits(1), "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            done = subprocess.run(
+                cmd,
+                input=json.dumps(payload, ensure_ascii=False),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=stage_dir,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return [], f"hooks/audit_submission.py timed out after {timeout:g}s"
+        except OSError as error:
+            return [], f"hooks/audit_submission.py failed to launch: {error}"
+    if done.returncode != 0:
+        err = (done.stderr or done.stdout or f"exit {done.returncode}").strip()[-400:]
+        return [], err
+    try:
+        parsed = json.loads(done.stdout.strip() or "[]")
+    except ValueError as error:
+        return [], f"hooks/audit_submission.py returned invalid JSON: {error}"
+    if not isinstance(parsed, list):
+        return [], "hooks/audit_submission.py output must be a JSON list"
+    cleaned = [str(item).strip()[:HOOK_WARNING_CHARS] for item in parsed[:HOOK_MAX_WARNINGS] if str(item).strip()]
+    return cleaned, None
 
 
 class EpisodeTools:
@@ -275,7 +469,8 @@ class EpisodeTools:
                  usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
                  start: dict[str, Any] | None = None, programs: Path | None = None,
                  selection_policy: str = DEFAULT_LOCAL_SELECTION,
-                 reuse_local: bool | None = None) -> None:
+                 reuse_local: bool | None = None, start_cache: StartCache | None = None,
+                 budget_minutes: float | None = None) -> None:
         """``start`` is the judged starting program (``starting_program``), if any."""
 
         if selection_policy not in LOCAL_SELECTION_POLICIES:
@@ -287,9 +482,11 @@ class EpisodeTools:
         self.runtime = runtime
         self.limits = limits
         self.deadline = deadline
+        self.budget_minutes = budget_minutes
         self.usage = usage
         self.event = event
         self.start = start
+        self.start_cache = start_cache
         self.selection_policy = selection_policy
         self._reuse_local = (runtime is not None) if reuse_local is None else reuse_local
         self._local_cache: dict[tuple[str, str], tuple[dict[str, Any], Evaluation]] = {}
@@ -300,6 +497,8 @@ class EpisodeTools:
         self.evaluations = 0
         self.notes: list[dict[str, Any]] = []
         self.questions: list[dict[str, Any]] = []
+        self.rescue_triggered = False
+        self.hook_fired = False
         self._lock = threading.Lock()
         self._pre_lock = threading.Lock()
         self._slots = threading.Semaphore(2)
@@ -381,12 +580,20 @@ class EpisodeTools:
         with self._pre_lock:
             if "pre_evaluation" in self.start:
                 return self.start["pre_evaluation"]
+            start_digest = self.start.get("digest")
+            if self.start_cache is not None and start_digest:
+                found, cached_pre = self.start_cache.get_pre(self.bench, start_digest, self.limits)
+                if found:
+                    self.start["pre_evaluation"] = cached_pre
+                    return cached_pre
             start_program = self.start.get("program")
             if not start_program:
                 return None
-            report, evaluation, _ = self._judge_stage(Path(start_program), self.start.get("digest"), PRE_LOCAL_STAGE)
+            report, evaluation, _ = self._judge_stage(Path(start_program), start_digest, PRE_LOCAL_STAGE)
             result = evaluation if _healthy(report) else None
             self.start["pre_evaluation"] = result
+            if self.start_cache is not None and start_digest and result is not None:
+                self.start_cache.set_pre(self.bench, start_digest, self.limits, result)
             return result
 
     def _run_local(self, kind: str) -> tuple[int, str, Path, dict[str, Any], bool, dict[str, Any]]:
@@ -474,8 +681,47 @@ class EpisodeTools:
             return f"起始程序（本地 {self.start['local']['score']:+.4f}）"
         return "还没有被接受的提交"
 
+    def _pacing_notice(self) -> str | None:
+        """Budget-rescue nudge (Self-HPO pattern) when time is running low with no qualifying submission."""
+
+        if self.final() is not None:
+            return None
+        left = self.deadline - clock.now()
+        window = min(RESCUE_MAX_SECONDS, RESCUE_SHARE * self.budget_minutes * 60.0) if self.budget_minutes else 180.0
+        if left <= 0 or left > window:
+            return None
+        self.rescue_triggered = True
+        custom = self.root / "harness" / "hooks" / "rescue.md"
+        if custom.is_file() and not custom.is_symlink():
+            try:
+                text = custom.read_text(encoding="utf-8", errors="replace").strip()[:1500]
+                if text:
+                    return f"[预算告急救援 · 剩 {left / 60:.1f} 分钟]\n{text}"
+            except OSError:
+                pass
+        return (
+            f"[预算告急救援 · 剩 {left / 60:.1f} 分钟] 尚无通过替换条件的合格提交！"
+            "请立即停止开放式探索，保留当前本地表现最稳的改动，调用 evaluate_local 确认覆盖率与增益后立刻 submit 锁定。"
+        )
+
+    def _audit_submission(self, program: Path, digest: str, summary: dict[str, Any],
+                          selection: dict[str, Any]) -> tuple[list[str], str | None]:
+        start_digest = self.start.get("digest") if self.start else None
+        warnings = builtin_submission_audit(summary, selection, start_digest=start_digest, digest=digest)
+        hook = self.root / "harness" / "hooks" / "audit_submission.py"
+        hook_error: str | None = None
+        if hook.is_file() and not hook.is_symlink():
+            extra, error = run_audit_hook(hook, self.runtime, summary=summary, selection=selection, program=program)
+            if extra:
+                self.hook_fired = True
+                warnings.extend(extra)
+            elif error and not error.startswith("audit hook skipped:"):
+                hook_error = error
+        return warnings[:HOOK_MAX_WARNINGS], hook_error
+
     def task_info(self) -> dict[str, Any]:
         best, final = self.best_local(), self.final()
+        rescue = self._pacing_notice()
         return {
             "minutes_left": round(max(0.0, self.deadline - clock.now()) / 60, 1),
             **self.usage(),
@@ -488,16 +734,23 @@ class EpisodeTools:
             "latest_accepted": next((item["n"] for item in reversed(self.submissions) if item["accepted"]), None),
             "scored_now": final["n"] if final is not None else "start" if self.start is not None else None,
             "best_local": None if best is None else {"n": best["n"], "score": best["local"]["score"]},
+            **({"budget_rescue": rescue} if rescue else {}),
         }
 
     def evaluate_local(self) -> dict[str, Any]:
-        number, digest, _, summary, _, selection = self._run_local("evals")
+        number, digest, program, summary, _, selection = self._run_local("evals")
         with self._lock:
             self._open()
             self.evaluations += 1
+        audit_warnings, hook_error = self._audit_submission(program, digest, summary, selection)
+        rescue = self._pacing_notice()
         self.event("episode_evaluated", {"n": number, "digest": digest, "local": summary,
-                                         "local_selection": selection})
-        return {"digest": digest[:12], "local_selection": selection, **summary}
+                                         "local_selection": selection,
+                                         **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                                         **({"hook_error": hook_error} if hook_error else {})})
+        return {"digest": digest[:12], "local_selection": selection, **summary,
+                **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                **({"budget_rescue": rescue} if rescue else {})}
 
     def submit(self, note: str = "") -> dict[str, Any]:
         number, digest, program, summary, accepted, selection = self._run_local("submissions")
@@ -505,9 +758,13 @@ class EpisodeTools:
                   "note": str(note)[:4000], "at": time.time(), "local": summary, "local_selection": selection}
         self._record(self.submissions, record)
         replaces = self.replaces_start(record)
+        audit_warnings, hook_error = self._audit_submission(program, digest, summary, selection)
+        rescue = self._pacing_notice()
         self.event("episode_submitted", {**{key: record[key] for key in ("n", "digest", "accepted", "note", "local",
                                                                         "local_selection")},
-                                         "replaces_start": replaces})
+                                         "replaces_start": replaces,
+                                         **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                                         **({"hook_error": hook_error} if hook_error else {})})
         if not accepted:
             verdict = f"未接受。请检查本地检验状态、成绩和预报覆盖率。现在评分用{self.scored_text()}。"
         elif replaces and self.final() is record:
@@ -535,7 +792,9 @@ class EpisodeTools:
                           f"至少需要 {WALK_FORWARD_MEAN_MARGIN:g}")
             verdict = f"已接受，未达到本地替换条件{detail}。现在评分用{self.scored_text()}。{caution}"
         return {"n": number, "digest": digest[:12], "accepted": accepted, "replaces_start": replaces,
-                "verdict": verdict, "local_selection": selection, **summary}
+                "verdict": verdict, "local_selection": selection, **summary,
+                **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                **({"budget_rescue": rescue} if rescue else {})}
 
     def final(self) -> dict[str, Any] | None:
         """Pick a qualifying submission under the recorded policy."""
@@ -573,5 +832,6 @@ class EpisodeTools:
 
 __all__ = ["BEST_LOCAL_SELECTION", "DEFAULT_LOCAL_SELECTION", "LOCAL_SELECTION_POLICIES", "REPLACE_MARGIN",
            "ROLLING_SELECTION", "SINGLE_WINDOW_SELECTION", "WALK_FORWARD_HORIZON_CAP", "WALK_FORWARD_MEAN_MARGIN",
-           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "horizon_objectives",
-           "rolling_selection", "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]
+           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "StartCache",
+           "builtin_submission_audit", "horizon_objectives", "rolling_selection", "run_audit_hook",
+           "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]

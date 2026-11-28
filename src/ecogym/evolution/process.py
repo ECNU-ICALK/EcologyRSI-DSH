@@ -203,7 +203,8 @@ SESSION_FIELDS = ("status", "seconds", "tokens", "metered_tokens", "llm_calls", 
                   "continuations", "error", "upstream_error", "stalled", "stalled_seconds", "activity", "rerun")
 
 
-def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True) -> dict[str, Any] | None:
+def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True,
+                    stage: int | None = None) -> dict[str, Any] | None:
     """The evolver session of ``generation`` in the run ``view`` (``evolution.fold``): the round's facts, the
     ``summarize`` of its session and, with ``steps``, its threads (``episodes.transcripts``). None when the
     generation had no evolver session (generation 0, or a round that ended before one finished)."""
@@ -213,6 +214,13 @@ def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True
         return None
     round_ = rounds[-1]  # a round interrupted and run again: the last attempt
     evolver = round_["evolver"]
+    stage_entry: dict[str, Any] | None = None
+    if stage is not None:
+        stage_entry = next((item for item in round_.get("relay_stages") or ()
+                            if item.get("stage") == stage and item.get("evolver")), None)
+        if stage_entry is None:
+            return None
+        evolver = stage_entry["evolver"]
     directory = str((evolver.get("trajectory") or {}).get("dir") or "")
     found = session_threads(Path(directory) / "llm_calls.jsonl.gz", (), PANEL_LIMITS, arguments=True) \
         if directory else []
@@ -220,14 +228,26 @@ def evolver_session(view: dict[str, Any], generation: int, *, steps: bool = True
     for thread in found:
         for item in thread["steps"]:
             item.pop("arguments", None)  # its text holds the same, written out
+    if stage_entry is not None:
+        raw_candidates = stage_entry.get("candidates") or ()
+        candidates = [{**{key: candidate.get(key) for key in ("name", "label", "digest", "summary", "base")
+                          if key in candidate},
+                       "status": "carried" if candidate.get("carried_leader") else candidate.get("status", "proposed")}
+                      for candidate in raw_candidates]
+    else:
+        candidates = [{key: candidate.get(key) for key in ("name", "status", "digest", "summary", "base")}
+                      for candidate in round_["candidates"]]
     result = {"run_id": view["run_id"], "generation": generation, "incumbent": round_["incumbent"],
               "started_at": round_["started_at"], "session": {key: evolver.get(key) for key in SESSION_FIELDS},
               "final_text": evolver.get("final_text") or "", "notes": round_["notes"],
-              "candidates": [{key: candidate.get(key) for key in ("name", "status", "digest", "summary", "base")}
-                             for candidate in round_["candidates"]],
+              "candidates": candidates,
               "turns": len({(index, item["step"]) for index, thread in enumerate(found) for item in thread["steps"]
                             if "step" in item}),
               "recorded": bool(found), **summary}
+    if stage_entry is not None:
+        result["stage"] = stage
+        result["total_stages"] = stage_entry.get("total_stages")
+        result["stage_tasks"] = stage_entry.get("tasks") or []
     if steps:
         result["threads"] = found
     return result

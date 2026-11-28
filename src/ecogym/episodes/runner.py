@@ -68,6 +68,7 @@ from .tools import (
     DEFAULT_LOCAL_SELECTION,
     REPLACE_MARGIN,
     EpisodeTools,
+    StartCache,
     selection_rule_text,
     snapshot,
     starting_program,
@@ -77,7 +78,8 @@ from .workspace import LOCAL_STAGE, SCORED_STAGE, export_visible, task_brief
 EVENT_KINDS = frozenset({"episode_started", "episode_evaluated", "episode_submitted", "episode_note",
                          "expert_question", "episode_scored", "episode_finished"})
 PROMPT = ("请先阅读当前目录下的 TASK.md 和 AGENTS.md，然后独立完成任务：研究数据，编写并改进 submission/ 中的预测程序，"
-          "用 ecogym 工具检验，并在找到跨时间窗稳定改进时提交（已有有效起始程序时无需为保底重复提交原模板）。")
+          "用 ecogym 工具检验；每当 evaluate_local 通过替换门槛时立即调用 submit 锁定里程碑（同代码复用缓存零耗时；"
+          "已有有效起始程序时无需重复提交未修改的原模板）。")
 PREDICTIONS = "scored.npz"
 CONTINUE_SHARE = 0.25  # an agent that ends with more than this share of its time left gets a follow-up session
 MAX_CONTINUATIONS = 3
@@ -94,21 +96,28 @@ def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
     """
 
     started_at = [-1]  # local evaluations + submissions when the latest follow-up started
+    last_best: list[float | None] = [None]  # best local score at previous continuation (diminishing-returns guard)
 
     def ask(n: int, reply: str) -> str | None:
         left = deadline - clock.now()
         work = tools.evaluations + len(tools.submissions)
         if n > MAX_CONTINUATIONS or left < CONTINUE_SHARE * minutes * 60 or work == started_at[0]:
             return None
-        started_at[0] = work
         best = tools.best_local()
+        best_score = float(best["local"]["score"]) if best else None
+        # From continuation 2 onward, stop if a passing submission exists and the prior continuation made no gain.
+        if (n >= 2 and tools.final() is not None and last_best[0] is not None
+                and (best_score is None or best_score <= last_best[0] + 1e-6)):
+            return None
+        started_at[0] = work
+        last_best[0] = best_score
         state = (f"现在评分用{tools.scored_text()}；已接受的提交里本地最好 {best['local']['score']:+.4f}。"
                  if best else f"还没有被接受的提交，现在评分用{tools.scored_text()}。")
         return "\n".join([
             f"这是同一个回合的第 {n + 1} 段会话。上一段会话已经结束，但这个回合还剩约 {left / 60:.0f} 分钟"
             f"（共 {minutes:g} 分钟）。工作区里的文件和提交都还在，用 task_info 查看。{state}",
             "请继续改进：先读 TASK.md 和 submission/ 回顾已经做过的事，再找在拟合期内部多个滚动窗口上都稳定的改进；"
-            f"只有确实更好时才 submit。{selection_rule_text(tools.selection_policy)}"
+            f"每次 evaluate_local 通过替换门槛且更优时立即 submit 锁定。{selection_rule_text(tools.selection_policy)}"
             "截止前留出时间收尾，写最终回复。",
             "", "上一段会话的最终回复（节选）：", "", reply.strip()[-2500:] or "（没有）",
         ])
@@ -166,7 +175,7 @@ def _final_program(tools: EpisodeTools, root: Path, programs: Path) -> dict[str,
 
 
 def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None = None,
-                cancel: threading.Event | None = None) -> dict[str, Any]:
+                cancel: threading.Event | None = None, start_cache: StartCache | None = None) -> dict[str, Any]:
     episode_id = f"ep:{uuid.uuid4().hex[:12]}"
     scratch = scratch_root()
     root = scratch / episode_id.replace(":", "-")
@@ -174,14 +183,16 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
         # The agent can write anywhere in its episode directory. The judge and archive both use snapshots
         # from this sibling directory, which is outside the sandbox's allowed paths.
         with tempfile.TemporaryDirectory(prefix="episode-programs-", dir=scratch) as saved:
-            return _run_episode(config, ledger_path, episode_id, root, Path(saved), bench=bench, cancel=cancel)
+            return _run_episode(config, ledger_path, episode_id, root, Path(saved), bench=bench, cancel=cancel,
+                                start_cache=start_cache)
     finally:
         if not config.keep:
             shutil.rmtree(root, ignore_errors=True)
 
 
 def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root: Path, programs: Path, *,
-                 bench: Bench | None, cancel: threading.Event | None) -> dict[str, Any]:
+                 bench: Bench | None, cancel: threading.Event | None,
+                 start_cache: StartCache | None = None) -> dict[str, Any]:
     bench = bench or Bench.open(task_spec(config.task))
     runtime = discover_runtime()
     if runtime.dsh is None or runtime.node_root is None:
@@ -197,12 +208,15 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
         path.mkdir(parents=True, exist_ok=True)
     events = Events(ledger_path, episode_id)
     harness.install(root)
-    start = starting_program(bench, root, runtime, config.limits, programs=programs)
+    start = starting_program(bench, root, runtime, config.limits, programs=programs, cache=start_cache)
     deadline = clock.now() + config.minutes * 60  # the clock starts after the starting program was judged
     gateway.deadline = deadline
     with Ledger(ledger_path) as ledger:
         advice = expert.guidance(ledger, bench.task, until=config.expert_until)
-    visible = export_visible(bench, root / "work" / "data", expert=expert.render(advice) if advice else "")
+    visible = export_visible(
+        bench, root / "work" / "data", expert=expert.render(advice) if advice else "",
+        start_report=start["report"] if start else None,
+    )
     (root / "work" / "TASK.md").write_text(task_brief(bench, visible["boundaries"], minutes=config.minutes,
                                                       tokens=config.tokens, deadline=deadline, limits=config.limits,
                                                       selection_policy=config.local_selection,
@@ -211,7 +225,8 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
     (root / "work" / "notes").mkdir(exist_ok=True)
     tools = EpisodeTools(bench=bench, root=root, runtime=runtime, limits=config.limits, deadline=deadline,
                          usage=gateway.usage, event=events, start=start, programs=programs,
-                         selection_policy=config.local_selection)
+                         selection_policy=config.local_selection, start_cache=start_cache,
+                         budget_minutes=config.minutes)
 
     logged = []
 
@@ -284,6 +299,7 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
         **session.to_dict(), "status": status, "local_evaluations": tools.evaluations,
         "submissions": len(tools.submissions), "notes": len(tools.notes), "questions": len(tools.questions),
         "score": scored["score"], "local_check": LOCAL_STAGE,
+        "rescue_triggered": tools.rescue_triggered, "hook_fired": tools.hook_fired,
     }
     if status != session.status:
         finished["stalled"] = (f"failed model calls kept the agent from working for {session.stalled_seconds:.0f} "

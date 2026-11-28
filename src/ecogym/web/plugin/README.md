@@ -1,6 +1,6 @@
 # @ecogym/dsh-plugin
 
-ecogym 的 DeepSeek Harness 插件：DSH 启动时启动 ecogym 服务，DSH 侧栏多一个「生态进化」面板。安装与使用见仓库 README 的“在 DSH 中使用”；本文说明插件和 DSH 之间的约定。已在 DSH 0.1.5-rc.2 上验证。
+ecogym 的 DeepSeek Harness 插件：DSH 启动时启动 ecogym 服务，DSH 侧栏多一个「生态进化」面板。安装与使用见仓库 README 的“在 DSH 中使用”；本文说明插件和 DSH 之间的约定。已在 DSH 0.2.2-rc.5 上验证。
 
 ## 组成
 
@@ -31,4 +31,4 @@ ecogym 的 DeepSeek Harness 插件：DSH 启动时启动 ecogym 服务，DSH 侧
 - 模型下拉列表来自服务的 `/api/catalog` 的 `models`：服务读 DSH 设置里的提供方，给出每个提供方能否运行、密钥是否存在（不含密钥本身）。DeepSeek 官方接口的模型清单另从 DSH 的 `session/modelCatalog` 读取，读不到就用 ecogym 的默认清单。
 - 只用 DSH 平台模块（React 与 `@deepseek-ai/dsh-client-ui-primitives`：`Button`、`Tag`、`StateDot`、`Modal`、`MarkdownText`），某个组件不存在时退回到同样外观的本地实现；颜色和字号全部取 DSH 的设计令牌，跟随深浅色主题。
 - 面板调用的全部接口集中在 `client.js` 的 `Api` 表；服务一侧的接口表是 `service.py` 的 `ROUTES`（`GET /api/ecogym/routes`）。分层、请求路径和每个页面用哪些接口见仓库的 `docs/architecture.md`。
-- 以链接方式安装时，修改 `lib/client.js` 后刷新页面即可（2026-10-30 在 DSH 0.1.5-rc.2 上确认）；修改 `lib/index.js` 要重启 DSH。
+- 以链接方式安装时，修改 `lib/client.js` 后刷新页面即可（在 DSH 0.2.2-rc.5 上确认）；修改 `lib/index.js` 要重启 DSH。

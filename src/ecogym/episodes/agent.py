@@ -39,7 +39,7 @@ from ..kernel.secrets import has_secret, resolve_secret
 from . import providers
 from .gateway import PREFIX, ROUTE_PREFIX, Gateway
 from .mcp import McpServer, Tool
-from .sandbox import Runtime, agent_profile, confine, thread_limits
+from .sandbox import Runtime, agent_profile, confine_agent, thread_limits
 from .trajectory import store
 
 ROUTE_KEY = "ECOGYM_ROUTE_API_KEY"  # the session's token for a provider route (never a real key)
@@ -85,6 +85,7 @@ class Session:
     # tool and model calls still running when the session was sealed: they record nothing more, so its numbers
     # may miss what they did (0 normally; see run_agent)
     unsettled: int = 0
+    degenerate_aborts: int = 0  # SSE streams terminated due to degenerate model repetition loops
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -144,10 +145,17 @@ def dsh_patch(agent: AgentSpec, *, home: Path, skills: Path, gateway: Gateway, m
     thinking: {thinking}
     reasoningEffort: {json.dumps(agent.reasoning_effort)}
     retryPolicy: {json.dumps(RETRY_POLICY)}
+- id: llm-deepseek-account
+  disabled: true
+- id: web
+  config:
+    searchProvider: deepseek-official
 - id: web-search-deepseek
   config:
     baseURL: {json.dumps(gateway.base_url + '/anthropic/v1')}
     apiKeyEnv: DEEPSEEK_API_KEY
+- id: web-deepseek-api
+  disabled: true
 - id: tool-web
   config:
     search: {"true" if search else "false"}
@@ -161,6 +169,8 @@ def dsh_patch(agent: AgentSpec, *, home: Path, skills: Path, gateway: Gateway, m
   disabled: true
 - id: tool-workflow
   disabled: true
+- id: tool-agent-team
+  disabled: true
 - id: skill-filesystem
   config:
     includeDefaultRoots: false
@@ -172,14 +182,12 @@ def dsh_patch(agent: AgentSpec, *, home: Path, skills: Path, gateway: Gateway, m
     maxParallelToolCalls: {int(agent.parallel_tool_calls)}
 """
     if agent.subagent_depth > 0:
-        for row, provider, mode in (("tool-subagent", "spawn", "continuable"), ("tool-subagent-fork", "fork",
-                                                                                 "one-shot")):
+        for row, provider in (("tool-subagent", "spawn"), ("tool-subagent-fork", "fork")):
             tool = row.removeprefix("tool-").replace("-", "_")
             rows += (f"- id: {row}\n  config:\n    provider: {provider}\n    toolName: {tool}\n"
-                     f"    backgroundMode: {mode}\n    maxDepth: {int(agent.subagent_depth)}\n")
+                     f"    maxDepth: {int(agent.subagent_depth)}\n")
     else:
-        for row in ("tool-subagent", "tool-subagent-fork", "tool-subagent-control", "tool-subagent-list-agents",
-                    "tool-ralph"):
+        for row in ("tool-subagent", "tool-subagent-fork", "tool-subagent-control"):
             rows += f"- id: {row}\n  disabled: true\n"
     rows += f"""- insert:
     - id: mcp-ecogym
@@ -204,6 +212,49 @@ def dsh_version(dsh: Path, env: dict[str, str]) -> str:
         return "unknown"
 
 
+def _matches_session_root(command: str, needle: str) -> bool:
+    """True when ``command`` references ``needle`` as a path/arg rather than a sibling like ``needle-discovery``."""
+
+    start = 0
+    n = len(needle)
+    while True:
+        idx = command.find(needle, start)
+        if idx < 0:
+            return False
+        before_ok = idx == 0 or command[idx - 1] in (" ", "\t", "=", "'", '"')
+        after_pos = idx + n
+        after_ok = after_pos == len(command) or command[after_pos] in ("/", " ", "\t", "'", '"', ":")
+        if before_ok and after_ok:
+            return True
+        start = idx + 1
+
+
+def _kill_stragglers(root: Path) -> None:
+    """Terminate leftover child processes spawned outside the session process group without regex over-matching."""
+
+    needle = str(root)
+    own = os.getpid()
+    try:
+        done = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if done.returncode != 0:
+        return
+    pids: list[int] = []
+    for line in done.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        if pid != own and _matches_session_root(parts[1], needle):
+            pids.append(pid)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+
+
 def _stop(process: subprocess.Popen[bytes], root: Path) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if process.poll() is not None:
@@ -216,7 +267,7 @@ def _stop(process: subprocess.Popen[bytes], root: Path) -> None:
             process.wait(timeout=15)
         except subprocess.TimeoutExpired:
             continue
-    subprocess.run(["pkill", "-f", str(root)], capture_output=True, check=False)  # agent jobs in other groups
+    _kill_stragglers(root)  # agent jobs in other process groups
 
 
 def session_env(root: Path, runtime: Runtime, gateway: Gateway) -> dict[str, str]:
@@ -295,8 +346,8 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
             text: str | None = prompt
             while text is not None:
                 offset = stdout_path.stat().st_size  # this session's reply starts here
-                argv = confine(profile, root / "agent.sb",
-                               [str(runtime.dsh), "--profile", "headless", "--patch", str(patch), text])
+                argv = confine_agent(root, [gateway.port, mcp.port], runtime, root / "agent.sb",
+                                     [str(runtime.dsh), "--profile", "headless", "--patch", str(patch), text])
                 process = subprocess.Popen(argv, cwd=root / "work", env=env, stdin=subprocess.DEVNULL,
                                            stdout=stdout, stderr=stderr, start_new_session=True)
                 exit_code = None
@@ -341,8 +392,9 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
             stored = store(root, trajectory, runtime.node_root / "bin" / "node", programs=programs)
         except Exception as error:  # a broken trajectory must not hide the session's own outcome
             stored = {"files": {}, "summary": {"error": f"{type(error).__name__}: {error}"}}
+    timed_out = killed or (gateway.refused > 0 and ended >= deadline)
     status = ("interrupted" if cancelled is not None else "infra_failed" if gateway.answered == 0
-              else "timeout" if killed else "finished")
+              else "timeout" if timed_out else "finished")
     final_text = stdout_path.read_text(encoding="utf-8", errors="replace")[-8000:] if stdout_path.exists() else ""
     session = Session(status=status, exit_code=exit_code, killed=killed, seconds=round(time.time() - started, 1),
                       tokens=gateway.tokens, metered_tokens=gateway.metered, llm_calls=gateway.calls,
@@ -355,7 +407,8 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
                       # errors) could not use the rest of its time either
                       stalled_seconds=round(gateway.stalled_seconds(max(ended, deadline) if gateway.failing
                                                                     else ended), 1),
-                      unsettled=unsettled)
+                      unsettled=unsettled,
+                      degenerate_aborts=gateway.degenerate_aborts)
     if cancelled is not None:
         cancelled.session = session
         raise cancelled

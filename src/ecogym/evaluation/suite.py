@@ -54,7 +54,7 @@ the suite interval only, so more candidates never loosen the per-task veto.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -193,6 +193,22 @@ def _objectives(evaluations: Sequence[Evaluation], counts: np.ndarray) -> np.nda
     return np.stack([objective(item.sums().total(counts), item.stage.weights) for item in evaluations])
 
 
+def report_horizon_scores(report: Mapping[str, Any]) -> dict[int, float]:
+    """Mean cell objective (or skill) per forecast horizon from a judge report dict."""
+
+    by_horizon: dict[int, list[float]] = {}
+    for cell in report.get("cells") or ():
+        if not isinstance(cell, Mapping):
+            continue
+        _, sep, h_text = str(cell.get("cell", "")).rpartition("@")
+        if not sep or not h_text.isdigit():
+            continue
+        val = cell.get("objective", cell.get("skill"))
+        if isinstance(val, (int, float)) and math.isfinite(val):
+            by_horizon.setdefault(int(h_text), []).append(float(val))
+    return {h: float(sum(vals) / len(vals)) for h, vals in sorted(by_horizon.items())}
+
+
 def _cells(evaluations: Sequence[Evaluation]) -> dict[str, float]:
     rows = [{row["cell"]: row["objective"] for row in item.cells()} for item in evaluations]
     return {key: float(np.mean([row[key] for row in rows])) for key in rows[0]}
@@ -285,5 +301,5 @@ def compare_suite(pairs: Sequence[TaskPair], gates: SuiteGates, seed: Any, *,
                          interval_target=interval_target, groups=groups, horizons=horizons)
 
 
-__all__ = ["SuiteDecision", "TaskPair", "TaskVerdict", "adjusted_confidence", "compare_suite", "signed_rank_critical",
-           "signed_rank_interval", "t_quantile"]
+__all__ = ["SuiteDecision", "TaskPair", "TaskVerdict", "adjusted_confidence", "compare_suite",
+           "report_horizon_scores", "signed_rank_critical", "signed_rank_interval", "t_quantile"]

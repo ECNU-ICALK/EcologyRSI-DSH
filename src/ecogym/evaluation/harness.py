@@ -74,6 +74,15 @@ class Evaluation:
     def score(self, subset: np.ndarray | None = None) -> float:
         return float(objective(self.sums(subset).total(), self.stage.weights)[0])
 
+    def horizon_scores(self, subset: np.ndarray | None = None) -> dict[int, float]:
+        """Weighted mean cell objective grouped by forecast horizon."""
+
+        sums: dict[int, tuple[float, float]] = {}
+        for cell, row, weight in zip(self.stage.cells, self.cells(subset), self.stage.weights, strict=True):
+            total, total_weight = sums.get(cell.horizon, (0.0, 0.0))
+            sums[cell.horizon] = (total + float(weight) * float(row["objective"]), total_weight + float(weight))
+        return {horizon: total / weight for horizon, (total, weight) in sorted(sums.items()) if weight > 0}
+
     def cells(self, subset: np.ndarray | None = None) -> list[dict[str, Any]]:
         """Per-cell metrics in physical units."""
 

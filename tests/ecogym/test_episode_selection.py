@@ -216,6 +216,35 @@ class LocalSelectionTests(unittest.TestCase):
         self.assertEqual(passed["reason"], "passed")
         self.assertGreater(passed["walk_forward_delta"], 0.05)
 
+        # Short-fold single-horizon variance (pre h>1 = -0.09 while uq h>1 = +0.04 -> two-fold mean -0.025 >= -0.05)
+        # passes when overall pre_delta >= 0, whereas genuine two-fold horizon collapse (< -0.05) is still blocked.
+        uq_horizons = sorted({cell.horizon for cell in self.stage.cells})
+        if len(uq_horizons) >= 2:
+            h_short = uq_horizons[0]
+            uq_err = np.ones((len(self.stage.cells), self.stage.size))
+            pre_noisy_err = np.ones((len(pre_stage.cells), pre_stage.size))
+            pre_collapse_err = np.ones((len(pre_stage.cells), pre_stage.size))
+            for idx, cell in enumerate(self.stage.cells):
+                uq_err[idx] = 0.65 if cell.horizon == h_short else 0.96
+            for idx, cell in enumerate(pre_stage.cells):
+                pre_noisy_err[idx] = 0.70 if cell.horizon == h_short else (1.0 / 0.91)
+                pre_collapse_err[idx] = 0.70 if cell.horizon == h_short else (1.0 / 0.84)
+            uq_leap = Evaluation(Genome("uq-leap"), self.stage, self.stage.observed - uq_err,
+                                 np.zeros(len(self.stage.cells), dtype=int))
+            pre_noisy = Evaluation(Genome("pre-noisy"), pre_stage, pre_stage.observed - pre_noisy_err,
+                                   np.zeros(len(pre_stage.cells), dtype=int))
+            pre_collapse = Evaluation(Genome("pre-collapse"), pre_stage, pre_stage.observed - pre_collapse_err,
+                                      np.zeros(len(pre_stage.cells), dtype=int))
+            rescued = walk_forward_selection(uq_leap, self.anchor, candidate_pre=pre_noisy, start_pre=start_pre)
+            self.assertTrue(rescued["passed"])
+            self.assertGreater(rescued["pre_delta"], 0.0)
+            self.assertLess(min(rescued["pre_horizons"].values()), -0.05)
+            self.assertGreaterEqual(min(rescued["walk_forward_horizons"].values()), -0.05)
+
+            collapsed = walk_forward_selection(uq_leap, self.anchor, candidate_pre=pre_collapse, start_pre=start_pre)
+            self.assertFalse(collapsed["passed"])
+            self.assertEqual(collapsed["reason"], "horizon_loss_above_cap")
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sub_dir = root / "work" / "submission"

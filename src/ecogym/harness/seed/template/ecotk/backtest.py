@@ -16,6 +16,7 @@ like the judge counts it (coverage q: objective = q * skill - (1 - q)).
     print(backtest.rolling(Predictor, spec, history, count=3, days=5))
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -35,13 +36,38 @@ def _baseline(values, position, spec, target, horizon):
     return now
 
 
-def _detect_fit_end() -> pd.Timestamp | None:
+def _detect_fit_end(spec=None) -> pd.Timestamp | None:
+    if isinstance(spec, dict) and spec.get("local_fit_end"):
+        try:
+            return pd.Timestamp(spec["local_fit_end"])
+        except ValueError:
+            pass
+    for candidate in (Path("data/spec.json"), Path("../data/spec.json")):
+        if candidate.is_file():
+            try:
+                loaded = json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and loaded.get("local_fit_end"):
+                    return pd.Timestamp(loaded["local_fit_end"])
+            except (OSError, ValueError):
+                pass
     for candidate in (Path("data/README.md"), Path("../data/README.md")):
         if candidate.is_file():
             match = _FIT_END_RE.search(candidate.read_text(encoding="utf-8", errors="ignore"))
             if match:
                 return pd.Timestamp(match.group(1))
     return None
+
+
+def _clip(value: float, bounds: dict, target: str) -> float:
+    pair = bounds.get(target) if isinstance(bounds, dict) else None
+    if not pair or len(pair) != 2:
+        return value
+    lo, hi = pair
+    if lo is not None and value < lo:
+        value = float(lo)
+    if hi is not None and value > hi:
+        value = float(hi)
+    return value
 
 
 def run(predictor_class, spec, history: pd.DataFrame, start, end) -> dict:
@@ -53,14 +79,20 @@ def run(predictor_class, spec, history: pd.DataFrame, start, end) -> dict:
     predictor = predictor_class(spec)
     predictor.fit(fit_part)
     horizons, targets = spec["horizons"], spec["targets"]
+    bounds = spec.get("bounds") or {}
+    target_weights = spec.get("target_weights") or {}
     history_steps = max(1, int(spec.get("history_steps", 1)))
     errors = {(t, h): [] for t in targets for h in horizons}
     base = {(t, h): [] for t in targets for h in horizons}
     asked = {(t, h): 0 for t in targets for h in horizons}
     columns = {t: history[t].to_numpy(dtype=float) for t in targets}
+    has_step = callable(getattr(predictor, "forecast_step", None))
     last = window[-1] if window.size else -1
     for position in window:
-        forecast = predictor.forecast(history.iloc[: position + 1])
+        if has_step:
+            forecast = predictor.forecast_step(history.index[position], history.iloc[position].to_dict())
+        else:
+            forecast = predictor.forecast(history.iloc[: position + 1])
         if position + max(horizons) > last or position + 1 < history_steps:
             continue
         if not all(np.all(np.isfinite(columns[t][position - history_steps + 1 : position + 1])) for t in targets):
@@ -74,19 +106,23 @@ def run(predictor_class, spec, history: pd.DataFrame, start, end) -> dict:
                 asked[(t, h)] += 1
                 value = values[i] if i < len(values) else None
                 if value is not None and np.isfinite(value):
-                    errors[(t, h)].append(value - truth)
+                    clipped = _clip(float(value), bounds, t)
+                    errors[(t, h)].append(clipped - truth)
                     base[(t, h)].append(_baseline(columns[t], position, spec, t, h) - truth)
     cells = {}
-    by_horizon: dict[int, list[float]] = {h: [] for h in horizons}
+    scored: list[tuple[float, float]] = []
+    by_horizon: dict[int, list[tuple[float, float]]] = {h: [] for h in horizons}
     for (t, h), values in errors.items():
         if not asked[(t, h)]:
             cells[f"{t}@{h}"] = None
             continue
+        weight = float(target_weights.get(t, 1.0))
         coverage = len(values) / asked[(t, h)]
         if not values:
             obj = -1.0
             cells[f"{t}@{h}"] = {"n": 0, "coverage": 0.0, "skill": None, "objective": obj}
-            by_horizon[h].append(obj)
+            scored.append((obj, weight))
+            by_horizon[h].append((obj, weight))
             continue
         rmse = float(np.sqrt(np.mean(np.square(values))))
         base_rmse = float(np.sqrt(np.mean(np.square(base[(t, h)]))))
@@ -101,13 +137,18 @@ def run(predictor_class, spec, history: pd.DataFrame, start, end) -> dict:
             "skill": skill,
             "objective": obj,
         }
-        by_horizon[h].append(obj)
-    scored = [cell["objective"] for cell in cells.values() if cell]
-    horizons_summary = {str(h): float(np.mean(vals)) for h, vals in by_horizon.items() if vals}
+        scored.append((obj, weight))
+        by_horizon[h].append((obj, weight))
+    total_w = sum(w for _, w in scored)
+    horizons_summary = {
+        str(h): float(sum(v * w for v, w in pairs) / sum(w for _, w in pairs))
+        for h, pairs in by_horizon.items()
+        if pairs and sum(w for _, w in pairs) > 0
+    }
     return {
         "start": str(start),
         "end": str(end),
-        "score": float(np.mean(scored)) if scored else None,
+        "score": float(sum(v * w for v, w in scored) / total_w) if total_w > 0 else None,
         "horizons": horizons_summary,
         "cells": cells,
     }
@@ -121,6 +162,7 @@ def windows(
     *,
     before=None,
     fit_only: bool = True,
+    spec=None,
 ):
     """``count`` consecutive causal windows of ``days`` before the local check period when ``fit_only`` is true."""
 
@@ -132,7 +174,7 @@ def windows(
     if before is not None:
         end = min(full_end, pd.Timestamp(before))
     elif fit_only:
-        detected = _detect_fit_end()
+        detected = _detect_fit_end(spec)
         if detected is not None and detected - length * count >= history.index[0] + min_train:
             end = min(full_end, detected)
         else:
@@ -153,7 +195,7 @@ def rolling(
     before=None,
     fit_only: bool = True,
 ) -> dict:
-    spans = windows(history, count, days, spec.get("step"), before=before, fit_only=fit_only)
+    spans = windows(history, count, days, spec.get("step"), before=before, fit_only=fit_only, spec=spec)
     results = [run(predictor_class, spec, history, start, end) for start, end in spans]
     scores = [item["score"] for item in results if item["score"] is not None]
     horizons: dict[str, list[float]] = {}

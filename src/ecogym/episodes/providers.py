@@ -41,11 +41,12 @@ from ..kernel.secrets import has_secret, resolve_secret
 DEEPSEEK = "deepseek-official"
 DEEPSEEK_URL = "https://api.deepseek.com"
 DEEPSEEK_KEY = "DEEPSEEK_API_KEY"
-DEEPSEEK_MODELS = ("deepseek-v4-pro", "deepseek-v4-flash")  # DSH lists the rest itself
+DEEPSEEK_MODELS = ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash")  # DSH lists the rest itself
 DEEPSEEK_MODEL = re.compile(r"^deepseek-[a-z0-9.-]{1,40}$")
 SUPPORTED_API = "openai-completions"
 PROVIDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+DEFAULT_ROUTE_MAX_TOKENS = 32_768  # keep pi-ai custom routes bounded (DSH 0.2 defaults to 128k, amplifying loops)
 SESSION_FIELDS_DROPPED = ("apiKeyEnv", "baseURL", "headers", "models", "modelOverrides")
 READ_SCRIPT = r"""
 const [root, file] = process.argv.slice(1);
@@ -58,9 +59,29 @@ try {
   throw error;
 }
 const YAML = require("node:module").createRequire(require("node:path").join(root, "package.json"))("yaml");
-const value = YAML.parse(text) || {};
-process.stdout.write(JSON.stringify({ providers: (value["llm-pi-ai"] || {}).providers || {},
-  default: value["agent-default-model"] || null }));
+const jsTag = { tag: "!!js", resolve: (str) => str };
+const value = YAML.parse(text, { customTags: [jsTag] }) || {};
+let providers = {};
+let def = null;
+if (Array.isArray(value)) {
+  const walk = (entries) => {
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      if (Array.isArray(entry.insert)) walk(entry.insert);
+      if (entry.disabled) continue;
+      if (entry.id === "llm-pi-ai" && entry.config && typeof entry.config.providers === "object") {
+        providers = { ...providers, ...entry.config.providers };
+      } else if (entry.id === "agent-default-model" && entry.config && typeof entry.config === "object") {
+        def = entry.config;
+      }
+    }
+  };
+  walk(value);
+} else if (typeof value === "object") {
+  providers = (value["llm-pi-ai"] || {}).providers || {};
+  def = value["agent-default-model"] || null;
+}
+process.stdout.write(JSON.stringify({ providers, default: def }));
 """
 
 
@@ -85,17 +106,46 @@ class Route:
 
         entries = [entry for entry in self.profile.get("models") or [] if isinstance(entry, dict)
                    and entry.get("id") == model] or [{"id": model}]
+        chosen = dict(entries[0])
+        chosen.setdefault("maxTokens", DEFAULT_ROUTE_MAX_TOKENS)
         body = {key: value for key, value in self.profile.items() if key not in SESSION_FIELDS_DROPPED}
         body.update({"displayName": self.name, "api": self.api, "baseURL": base_url, "apiKeyEnv": key_env,
-                     "models": entries[:1]})
-        efforts = entries[0].get("reasoningEfforts")
+                     "models": [chosen]})
+        efforts = chosen.get("reasoningEfforts")
         if isinstance(efforts, dict) and effort in efforts:  # pi-ai refuses a level the model does not declare
             body["reasoning"] = effort
         return body
 
 
+def _active_profile() -> str:
+    configured = os.environ.get("ECOGYM_DSH_PROFILE", "").strip()
+    if configured:
+        return configured
+    settings = os.environ.get("ECOGYM_DSH_SETTINGS")
+    path = Path(settings).expanduser() if settings else Path.home() / ".ecogym" / "dsh-plugin.json"
+    try:
+        profile = json.loads(path.read_text(encoding="utf-8")).get("profile")
+        if isinstance(profile, str) and profile.strip():
+            return profile.strip()
+    except (OSError, ValueError, AttributeError):
+        pass
+    return "web"
+
+
 def settings_path() -> Path:
-    return Path(os.environ.get("DSH_HOME") or Path.home() / ".dsh").expanduser() / "settings.yaml"
+    """DSH's provider settings: legacy ``settings.yaml``, else DSH 0.2+'s profile ``cordis.patch.yml``."""
+
+    home = Path(os.environ.get("DSH_HOME") or Path.home() / ".dsh").expanduser()
+    legacy = home / "settings.yaml"
+    if legacy.is_file():
+        return legacy
+    profile_patch = home / "profiles" / _active_profile() / "cordis.patch.yml"
+    if profile_patch.is_file():
+        return profile_patch
+    imported = home / "settings.yaml.imported"
+    if imported.is_file():
+        return imported
+    return profile_patch
 
 
 def _dsh_tools() -> tuple[str, Path]:
@@ -259,13 +309,23 @@ def probe(ref: str, *, timeout: float = 20.0) -> str:
         return f"test request failed: {type(error).__name__}: {error}"
 
 
-def _test_request(route: Route, model: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector]:
-    """One tiny streamed chat request with one tool, as every agent call carries, and the opener to send it."""
+def _test_request(
+    route: Route,
+    model: str,
+    *,
+    context_chars: int = 0,
+    max_tokens: int = 16,
+) -> tuple[urllib.request.Request, urllib.request.OpenerDirector]:
+    """One streamed chat request with one tool, as every agent call carries, and the opener to send it."""
 
     if not has_secret(route.key_env):
         raise ModelError(f"{route.provider}: no {route.key_env} in the environment or DSH's credential store")
+    prompt = "ping"
+    if context_chars > 0:
+        unit = "obs_row x0=21.4 x1=72.5 x2=610.0 x3=185.2 x4=42.1\n"
+        prompt = (unit * max(1, context_chars // len(unit))) + "\nReply with OK."
     # streamed: the status arrives before any (possibly slow) reasoning
-    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16,
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
                        "stream": True, "tools": [PROBE_TOOL]}).encode()
     request = urllib.request.Request(route.base_url.rstrip("/") + "/chat/completions", data=body, method="POST",
                                      headers={"Content-Type": "application/json", **route.headers,
@@ -285,8 +345,14 @@ def _object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def answers(ref: str, *, timeout: float = 30.0) -> tuple[str, str]:
-    """Whether the model answers a tiny request now: ``("ok" | "down" | "refused", what happened)``.
+def answers(
+    ref: str,
+    *,
+    timeout: float = 30.0,
+    context_chars: int = 0,
+    max_tokens: int = 16,
+) -> tuple[str, str]:
+    """Whether the model answers a test request now: ``("ok" | "down" | "refused", what happened)``.
 
     Stricter than ``probe``: the reply must carry a choice, streamed (or as one JSON object from a provider that
     ignores ``stream``), within ``timeout`` seconds in all; on 2026-11-02 a gateway answered 200 with an empty body
@@ -299,7 +365,7 @@ def answers(ref: str, *, timeout: float = 30.0) -> tuple[str, str]:
     started = time.monotonic()
     try:
         route, model = resolve(ref)
-        request, opener = _test_request(route, model)
+        request, opener = _test_request(route, model, context_chars=context_chars, max_tokens=max_tokens)
         with opener.open(request, timeout=timeout) as response:
             lines: list[bytes] = []
             seen, streamed, problem = 0, False, ""

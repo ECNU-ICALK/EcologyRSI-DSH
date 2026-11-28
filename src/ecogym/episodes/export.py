@@ -264,6 +264,20 @@ def _episode_meta(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _holdout_evolver_runs(ledger: Ledger, holdout_tasks: frozenset[str]) -> frozenset[str]:
+    """Evolution runs whose training tasks overlap ``holdout_tasks`` (evolver saw those hidden scores)."""
+
+    if not holdout_tasks:
+        return frozenset()
+    tainted: set[str] = set()
+    for run_id in ledger.runs(first="evolve_started"):
+        first = ledger.first(run_id)
+        train = set(((first.body.get("suite") or {}).get("train") or []) if first is not None else [])
+        if train & holdout_tasks:
+            tainted.add(run_id)
+    return frozenset(tainted)
+
+
 def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, include_failed: bool = False,
            evolver: bool = True, margin: float = 0.02, cross_prompt: bool = False,
            holdout_of: Sequence[str] = ()) -> dict[str, Any]:
@@ -286,6 +300,7 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
             (target / "episodes.jsonl").open("w", encoding="utf-8") as episodes, \
             (target / "notes.jsonl").open("w", encoding="utf-8") as notes:
         outcomes = _evolver_outcomes(ledger)
+        tainted_evolver_runs = _holdout_evolver_runs(ledger, holdout_tasks)
         for session in _sessions(ledger):
             counts["sessions"] += 1
             calls = session["trajectory"] / "llm_calls.jsonl.gz"
@@ -324,12 +339,17 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
                     continue
                 body = session["body"]
                 outcome = outcomes.get(session["id"], {"adopted": None, "deltas": {}})
+                validation = "holdout_task" if session["run"] in tainted_evolver_runs else None
                 meta = {"kind": "evolver", "session": session["id"], "run": session["run"],
                         "generation": body["generation"], "status": body.get("status"),
                         "candidates": body.get("candidates", []), "adopted": outcome["adopted"],
-                        "deltas": outcome["deltas"], "tokens": body.get("tokens"), "seconds": body.get("seconds")}
+                        "deltas": outcome["deltas"], "tokens": body.get("tokens"), "seconds": body.get("seconds"),
+                        "independent_validation": validation}
+                if validation and not include_failed:
+                    skip(f"independent validation evolver ({validation})")
+                    continue
                 proposed = any(item.get("status") == "proposed" for item in body.get("candidates", []))
-                passes = body.get("status") in ("finished", "timeout") and proposed
+                passes = validation is None and body.get("status") in ("finished", "timeout") and proposed
             if not calls.is_file():
                 skip("no model-call log")
                 continue
@@ -380,10 +400,15 @@ def export(ledger_path: Path, target: Path, *, min_score: float | None = 0.0, in
                              "predictions_digest": scored.get("predictions_digest")})
         if evolver:
             for run_id in ledger.runs(first="evolve_started"):
+                validation = "holdout_task" if run_id in tainted_evolver_runs else None
+                if validation and not include_failed:
+                    continue
                 for event in ledger.events(run_id, kind="evolver_note"):
                     notes.write(json.dumps({"source": "evolver", "session": f"{run_id}/g{event.body['generation']}",
                                             "kind": event.body.get("kind"), "text": event.body.get("text"),
-                                            "at": event.at}, ensure_ascii=False) + "\n")
+                                            "at": event.at,
+                                            **({"independent_validation": validation} if validation else {})},
+                                           ensure_ascii=False) + "\n")
                     counts["notes"] += 1
     counts["preferences"] = _preferences(target / "preferences.jsonl", scored_episodes, credited_threads, margin, skip,
                                          cross_prompt=cross_prompt)

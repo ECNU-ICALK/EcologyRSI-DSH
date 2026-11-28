@@ -291,17 +291,23 @@ async function forward(sidecar, req, res, path) {
     headers.host = `127.0.0.1:${sidecar.port}`;
     headers.authorization = `Bearer ${sidecar.token}`;
     if (body !== undefined) headers["content-length"] = String(body.length);
+    const isEventStream = path === "/api/events" || path.startsWith("/api/events?");
     const upstream = request({ host: "127.0.0.1", port: sidecar.port, method: req.method, path, headers }, (answer) => {
       const out = {};
       for (const [key, value] of Object.entries(answer.headers)) {
         if (!RESPONSE_DROP.has(key.toLowerCase()) && value !== undefined) out[key] = value;
+      }
+      if ((answer.headers["content-type"] || "").includes("text/event-stream")) {
+        upstream.setTimeout(0);
       }
       res.writeHead(answer.statusCode || 502, out);
       answer.pipe(res);
       answer.once("end", done);
       answer.once("close", done);
     });
-    upstream.setTimeout(PROXY_TIMEOUT_MS, () => upstream.destroy(new Error("timeout")));
+    if (!isEventStream) {
+      upstream.setTimeout(PROXY_TIMEOUT_MS, () => upstream.destroy(new Error("timeout")));
+    }
     upstream.once("error", (error) => {
       if (!res.headersSent) sendJson(res, 502, { error: `生态进化后端没有响应：${error.message}` });
       else res.destroy();

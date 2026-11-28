@@ -230,6 +230,16 @@ textarea.eg-input{resize:vertical;min-height:72px;line-height:1.5}
 .eg-chart .cand[data-adopted=true] circle{fill:var(--dsw-alias-state-success-primary)}
 .eg-chart .cand:hover circle{stroke-width:3}
 .eg-chart .cand text{fill:var(--dsw-alias-label-secondary);font-size:11px}
+.eg-chart .cand[data-live=true]{opacity:.85}
+.eg-chart .cand[data-live=true] line{stroke-dasharray:3 3}
+.eg-chart .cand[data-live=true] circle{stroke-dasharray:3 2}
+.eg-chart .live-link{fill:none;stroke:var(--dsw-alias-state-business-primary);stroke-width:2;stroke-dasharray:4 4;opacity:.8}
+.eg-chart .live-link[data-side=above]{stroke:var(--dsw-alias-state-success-primary)}
+.eg-chart .live-link[data-side=below]{stroke:var(--dsw-alias-state-error-primary)}
+.eg-chart .trunk[data-live=true]{stroke-dasharray:5 4;opacity:.75}
+.eg-live-scores{margin-top:12px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l2)}
+.eg-live-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:12.5px;margin-top:6px}
+.eg-score[data-live=true]{color:var(--dsw-alias-state-business-primary);border:.5px dashed var(--dsw-alias-state-business-primary);background:transparent}
 .eg-graph{overflow-x:auto;padding-bottom:4px}
 .eg-graph svg{display:block}
 .eg-graph text{fill:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
@@ -330,17 +340,65 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const enc = encodeURIComponent;
     const Api = {
       status: "_status", restart: "_restart",
-      catalog: "catalog", stages: (task) => `tasks/${enc(task)}/stages`,
+      catalog: "catalog", events: "events", stages: (task) => `tasks/${enc(task)}/stages`,
       evolutions: "evolutions", evolution: (id) => `evolutions/${enc(id)}`,
       evolutionAction: (id, action) => `evolutions/${enc(id)}/${action}`,
-      evolverSession: (id, generation, steps = true) => `evolutions/${enc(id)}/evolver/${enc(generation)}${steps ? "" : "?steps=0"}`,
+      evolverSession: (id, generation, steps = true, stage = null) => {
+        const q = [steps ? "" : "steps=0", stage ? `stage=${enc(stage)}` : ""].filter(Boolean).join("&");
+        return `evolutions/${enc(id)}/evolver/${enc(generation)}${q ? `?${q}` : ""}`;
+      },
       episodes: "episodes", episode: (id) => `episodes/${enc(id)}`, episodeTranscript: (id) => `episodes/${enc(id)}/transcript`,
+      episodesPage: (limit, offset = 0, status = "") => `episodes?limit=${enc(limit)}&offset=${enc(offset)}${status ? `&status=${enc(status)}` : ""}`,
       roundEpisodes: (evolution, generation) => `episodes?evolution=${enc(evolution)}&generation=${enc(generation)}`,
       harness: (ref) => `harnesses/${enc(ref)}`, harnessDiff: (before, after) => `harnesses/${enc(before)}/diff/${enc(after)}`,
       modelCheck: "models/check", modelBenchmark: "models/benchmark",
       expert: "expert", expertAnswer: "expert/answer", expertNote: "expert/note",
       exports: "exports", exportDetail: (id) => `exports/${enc(id)}`,
     };
+
+    /* Shared SSE ledger push bus: triggers immediate refreshes when the ledger changes and lets polling relax. */
+    const ledgerListeners = new Set();
+    let ledgerSource = null;
+    let ledgerConnected = false;
+    let ledgerReconnect = null;
+    function connectLedgerEvents() {
+      if (typeof EventSource === "undefined" || ledgerSource || !ledgerListeners.size) return;
+      try {
+        const es = new EventSource(API + Api.events);
+        ledgerSource = es;
+        es.addEventListener("sync", () => { ledgerConnected = true; });
+        es.addEventListener("update", () => {
+          ledgerConnected = true;
+          ledgerListeners.forEach((fn) => fn());
+        });
+        es.onerror = () => {
+          ledgerConnected = false;
+          es.close();
+          if (ledgerSource === es) ledgerSource = null;
+          if (ledgerListeners.size && !ledgerReconnect) {
+            ledgerReconnect = setTimeout(() => {
+              ledgerReconnect = null;
+              connectLedgerEvents();
+            }, 5000);
+          }
+        };
+      } catch {
+        ledgerConnected = false;
+      }
+    }
+    function subscribeLedger(fn) {
+      ledgerListeners.add(fn);
+      connectLedgerEvents();
+      return () => {
+        ledgerListeners.delete(fn);
+        if (!ledgerListeners.size) {
+          clearTimeout(ledgerReconnect);
+          ledgerReconnect = null;
+          if (ledgerSource) { ledgerSource.close(); ledgerSource = null; }
+          ledgerConnected = false;
+        }
+      };
+    }
 
     async function api(path, options = {}) {
       const init = { method: options.method || "GET", headers: { accept: "application/json" }, credentials: "same-origin" };
@@ -380,9 +438,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         }
         let alive = true;
         let timer = null;
+        let pushTimer = null;
+        const schedule = () => {
+          if (!alive || !interval) return;
+          clearTimeout(timer);
+          const delay = ledgerConnected && path !== Api.status ? Math.max(interval, 30000) : interval;
+          timer = setTimeout(load, delay);
+        };
         const load = async () => {
           if (document.hidden && last.current.text) {
-            timer = setTimeout(load, interval || 5000);
+            schedule();
             return;
           }
           try {
@@ -398,12 +463,22 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           } catch (error) {
             if (alive) setState((old) => ({ ...old, error }));
           }
-          if (alive && interval) timer = setTimeout(load, interval);
+          schedule();
         };
+        const unsub = interval && path !== Api.status ? subscribeLedger(() => {
+          if (!alive || document.hidden || pushTimer) return;
+          pushTimer = setTimeout(() => {
+            pushTimer = null;
+            clearTimeout(timer);
+            load();
+          }, 300);
+        }) : null;
         load();
         return () => {
           alive = false;
           clearTimeout(timer);
+          clearTimeout(pushTimer);
+          unsub?.();
         };
       }, [path, interval, enabled, tick]);
       const reload = useCallback(() => setTick((value) => value + 1), []);
@@ -579,6 +654,33 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           item.options.map((option) => h("option", { key: option.value, value: option.value, disabled: !item.runnable }, option.label))))),
         help ? h("small", null, help) : null,
         tested ? h("small", null, tested) : null);
+    }
+
+    /** Pick an asymmetric fast-executor + strong-evolver pair from runnable routes (HarnessOpt-Bench pattern). */
+    function pickAsymmetricModels(routes) {
+      const options = (routes || []).filter((r) => r.runnable).flatMap((r) => r.options || []);
+      if (!options.length) return null;
+      const fastScore = (opt) => {
+        const s = `${opt.value} ${opt.label || ""}`.toLowerCase();
+        let score = 0;
+        if (/flash|mini|lite|haiku|small|turbo/.test(s)) score += 3;
+        if (/deepseek-v4\.1-flash|s2\.1-flash/.test(s)) score += 2;
+        if (/pro|reasoner|opus|r1|thinking|max/.test(s)) score -= 2;
+        return score;
+      };
+      const strongScore = (opt) => {
+        const s = `${opt.value} ${opt.label || ""}`.toLowerCase();
+        let score = 0;
+        if (/pro|reasoner|opus|r1|thinking|gpt-5|o3|max/.test(s)) score += 4;
+        if (/sonnet|v4-pro|v4\.1-pro|deepseek-reasoner/.test(s)) score += 2;
+        if (/flash|mini|lite|haiku|small/.test(s)) score -= 2;
+        return score;
+      };
+      const fast = [...options].sort((a, b) => fastScore(b) - fastScore(a))[0];
+      const strongPool = options.filter((o) => o.value !== fast.value);
+      if (!strongPool.length) return null;
+      const strong = [...strongPool].sort((a, b) => strongScore(b) - strongScore(a))[0];
+      return { fast: fast.value, fastLabel: fast.label || fast.value, strong: strong.value, strongLabel: strong.label || strong.value };
     }
 
     /** Side-by-side stability benchmark for candidate model routes (sequential + concurrent streamed tool calls). */
@@ -760,11 +862,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const CAND_STATUS = {
       proposed: ["已提出", "neutral"], adopted: ["已采纳", "success"], passed: ["通过门槛", "success"],
       not_adopted: ["未采纳", "neutral"], invalid: ["未通过检查", "danger"], unchanged: ["没有改动", "neutral"],
-      duplicate: ["与以往版本相同", "warning"], rejected: ["被拒绝", "danger"],
+      duplicate: ["与以往版本相同", "warning"], rejected: ["被拒绝", "danger"], carried: ["上段胜出对照", "info"],
     };
     const ROLE = { incumbent: "在任", candidate: "候选", holdout: "留出验证" };
     /** Which version an episode ran for its run (its ``context``): 在任, 候选 a, 留出验证. */
-    const roleText = (context) => `${ROLE[context?.role] || context?.role || ""}${context?.candidate ? ` ${context.candidate}` : ""}`;
+    const roleText = (context) => `${context?.relay_stage ? `接力${context.relay_stage} · ` : ""}${ROLE[context?.role] || context?.role || ""}${context?.candidate ? ` ${context.candidate}` : ""}`;
     const SCORED = ["finished", "timeout"];
 
     function evoKey(run) {
@@ -788,6 +890,24 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const task = taskInfo(catalog, card);
       if (!task) return String(id || "");
       return `${episode || task.episodes?.[0] || ""}（${task.dataset}）`;
+    }
+    const taskName = (catalog, id) => taskShort(catalog, id).split("（")[0];
+    function groupScoresByTask(entries, keep = null) {
+      const byTask = new Map();
+      for (const entry of entries || []) {
+        if (!SCORED.includes(entry.status) || !isNum(entry.score) || (keep && !keep(entry))) continue;
+        if (!byTask.has(entry.task)) byTask.set(entry.task, []);
+        byTask.get(entry.task).push(entry.score);
+      }
+      return byTask;
+    }
+    function EpisodeScoreChip({ entry, catalog, go, back, rolePrefix = true }) {
+      const who = entry.role === "candidate" ? `${rolePrefix ? "候选 " : ""}${entry.candidate}` : "在任";
+      return h("button", {
+        key: entry.episode, type: "button", className: "eg-score",
+        title: `${taskShort(catalog, entry.task)} · ${entry.role === "candidate" ? `候选 ${entry.candidate}` : "在任"} · 隐藏期 ${signed(entry.score, 4)}`,
+        onClick: () => go({ page: "episode", id: entry.episode, back }),
+      }, `${who} · ${taskName(catalog, entry.task)} `, h("b", { className: toneClass(entry.score, 3) }, signed(entry.score, 3)));
     }
     /** A task as a column of a Table's head: its episode with the dataset below, the task id on hover. */
     function taskHead(catalog, id, kind = "num") {
@@ -848,10 +968,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const [text, tone] = map[keyName] || [keyName, "neutral"];
       return h(Tag, { tone }, text);
     }
-    /** A page's title and what the page is for; ``children`` go below the text. */
-    function PageHead({ title, text, children }) {
-      return h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" }, h("h1", null, title),
-        text ? h("p", null, text) : null, children));
+    /** A page's title and what the page is for; ``children`` go below the text, ``actions`` sit on the right. */
+    function PageHead({ title, text, actions, children }) {
+      return h("div", { className: "eg-head" },
+        h("div", { className: "eg-head-main" }, h("h1", null, title), text ? h("p", null, text) : null, children),
+        actions ? h("div", { className: "eg-actions" }, actions) : null);
     }
     function Card({ title, hint, actions, children }) {
       return h("section", { className: "eg-card" },
@@ -1058,8 +1179,23 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const since = timeOf(round.started_at);
       const elapsed = since === null ? "" : `（这一代已进行 ${duration((Date.now() - since) / 1000)}）`;
       if (round.generation === 0) return `第 0 代基线：起点 Harness 正在各训练任务上运行${elapsed}`;
+      const relayTotal = Number(view.config?.relay_stages || 1);
+      if (relayTotal > 1 && !round.plan) {
+        const stages = round.relay_stages || [];
+        const activeStage = stages.find((st) => !st.finished);
+        if (activeStage?.plan_id) {
+          return `第 ${round.generation} 代 · 接力阶段 ${activeStage.stage}/${relayTotal}：小批候选正在 ${(activeStage.tasks || []).length} 个分层任务上并行快筛${elapsed}`;
+        }
+        const nextStage = Math.min(relayTotal, stages.filter((st) => st.finished).length + 1);
+        const basis = nextStage > 1 ? "正在读取上一阶段轨迹并基于优胜版本继续进化" : "正在阅读证据、编写首批接力候选";
+        return `第 ${round.generation} 代 · 接力阶段 ${nextStage}/${relayTotal}：评审智能体${basis}${elapsed}`;
+      }
       if (!round.evolver || round.evolver.rerun) return `第 ${round.generation} 代：评审智能体正在阅读证据、编写候选 Harness${round.evolver?.rerun ? "（服务故障后重新评审）" : ""}${elapsed}`;
-      if (!(round.episodes || []).length) return `第 ${round.generation} 代：候选与在任版本正在各训练任务上运行回合${elapsed}`;
+      if (!(round.episodes || []).length) {
+        return relayTotal > 1
+          ? `第 ${round.generation} 代 · 全量终审：接力优胜候选与在任版本正在全部训练任务上正式配对对比${elapsed}`
+          : `第 ${round.generation} 代：候选与在任版本正在各训练任务上运行回合${elapsed}`;
+      }
       return `第 ${round.generation} 代：正在比较候选与在任版本${elapsed}`;
     }
 
@@ -1100,6 +1236,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const running = view ? view.active || view.verifying || view.status === "running" : true;
       useEffect(() => setLive(Boolean(running)), [running]);
       useTick(Boolean(view?.active));
+      const latestRound = view ? (view.rounds || [])[(view.rounds || []).length - 1] : null;
+      const activeRound = view?.active && latestRound && !latestRound.finished ? latestRound : null;
+      const { data: rawLiveEpisodes } = useResource(activeRound ? Api.roundEpisodes(view.run_id, activeRound.generation) : null, { interval: 8000 });
+      const liveEpisodes = useMemo(() => (activeRound ? filterRoundEpisodes(activeRound, rawLiveEpisodes) : []), [activeRound, rawLiveEpisodes]);
+      const liveInfo = useMemo(() => (view && activeRound ? liveRoundSummary(view, activeRound, liveEpisodes) : null), [view, activeRound, liveEpisodes]);
       if (error && !view) return h(Alert, { tone: "danger" }, `无法读取进化运行 ${id}：${error.message}`);
       if (!view) return hint("正在读取进化运行…");
       const key = evoKey(view);
@@ -1167,25 +1308,151 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           "aria-current": section === value ? "page" : undefined, onClick: () => setSection(value) }, label))),
         // every section stays mounted (hidden when not chosen), so opened generations and scroll targets survive a switch
         h("div", { hidden: section !== "overview" },
-          view.active ? h(LiveCard, { view, catalog, go }) : null,
+          view.active ? h(LiveCard, { view, catalog, go, liveEpisodes, liveInfo }) : null,
           h(RunSummary, { view, go }),
-          h(ScoreCard, { view, catalog, onPick: pick }),
+          h(ScoreCard, { view, catalog, onPick: pick, go, liveInfo }),
           h(Verification, { view, catalog, ask, act })),
-        h("div", { hidden: section !== "process" }, h(Process, { view, catalog, go, focus })),
+        h("div", { hidden: section !== "process" }, h(Process, { view, catalog, go, focus, liveInfo })),
         h("div", { hidden: section !== "versions" },
           h(LineageCard, { view, catalog, onPick: pick }),
-          h(Scoreboard, { view, catalog }),
+          h(Scoreboard, { view, catalog, liveInfo }),
           h(HarnessCard, { view })),
         h("div", { hidden: section !== "settings" }, h(ConfigCard, { view, catalog, go })));
     }
 
-    /** What runs now: the current generation's episodes (polled while the run is active), with its progress. */
-    function LiveCard({ view, catalog, go }) {
-      const round = (view.rounds || [])[(view.rounds || []).length - 1];
-      const { data: episodes } = useResource(round ? Api.roundEpisodes(view.run_id, round.generation) : null, { interval: 8000 });
+    function filterRoundEpisodes(round, episodes) {
       const since = timeOf(round?.started_at) ?? 0;
-      const mine = (episodes || []).filter((item) => round?.plan
-        ? item.context?.round_plan === round.plan.id : (timeOf(item.started_at) ?? 0) >= since - 1000);
+      if (round?.plan) {
+        return (episodes || []).filter((item) => item.context?.round_plan === round.plan.id);
+      }
+      const activeStage = (round?.relay_stages || []).find((st) => !st.finished && st.plan_id);
+      if (activeStage) {
+        return (episodes || []).filter((item) => item.context?.round_plan === activeStage.plan_id);
+      }
+      return (episodes || []).filter((item) => (timeOf(item.started_at) ?? 0) >= since - 1000);
+    }
+
+    function toRoundEntry(item) {
+      return {
+        episode: item.episode,
+        task: item.task_id,
+        harness: item.harness,
+        role: item.context?.role,
+        candidate: item.context?.candidate ?? null,
+        replicate: item.context?.replicate ?? 0,
+        status: item.status,
+        score: item.score,
+        tokens: item.tokens,
+        seconds: item.seconds,
+        started_at: item.started_at,
+        error: item.error,
+      };
+    }
+
+    /** Provisional intra-generation scores computed from completed episodes before the round writes its final decision. */
+    function liveRoundSummary(view, round, mine) {
+      const tasks = view.suite?.train || [];
+      const entries = (mine || []).map(toRoundEntry);
+      const scored = entries.filter((entry) => SCORED.includes(entry.status) && isNum(entry.score));
+      // Fallback per-task incumbent score from earlier finished rounds of the same incumbent digest.
+      const priorIncByTask = groupScoresByTask(
+        (view.rounds || []).filter((other) => other !== round && other.finished).flatMap((other) => other.episodes || []),
+        (entry) => entry.role === "incumbent" && entry.harness === round.incumbent,
+      );
+      const incByTask = groupScoresByTask(scored, (entry) => entry.role === "incumbent");
+      const incMeanOf = (task) => {
+        const own = incByTask.get(task);
+        if (own && own.length) return { value: mean(own), fromPrior: false };
+        const prior = priorIncByTask.get(task);
+        if (prior && prior.length) return { value: mean(prior), fromPrior: true };
+        return null;
+      };
+      const incScoredTasks = tasks.map((task) => incByTask.get(task)).filter((vals) => vals && vals.length).map((vals) => mean(vals));
+      const provisionalIncumbent = incScoredTasks.length ? mean(incScoredTasks) : null;
+      const activeStage = !round.plan ? (round.relay_stages || []).find((st) => !st.finished && st.plan_id) : null;
+      const trackedCandidates = activeStage ? (activeStage.candidates || []) : (round.candidates || []);
+      const candidates = new Map();
+      for (const candidate of trackedCandidates) {
+        const candEntries = scored.filter((entry) => entry.role === "candidate" && entry.candidate === candidate.name);
+        if (!candEntries.length) continue;
+        const candByTask = groupScoresByTask(candEntries);
+        const taskPoints = [];
+        for (const task of tasks) {
+          const vals = candByTask.get(task);
+          if (!vals || !vals.length) continue;
+          const cMean = mean(vals);
+          const inc = incMeanOf(task);
+          taskPoints.push({
+            task,
+            candidate: cMean,
+            incumbent: inc ? inc.value : null,
+            delta: inc ? cMean - inc.value : null,
+            fromPrior: inc ? inc.fromPrior : false,
+            episodes: vals.length,
+          });
+        }
+        const paired = taskPoints.filter((item) => isNum(item.delta));
+        const deltas = paired.map((item) => item.delta);
+        const delta = deltas.length ? mean(deltas) : null;
+        let interval = isNum(delta) ? [delta, delta] : null;
+        if (deltas.length >= 3) {
+          const variance = deltas.reduce((sum, item) => sum + (item - delta) ** 2, 0) / (deltas.length - 1);
+          const half = 1.96 * Math.sqrt(variance / deltas.length);
+          interval = [delta - half, delta + half];
+        } else if (deltas.length === 2) {
+          interval = [Math.min(...deltas), Math.max(...deltas)];
+        }
+        const ordered = [...candEntries].sort((a, b) => (timeOf(a.started_at) ?? 0) - (timeOf(b.started_at) ?? 0));
+        let runningSum = 0;
+        const trail = ordered.map((entry, idx) => {
+          runningSum += entry.score;
+          const inc = incMeanOf(entry.task);
+          return {
+            seq: idx + 1,
+            episode: entry.episode,
+            task: entry.task,
+            score: entry.score,
+            incumbent: inc ? inc.value : null,
+            cumMean: runningSum / (idx + 1),
+          };
+        });
+        const side = !interval ? "noise"
+          : deltas.length >= 2 && interval[0] > 0 ? "above"
+            : deltas.length >= 2 && interval[1] < 0 ? "below" : "noise";
+        candidates.set(candidate.name, {
+          round,
+          candidate,
+          provisional: true,
+          delta,
+          interval,
+          side,
+          before: paired.length ? mean(paired.map((item) => item.incumbent)) : null,
+          after: paired.length ? mean(paired.map((item) => item.candidate)) : mean(taskPoints.map((item) => item.candidate)),
+          paired: paired.length,
+          totalTasks: tasks.length,
+          better: paired.filter((item) => item.delta > 0).length,
+          candScored: candEntries.length,
+          incScored: scored.filter((entry) => entry.role === "incumbent").length,
+          taskPoints,
+          trail,
+        });
+      }
+      return {
+        generation: round.generation,
+        round,
+        entries,
+        scored,
+        provisionalIncumbent,
+        incTasksDone: incScoredTasks.length,
+        totalTasks: tasks.length,
+        candidates,
+      };
+    }
+
+    /** What runs now: the current generation's episodes (polled while the run is active), with its progress. */
+    function LiveCard({ view, catalog, go, liveEpisodes, liveInfo }) {
+      const round = (view.rounds || [])[(view.rounds || []).length - 1];
+      const mine = liveEpisodes || [];
       const resumed = timeOf(round?.resumed_at) ?? 0;
       const live = mine.filter((item) => item.status === "running" && (timeOf(item.started_at) ?? 0) >= resumed - 1000);
       // one slot per version, task and replicate: an episode tried again after a provider failure counts once, at its end
@@ -1193,15 +1460,23 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const busy = new Set(live.map(slot));
       const done = new Set(mine.filter((item) => round?.plan ? SCORED.includes(item.status) : item.status !== "running")
         .map(slot).filter((key) => !busy.has(key))).size;
-      const reviewing = Boolean(round?.generation) && (!round.evolver || round.evolver.rerun); // no episodes until it ends
+      const relayTotal = Number(view.config?.relay_stages || 1);
+      const activeStage = !round?.plan && relayTotal > 1 ? (round?.relay_stages || []).find((st) => !st.finished && st.plan_id) : null;
+      const inRelayReview = Boolean(round?.generation) && relayTotal > 1 && !round?.plan && !activeStage;
+      const reviewing = inRelayReview || (Boolean(round?.generation) && relayTotal <= 1 && (!round.evolver || round.evolver.rerun)); // no episodes until it ends
       const runnable = (round?.candidates || []).filter((candidate) => candidate.status === "proposed" || (candidate.digest && candidate.decision)).length;
-      const idle = Boolean(round?.generation) && !reviewing && !runnable; // no candidate can run: the loop runs no episodes
-      const total = round && !reviewing && !idle ? (view.suite?.train || []).length * (view.config?.repeats || 1) * (1 + runnable) : 0;
+      const idle = Boolean(round?.generation) && !reviewing && !activeStage && !runnable; // no candidate can run: the loop runs no episodes
+      const incSlots = activeStage ? new Set(mine.filter((item) => item.context?.role === "incumbent").map((item) => item.task_id)).size : 0;
+      const total = activeStage
+        ? (activeStage.tasks || []).length * (activeStage.candidates || []).length + incSlots
+        : round && !reviewing && !idle ? (view.suite?.train || []).length * (view.config?.repeats || 1) * (1 + runnable) : 0;
+      const scopeLabel = activeStage ? `接力阶段 ${activeStage.stage}/${relayTotal} ` : "这一代 ";
       const quiet = reviewing ? "评审智能体正在读证据、写候选；它结束后回合才开始。" : idle ? "这一代没有可以运行的候选，不跑回合。" : "现在没有运行中的回合。";
+      const scoredDone = (liveInfo?.scored || []).slice().sort((a, b) => (timeOf(b.started_at) ?? 0) - (timeOf(a.started_at) ?? 0));
       return h(Card, { title: "正在进行", hint: phaseOf(view) },
         total ? h("div", { className: "eg-live" },
           h("div", { className: "eg-progress" }, h("i", { style: { width: `${Math.min(100, (done / total) * 100)}%` } })),
-          h("span", null, `这一代 ${Math.min(done, total)} / ${total} 个回合已结束${live.length ? `，${live.length} 个正在运行` : ""}`
+          h("span", null, `${scopeLabel}${Math.min(done, total)} / ${total} 个回合已结束${live.length ? `，${live.length} 个正在运行` : ""}`
             + `（同时最多 ${view.config?.concurrency ?? "?"} 个）`)) : null,
         live.length ? h(Table, { head: ["任务", "版本", "模型", ["已运行", "num"], "回合"] },
           live.map((item) => h("tr", { key: item.episode, className: "eg-click",
@@ -1210,19 +1485,33 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             h("td", null, roleText(item.context)),
             h("td", null, item.model || "–"),
             h("td", { className: "num" }, duration((Date.now() - (timeOf(item.started_at) || Date.now())) / 1000)),
-            h("td", null, h(Mono, null, item.episode))))) : hint(quiet));
+            h("td", null, h(Mono, null, item.episode))))) : hint(quiet),
+        scoredDone.length ? h("div", { className: "eg-live-scores" },
+          h("div", { className: "eg-label", style: { marginTop: 0 } }, `本代已完结回合实时成绩（共 ${scoredDone.length} 个，点开看单回合时间线）`),
+          h("div", { className: "eg-cell-chips", style: { marginTop: "6px" } },
+            scoredDone.slice(0, 16).map((entry) => h(EpisodeScoreChip, {
+              key: entry.episode, entry, catalog, go, back: { page: "evolution", id: view.run_id },
+            })))) : null);
     }
 
-    function Scoreboard({ view, catalog }) {
+    function Scoreboard({ view, catalog, liveInfo }) {
       const tasks = view.suite?.train || [];
       const table = new Map();
+      const liveDigests = new Set();
+      const addEntry = (entry) => {
+        if (!isNum(entry.score) || !SCORED.includes(entry.status)) return;
+        if (!table.has(entry.harness)) table.set(entry.harness, new Map());
+        const byTask = table.get(entry.harness);
+        if (!byTask.has(entry.task)) byTask.set(entry.task, []);
+        byTask.get(entry.task).push(entry.score);
+      };
       for (const round of view.rounds || []) {
-        for (const entry of round.episodes || []) {
-          if (!isNum(entry.score) || !SCORED.includes(entry.status)) continue;
-          if (!table.has(entry.harness)) table.set(entry.harness, new Map());
-          const byTask = table.get(entry.harness);
-          if (!byTask.has(entry.task)) byTask.set(entry.task, []);
-          byTask.get(entry.task).push(entry.score);
+        for (const entry of round.episodes || []) addEntry(entry);
+      }
+      if (liveInfo && !(liveInfo.round?.episodes || []).length) {
+        for (const entry of liveInfo.scored || []) {
+          addEntry(entry);
+          if (entry.harness) liveDigests.add(entry.harness);
         }
       }
       if (!table.size) return null;
@@ -1236,7 +1525,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             const means = [];
             return h("tr", { key: digest },
               h("td", { style: { whiteSpace: "nowrap" } }, `${versionAlias(view, digest)} `, h(Mono, null, short(digest)),
-                digest === view.incumbent ? h(Fragment, null, " ", h(Tag, { tone: "success" }, "在任")) : null),
+                digest === view.incumbent ? h(Fragment, null, " ", h(Tag, { tone: "success" }, "在任"))
+                  : liveDigests.has(digest) ? h(Fragment, null, " ", h(Tag, { tone: "info" }, "进行中")) : null),
               tasks.map((task) => {
                 const values = byTask.get(task) || [];
                 if (!values.length) return h("td", { key: task, className: "num eg-faint" }, "–");
@@ -1245,7 +1535,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
                 return h("td", { key: task, className: "num", style: { background: isNum(base(task)) ? mix(value - base(task), 0.03) : undefined },
                   title: values.map((item) => signed(item)).join("、") }, signed(value, 3), h("span", { className: "eg-faint" }, ` (${values.length})`));
               }),
-              h("td", { className: "num" }, h("b", null, means.length === tasks.length ? signed(mean(means), 3) : "–")));
+              h("td", { className: "num" }, h("b", null, means.length ? `${signed(mean(means), 3)}${means.length < tasks.length ? ` (${means.length}/${tasks.length})` : ""}` : "–")));
           }),
           refs.map((name) => {
             const values = tasks.map((task) => view.task_references?.[task]?.[name]);
@@ -1436,12 +1726,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     /** A version's hidden-period score in one round: the mean over training tasks of its episodes' mean. */
     function versionMean(round, digest) {
-      const byTask = new Map();
-      for (const entry of round?.episodes || []) {
-        if (entry.harness !== digest || !isNum(entry.score) || !SCORED.includes(entry.status)) continue;
-        if (!byTask.has(entry.task)) byTask.set(entry.task, []);
-        byTask.get(entry.task).push(entry.score);
-      }
+      const byTask = groupScoresByTask(round?.episodes, (entry) => entry.harness === digest);
       return byTask.size ? mean([...byTask.values()].map(mean)) : null;
     }
 
@@ -1632,6 +1917,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       if (!round.finished) return view.active ? ["进行中", "info"] : ["未完成", "warning"];
       if (round.generation === 0) return ["基线", "neutral"];
       if (round.adopted) return [`采纳 ${round.adopted}`, "success"];
+      if (round.outcome === "relay_no_viable_candidate") return ["接力全败早停", "warning"];
       if (round.outcome === "no_candidates") return ["没有可运行的候选", "warning"];
       return ["保留在任", "neutral"];
     }
@@ -1652,6 +1938,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         parts.push(chosen ? `比在任 ${describe(chosen)}` : null);
         const check = round.sealed_check?.error ? null : round.sealed_check?.decision;
         if (check) parts.push(`封存期复核 ${signed(check.delta, 3)}`);
+      } else if (round.outcome === "relay_no_viable_candidate") {
+        parts.push("接力候选均劣于在任，已跳过全量终审");
       } else if (compared.length) {
         const best = compared.reduce((top, candidate) => (candidate.decision.delta > top.decision.delta ? candidate : top));
         parts.push(`最好的候选 ${best.name} ${describe(best)}：${reasonText(catalog, best.decision.reason)}`);
@@ -1665,7 +1953,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return parts.filter(Boolean).join(" · ");
     }
 
-    function Process({ view, catalog, go, focus }) {
+    function Process({ view, catalog, go, focus, liveInfo }) {
       const rounds = lastAttempts(view); // a generation run again after an interruption: the attempt that counts
       const [open, setOpen] = useState(() => new Set([rounds.length - 1]));
       useEffect(() => setOpen((old) => (old.has(rounds.length - 1) ? old : new Set([...old, rounds.length - 1]))), [rounds.length]);
@@ -1694,20 +1982,67 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const tries = (generation) => (view.rounds || []).filter((item) => item.generation === generation).length;
       return h(Card, { title: "每一代的过程", hint: "每一行是一代，点开按顺序看：评审读了什么、找到什么问题；候选从哪里出发、改了什么、为什么；宿主的检查；候选和在任版本在各训练任务上的回合；比较和决定。" },
         rounds.map((round, index) => h(GenerationStory, { key: round.generation, view, round, index, catalog, go, tries: tries(round.generation),
-          open: open.has(index), onToggle: toggle, focus: focus?.generation === round.generation ? focus : null })));
+          open: open.has(index), onToggle: toggle, focus: focus?.generation === round.generation ? focus : null,
+          liveInfo: liveInfo?.generation === round.generation ? liveInfo : null })));
     }
 
-    function GenerationStory({ view, round, index, catalog, go, open, onToggle, focus, tries }) {
+    function RelayStagesStep({ view, round, index, catalog, go, back }) {
+      const stages = round.relay_stages || [];
+      if (!stages.length) return null;
+      return h(Fragment, null,
+        hint("本代启用了代内小批接力：每阶段在分层抽样的互补任务子集上并行快筛多个候选，胜出者直接成为下一阶段的出发版本，最终仅挑最好候选进入全量终审。"),
+        stages.map((st) => {
+          const leader = st.leader || null;
+          const total = st.total_stages || stages.length;
+          const tasks = st.tasks || [];
+          const ranking = st.ranking || [];
+          const episodes = (st.episodes || []).filter((entry) => entry.episode);
+          const carriedNames = new Set((st.candidates || []).filter((c) => c.carried_leader).map((c) => c.name));
+          const hasStageSession = Boolean(st.evolver?.trajectory?.dir);
+          const startLabel = st.starting?.label && st.starting.label !== "incumbent"
+            ? `上段胜出 ${st.starting.label} (${short(st.starting.digest)})`
+            : `在任 ${short(round.incumbent)}`;
+          return h("div", { key: st.stage, className: "eg-cand", style: { marginTop: "8px" } },
+            h("div", { className: "eg-cand-head" },
+              h("b", null, `接力阶段 ${st.stage} / ${total}`),
+              st.finished
+                ? (leader?.advanced
+                  ? h(Tag, { tone: "success" }, `胜出 ${leader.label}（Δ ${signed(leader.mean_delta, 4)}，${leader.better}/${leader.paired} 更好）`)
+                  : h(Tag, { tone: "neutral" }, "未超在任，保留原起点"))
+                : h(Tag, { tone: "info" }, st.plan_id ? "小批快筛进行中" : "评审编写候选中"),
+              st.fast_track ? h(Tag, { tone: "info" }, "模板快轨") : null,
+              hasStageSession ? h("span", { style: { marginLeft: "auto" } },
+                h(Link, { onClick: () => go({ page: "evolver", id: `${view.run_id}|${round.generation}|${st.stage}`, back }) },
+                  "看本阶段评审 →")) : null),
+            h("div", { className: "eg-faint", style: { marginTop: "4px" } },
+              `出发版本：${startLabel} · 抽样任务（${tasks.length}）：${tasks.map((task) => taskName(catalog, task)).join("、") || "–"}`),
+            ranking.length ? h(Table, { head: ["阶段候选", ["配对均差 Δ", "num"], ["更好 / 配对", "num"], ["候选均分", "num"], "结论"] },
+              ranking.map((row) => h("tr", { key: row.name, id: `eg-cand-${index}-${row.name}` },
+                h("td", null, h("b", null, row.label || row.name), " ", h(Mono, null, short(row.digest)),
+                  carriedNames.has(row.name) ? h(Fragment, null, " ", h(Tag, { tone: "info" }, "上段胜出对照")) : null),
+                h("td", { className: `num ${toneClass(row.mean_delta, 4)}` }, signed(row.mean_delta, 4)),
+                h("td", { className: "num" }, `${row.better ?? 0} / ${row.paired ?? 0}`),
+                h("td", { className: "num" }, signed(row.mean_score, 3)),
+                h("td", null, leader?.advanced && leader.name === row.name ? h(Tag, { tone: "success" }, "晋级下段起点")
+                  : row.beats_incumbent ? h(Tag, { tone: "info" }, "优于在任") : h(Tag, { tone: "neutral" }, "未超在任"))))) : null,
+            episodes.length ? h("div", { className: "eg-cell-chips", style: { marginTop: "6px" } },
+              episodes.map((entry) => h(EpisodeScoreChip, { key: entry.episode, entry, catalog, go, back, rolePrefix: false }))) : null);
+        }));
+    }
+
+    function GenerationStory({ view, round, index, catalog, go, open, onToggle, focus, tries, liveInfo }) {
       const [text, tone] = roundOutcome(view, round);
       const line = roundLine(view, round, tries, catalog);
       const back = { page: "evolution", id: view.run_id, focus: { generation: round.generation } };
+      const hasRelay = Boolean((round.relay_stages || []).length);
       const steps = round.generation === 0 ? [
-        ["起点版本在每个训练任务上运行", h(EpisodeGrid, { view, round, catalog, go, back })],
+        ["起点版本在每个训练任务上运行", h(EpisodeGrid, { view, round, catalog, go, back, liveInfo })],
         ["结果", h(Outcome, { view, round })],
       ] : [
+        ...(hasRelay ? [["代内小批接力：分层快筛与优胜接力", h(RelayStagesStep, { view, round, index, catalog, go, back })]] : []),
         ["评审：读证据，找问题", h(EvolverStep, { view, round, go, back })],
-        ["候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
-        ["回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back })],
+        [hasRelay ? "终审候选：从接力中胜出的版本" : "候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
+        [hasRelay ? "终审回合：胜出候选与在任版本在全部训练任务上正式配对" : "回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back, liveInfo })],
         ["比较（候选 − 在任）与结果", h(Fragment, null, h(DecisionStep, { view, round, catalog }),
           h(TemplateAttribution, { report: round.template_attribution }), h(Outcome, { view, round }))],
       ];
@@ -1777,8 +2112,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     const READ_GROUPS = { brief: "说明", guide: "说明", evidence: "证据", summary: "回合摘要", transcript: "回合会话记录", program: "回合的程序",
       episode: "回合", archive: "存档版本", incumbent: "在任版本", candidate: "候选", proposal: "提案", other: "其他" };
-    const EVIDENCE_FILES = { "overview.md": "证据总览", "archive.md": "以往候选", "lessons.md": "内循环笔记", "contrasts.md": "回合对照",
-      "prior_runs.md": "以往运行", "expert.md": "专家意见" };
+    const EVIDENCE_FILES = { "triage.md": "病灶分诊与效率归因", "overview.md": "证据总览", "archive.md": "以往候选",
+      "lessons.md": "内循环笔记", "contrasts.md": "回合对照", "prior_runs.md": "以往运行", "expert.md": "专家意见" };
     const whereText = (where) => (where[0] ? `线程 ${where[0] + 1} 第 ${where[1]} 步` : `第 ${where[1]} 步`);
 
     function readText(item) {
@@ -1837,6 +2172,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       return h("div", { id: `eg-cand-${index}-${candidate.name}`, className: "eg-cand", "data-adopted": String(candidate.status === "adopted"),
         "data-focus": String(Boolean(focused)) },
       h("div", { className: "eg-cand-head" }, h("b", null, `候选 ${candidate.name}`), h(StatusTag, { map: CAND_STATUS, keyName: candidate.status }),
+        candidate.relay_origin ? h(Tag, { tone: "info" }, `来自接力阶段 ${candidate.relay_origin.stage} · ${candidate.relay_origin.label}（小批 ${signed(candidate.relay_origin.mean_delta, 3)}）`) : null,
         h(Mono, { title: candidate.digest }, short(candidate.digest)), h("span", { className: "eg-faint" }, baseText(view, candidate))),
       candidate.summary ? h("div", { className: "eg-cand-summary" }, candidate.summary) : null,
       h("div", { className: "eg-label" }, base ? h(Fragment, null, "改了什么　",
@@ -1901,9 +2237,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     }
 
     /** A round's episodes: a row per version, a column per training task, one chip per episode (click opens it). */
-    function EpisodeGrid({ view, round, catalog, go, back }) {
+    function EpisodeGrid({ view, round, catalog, go, back, liveInfo }) {
       const tasks = view.suite?.train || [];
-      const entries = round.episodes || [];
+      const finishedEntries = round.episodes || [];
+      const isLive = !finishedEntries.length && !round.finished && Boolean(liveInfo?.entries?.length);
+      const entries = isLive ? liveInfo.entries : finishedEntries;
       if (!entries.length) {
         return hint(!round.finished && view.active ? "回合正在运行（见「概览」里的「正在进行」），全部结束后出现在这里。" : "这一代没有回合记录。");
       }
@@ -1918,17 +2256,20 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const bases = new Map(tasks.map((task) => [task, mean(scores([...entries, ...earlier].filter((entry) => entry.role === "incumbent" && entry.task === task)))]));
       const chip = (entry, faded) => {
         const ok = SCORED.includes(entry.status) && isNum(entry.score);
+        const running = entry.status === "running";
         const base = round.generation ? bases.get(entry.task) : null; // the colour: above or below the incumbent's mean
         return h("button", { key: entry.episode || `${entry.task}-${entry.replicate}-${entry.generation ?? ""}`, type: "button", className: "eg-score",
+          "data-live": running ? "true" : undefined,
           disabled: !entry.episode, style: { background: ok && isNum(base) ? mix(entry.score - base, 0.03) : undefined, opacity: faded ? 0.5 : undefined },
           title: `${entry.episode || "回合没能开始"}${faded ? `：第 ${entry.generation} 代的在任回合，比较时一并计入` : ""}\n`
             + `${EP_STATUS[entry.status]?.[0] || entry.status} · ${tokens(entry.tokens)} token · ${duration(entry.seconds)}`
             + `${entry.error ? `\n${String(entry.error).slice(0, 300)}` : ""}`,
           onClick: () => go({ page: "episode", id: entry.episode, back }) },
-        ok ? signed(entry.score, 3) : h("span", { className: "eg-bad" }, EP_STATUS[entry.status]?.[0] || entry.status));
+        ok ? signed(entry.score, 3) : running ? "运行中" : h("span", { className: "eg-bad" }, EP_STATUS[entry.status]?.[0] || entry.status));
       };
       const pooled = earlier.length ? Math.round((earlier.length + entries.filter((entry) => entry.role === "incumbent").length) / Math.max(1, tasks.length)) : 0;
       return h(Fragment, null,
+        isLive ? hint(`本代正在运行：已实时显示 ${liveInfo.scored.length} 个已完结回合的隐藏期成绩（虚线框为运行中回合），随进度自动更新。`) : null,
         h(Table, { head: ["版本", ...tasks.map((task) => taskHead(catalog, task, "")), ["平均", "num", "各任务回合均值的平均（在任一行含淡色的早先回合）"]] },
           rows.map((row) => {
             const means = [];
@@ -1940,7 +2281,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
                 if (values.length) means.push(mean(values));
                 return h("td", { key: task }, h("div", { className: "eg-cell-chips" }, own.map((entry) => chip(entry, false)), before.map((entry) => chip(entry, true))));
               }),
-              h("td", { className: "num" }, h("b", null, means.length === tasks.length ? signed(mean(means), 3) : "–")));
+              h("td", { className: "num" }, h("b", null, means.length ? `${signed(mean(means), 3)}${means.length < tasks.length ? ` (${means.length}/${tasks.length})` : ""}` : "–")));
           })),
         hint("每个格子是一个回合的隐藏期总技能（相对朴素基线，大于 0 更好），点开看那个回合（悬停看状态、token 和用时）。"
           + (round.generation ? "底色表示比在任版本在这个任务上的均值高（绿）还是低（红）。" : "")
@@ -2042,6 +2383,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           `从下一代起，在任版本由 ${short(round.incumbent)} 换成 ${short(round.incumbent_after)}。`),
         check ? hint(check) : null);
       }
+      if (round.outcome === "relay_no_viable_candidate") {
+        return h("p", null, `各接力阶段候选在小批快筛中均显著劣于在任版本，已按早停策略跳过全量终审以节省算力；在任版本仍是 ${short(round.incumbent)}。`);
+      }
       if (round.outcome === "no_candidates") return h("p", null, `没有可以运行的候选，在任版本仍是 ${short(round.incumbent)}。`);
       return h("p", null, `没有候选被采纳，在任版本仍是 ${short(round.incumbent)}。`
         + "比较过的候选留在存档里：以后各代的评审能看到它们的改动和结果，也可以从它们出发再改。");
@@ -2066,6 +2410,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       for (const round of lastAttempts(view)) {
         const found = (round.candidates || []).find((candidate) => candidate.digest === digest);
         if (found) return `g${round.generation}${found.name}`;
+        for (const st of round.relay_stages || []) {
+          const rFound = (st.candidates || []).find((candidate) => candidate.digest === digest);
+          if (rFound) return rFound.label || `g${round.generation}${rFound.name}`;
+        }
       }
       return short(digest).slice(0, 6);
     }
@@ -2193,9 +2541,12 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             if (!isNum(candidate.decision?.delta)) counts[candidate.status] = (counts[candidate.status] || 0) + 1;
           }
         }
+        const pruned = rounds.filter((round) => round.generation > 0 && round.outcome === "relay_no_viable_candidate").length;
         const listed = Object.entries(counts).map(([status, count]) => `${count} 个${(CAND_STATUS[status] || [status])[0]}`).join("、");
         const why = [...new Set(failed.map((round) => (SESSION_STATUS[round.evolver.status] || [round.evolver.status])[0]))].join("、");
-        const details = [failed.length ? `${failed.length} 代的评审会话没有正常结束（${why}）` : "", listed ? `候选里 ${listed}` : ""].filter(Boolean).join("；");
+        const details = [failed.length ? `${failed.length} 代的评审会话没有正常结束（${why}）` : "",
+          pruned ? `${pruned} 代接力快筛全败早停（已跳过全量终审）` : "",
+          listed ? `候选里 ${listed}` : ""].filter(Boolean).join("；");
         result = live && !done ? `第 1 代的比较还没有完成${details ? `（${details}）` : ""}。`
           : `没有候选进入比较${details ? `：${details}` : ""}。${endWord}仍是起点。`;
       } else {
@@ -2267,12 +2618,76 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const S = { width: 960, height: 290, left: 54, right: 184, top: 26, bottom: 46 };
     const REFERENCE_NAMES = { expert: "专家模型", recipe_seed: "recipe 种子" };
 
+    function relayStagePoints(round, baseLevel) {
+      const stages = round.relay_stages || [];
+      if (!stages.length) return [];
+      const byDigest = new Map();
+      for (const st of stages) {
+        const metaByName = new Map((st.candidates || []).map((c) => [c.name, c]));
+        for (const row of st.ranking || []) {
+          if (!isNum(row.mean_delta) || !(row.paired > 0)) continue;
+          const meta = metaByName.get(row.name) || {};
+          const key = row.digest || row.name;
+          let rec = byDigest.get(key);
+          if (!rec) {
+            rec = {
+              name: row.name,
+              label: row.label || `g${round.generation}${row.name}`,
+              digest: row.digest,
+              summary: row.summary || meta.summary || "",
+              stage: st.stage,
+              advanced: Boolean(st.leader?.advanced && st.leader?.name === row.name),
+              byTask: new Map(),
+              meanScore: row.mean_score,
+            };
+            byDigest.set(key, rec);
+          } else if (st.leader?.advanced && st.leader?.name === row.name) {
+            rec.advanced = true;
+          }
+          for (const td of row.task_deltas || []) {
+            if (td?.task && isNum(td.delta)) rec.byTask.set(td.task, td.delta);
+          }
+        }
+      }
+      return [...byDigest.values()].map((rec) => {
+        const deltas = [...rec.byTask.values()];
+        const delta = deltas.length ? mean(deltas) : 0;
+        let interval = [delta, delta];
+        if (deltas.length >= 3) {
+          const variance = deltas.reduce((s, d) => s + (d - delta) ** 2, 0) / (deltas.length - 1);
+          const half = 1.96 * Math.sqrt(variance / deltas.length);
+          interval = [delta - half, delta + half];
+        } else if (deltas.length === 2) {
+          interval = [Math.min(...deltas), Math.max(...deltas)];
+        }
+        const side = deltas.length >= 2 && interval[0] > 0 ? "above"
+          : deltas.length >= 2 && interval[1] < 0 ? "below" : "noise";
+        return {
+          round,
+          candidate: { name: rec.name, digest: rec.digest, summary: rec.summary, status: "proposed" },
+          decision: { delta, interval, reason: "relay_screening" },
+          side,
+          before: baseLevel,
+          after: isNum(rec.meanScore) ? rec.meanScore : baseLevel + delta,
+          provisional: true,
+          relayStage: rec.stage,
+          relayAdvanced: rec.advanced,
+          live: {
+            paired: deltas.length,
+            totalTasks: Math.max(deltas.length, (stages[0]?.tasks || []).length),
+            better: deltas.filter((d) => d > 0).length,
+            candScored: deltas.length,
+          },
+        };
+      });
+    }
+
     /**
      * The run's score over its generations: a flat line for the incumbent (a step up is an adoption), a dot per
      * candidate with the interval of its gain drawn around the line, the earlier runs that evolved the starting
      * version (dashed) and the host's best built-in method (dotted).
      */
-    function ScoreChart({ view, catalog, onPick }) {
+    function ScoreChart({ view, catalog, onPick, liveInfo }) {
       const rounds = lastAttempts(view);
       const tasks = view.suite?.train || [];
       const level = versionLevels(view);
@@ -2287,7 +2702,11 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       for (const column of columns) {
         if (column.kind === "before") continue;
         column.digest = column.kind === "end" ? view.incumbent : column.round.incumbent;
-        const value = level(column.digest);
+        let value = level(column.digest);
+        if (!isNum(value) && liveInfo && column.kind === "round" && column.round.generation === 0 && isNum(liveInfo.provisionalIncumbent)) {
+          value = liveInfo.provisionalIncumbent;
+          column.liveLevel = true;
+        }
         column.level = isNum(value) ? value : carried;
         if (isNum(column.level)) carried = column.level;
       }
@@ -2296,7 +2715,36 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const byCandidate = new Map(comparisons(view).map((item) => [item.candidate, item]));
       for (const column of columns) {
         if (column.kind !== "round" || !isNum(column.level)) continue;
-        column.points = (column.round.candidates || []).filter((candidate) => byCandidate.has(candidate)).map((candidate) => byCandidate.get(candidate));
+        const settled = (column.round.candidates || []).filter((candidate) => byCandidate.has(candidate)).map((candidate) => byCandidate.get(candidate));
+        if (settled.length) {
+          column.points = settled;
+        } else {
+          const relayPts = relayStagePoints(column.round, column.level);
+          const seenKeys = new Set(relayPts.flatMap((pt) => [pt.candidate.name, pt.candidate.digest].filter(Boolean)));
+          const inFinalGate = Boolean(column.round.plan);
+          const livePts = (!column.round.finished && liveInfo && liveInfo.generation === column.round.generation && liveInfo.candidates.size)
+            ? [...liveInfo.candidates.values()]
+              .filter((item) => item && !item.candidate.carried_leader
+                && (inFinalGate || (!seenKeys.has(item.candidate.name) && !seenKeys.has(item.candidate.digest)))
+                && (isNum(item.delta) || isNum(item.after)))
+              .map((item) => {
+                const delta = isNum(item.delta) ? item.delta : (item.after - column.level);
+                const interval = item.interval || [delta, delta];
+                return {
+                  round: column.round,
+                  candidate: item.candidate,
+                  decision: { delta, interval, reason: "in_progress" },
+                  side: item.side,
+                  before: isNum(item.before) ? item.before : column.level,
+                  after: item.after,
+                  provisional: true,
+                  finalGate: inFinalGate,
+                  live: item,
+                };
+              })
+            : [];
+          column.points = [...relayPts, ...livePts];
+        }
       }
       let reference = null;
       const names = new Set(tasks.flatMap((task) => Object.keys(view.task_references?.[task] || {})));
@@ -2368,13 +2816,15 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         if (column.kind === "before" || !isNum(column.level)) return;
         const alias = versionAlias(view, column.digest);
         const changed = !previous || previous.digest !== column.digest;
-        parts.push(h("line", { key: `s${index}`, className: "trunk", x1: column.x0, x2: column.x1, y1: y(column.level), y2: y(column.level),
+        parts.push(h("line", { key: `s${index}`, className: "trunk", "data-live": column.liveLevel ? "true" : undefined,
+          x1: column.x0, x2: column.x1, y1: y(column.level), y2: y(column.level),
           onClick: column.kind === "round" ? () => onPick({ generation: column.round.generation }) : undefined },
         h("title", null, `${column.kind === "end" ? (view.status === "finished" ? "最终版本" : "现在在任的版本") : `第 ${column.round.generation} 代的在任版本`}：`
-          + `${alias === "起点" ? `起点（${seedOrigin(view)}）` : alias} ${short(column.digest)}\n成绩 ${signed(column.level, 3)}：它作为在任版本的全部回合在各训练任务上的平均`)));
+          + `${alias === "起点" ? `起点（${seedOrigin(view)}）` : alias} ${short(column.digest)}\n成绩 ${signed(column.level, 3)}`
+          + `${column.liveLevel ? `（进行中暂估，已完成 ${liveInfo.incTasksDone}/${liveInfo.totalTasks} 个任务）` : "：它作为在任版本的全部回合在各训练任务上的平均"}`)));
         if (changed && column.kind === "round") { // after an adoption only the name: the column's candidates sit beside it
           parts.push(h("text", { key: `sl${index}`, x: column.x0 + 4, y: y(column.level) - 7, className: "strong" },
-            column.round.generation ? alias : `${alias} ${signed(column.level, 3)}`));
+            column.round.generation ? alias : `${alias} ${signed(column.level, 3)}${column.liveLevel ? "（暂估）" : ""}`));
         }
         if (previous && previous.digest !== column.digest) {
           const chosen = (previous.points || []).find((point) => point.candidate.digest === column.digest);
@@ -2389,22 +2839,41 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         text: `${view.status === "finished" ? "最终" : "现在"}：${end.digest === view.seed?.digest ? "仍是起点" : versionAlias(view, end.digest)} ${signed(end.level, 3)}` });
       // candidates: a dot at incumbent + gain, the interval of the gain around the incumbent's line
       columns.forEach((column, index) => {
+        let prevRelayLeader = null;
         (column.points || []).forEach((point) => {
-          const { candidate, decision, side, before: was, after: now } = point;
+          const { candidate, decision, side, before: was, after: now, provisional, live } = point;
           const top = y(column.level + decision.interval[1]);
           const bottom = y(column.level + decision.interval[0]);
           const name = `g${column.round.generation}${candidate.name}`;
-          parts.push(h("g", { key: `c${index}-${candidate.name}`, className: "cand", "data-side": side, "data-adopted": String(candidate.status === "adopted"),
+          const missingVeto = !provisional && String(decision.reason || "").startsWith("missing_tasks:");
+          const projected = column.level + decision.delta;
+          const labelText = provisional
+            ? `${name} ${point.relayStage ? "快筛" : point.finalGate ? "终审暂估" : "暂估"} ${signed(projected, 3)} (${signed(decision.delta, 3)})`
+            : missingVeto ? `${name}（缺项未采纳）` : name;
+          if (provisional) {
+            const chain = prevRelayLeader && (!point.relayStage || point.relayStage > prevRelayLeader.relayStage);
+            const fromX = chain ? prevRelayLeader.x : column.x0;
+            const fromY = chain ? prevRelayLeader.y : y(column.level);
+            parts.push(h("path", { key: `ll${index}-${candidate.name}`, className: "live-link", "data-side": side,
+              d: `M${fromX},${fromY} L${point.x},${point.y}` }));
+          }
+          if (point.relayAdvanced) prevRelayLeader = point;
+          parts.push(h("g", { key: `c${index}-${candidate.name}`, className: "cand", "data-side": side,
+            "data-adopted": String(candidate.status === "adopted"), "data-live": (provisional || missingVeto) ? "true" : undefined,
             onClick: () => onPick({ generation: column.round.generation, name: candidate.name }) },
-          h("title", null, `${name} · ${(CAND_STATUS[candidate.status] || [candidate.status])[0]}\n成绩 ${signed(now, 3)}，这一代的在任版本 ${signed(was, 3)}`
-            + `\n差 ${signed(decision.delta, 4)}，误差范围 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]：${CREDIBLE_TEXT[side]}`
-            + `\n${reasonText(catalog, decision.reason)}${candidate.summary ? `\n${candidate.summary}` : ""}`),
+          h("title", null, provisional
+            ? `${name} · 进行中（暂估，最终结论待本代全部回合结束）\n暂估成绩 ${signed(now, 3)}，在任对照 ${signed(was, 3)}`
+              + `\n暂估差 ${signed(decision.delta, 4)}（已配对 ${live.paired}/${live.totalTasks} 个任务，其中 ${live.better} 个更好；已完成 ${live.candScored} 个候选回合）`
+              + `${candidate.summary ? `\n${candidate.summary}` : ""}`
+            : `${name} · ${(CAND_STATUS[candidate.status] || [candidate.status])[0]}\n成绩 ${signed(now, 3)}，这一代的在任版本 ${signed(was, 3)}`
+              + `\n差 ${signed(decision.delta, 4)}，误差范围 [${signed(decision.interval[0], 3)}, ${signed(decision.interval[1], 3)}]：${CREDIBLE_TEXT[side]}`
+              + `\n${reasonText(catalog, decision.reason)}${candidate.summary ? `\n${candidate.summary}` : ""}`),
           h("line", { x1: point.x, x2: point.x, y1: top, y2: bottom }),
           h("line", { className: "cap", x1: point.x - 4, x2: point.x + 4, y1: top, y2: top }),
           h("line", { className: "cap", x1: point.x - 4, x2: point.x + 4, y1: bottom, y2: bottom }),
-          h("circle", { cx: point.x, cy: point.y, r: candidate.status === "adopted" ? 6 : 4.5 }),
+          h("circle", { cx: point.x, cy: point.y, r: candidate.status === "adopted" ? 6 : provisional ? 5.5 : 4.5 }),
           // the name above the bar, or below it when the bar's top would sit on the incumbent's line
-          h("text", { x: point.x, y: Math.abs(top - y(column.level)) < 14 ? bottom + 14 : top - 6, textAnchor: "middle" }, name)));
+          h("text", { x: point.x, y: Math.abs(top - y(column.level)) < 14 ? bottom + 14 : top - 6, textAnchor: "middle" }, labelText)));
         });
       });
       // the right margin: the final score and the reference, kept apart
@@ -2427,12 +2896,75 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         style: { minWidth: `${Math.round(width * 0.8)}px` } }, parts);
     }
 
-    function ScoreCard({ view, catalog, onPick }) {
-      const chart = h(ScoreChart, { view, catalog, onPick });
+    function LiveIntraGenPanel({ view, catalog, go, liveInfo }) {
+      if (!liveInfo) return null;
+      const relayStages = liveInfo.round?.relay_stages || [];
+      if (!liveInfo.scored.length && !relayStages.length) {
+        return h("div", { className: "eg-live-scores" },
+          h("div", { className: "eg-live-row" },
+            h(Tag, { tone: "info" }, `第 ${liveInfo.generation} 代 · 正在准备`),
+            h("span", null, phaseOf(view)),
+            liveInfo.generation === 1 ? h("span", { className: "eg-faint" },
+              "（第 0 代仅测定起点基线不改版本；本代候选回合完结后，圆点与实时曲线会立即显示在上方图中）") : null));
+      }
+      const candList = [...liveInfo.candidates.values()];
+      return h("div", { className: "eg-live-scores" },
+        relayStages.length ? h("div", { style: { marginBottom: liveInfo.scored.length ? "10px" : 0 } },
+          h("div", { className: "eg-label", style: { marginTop: 0 } },
+            `第 ${liveInfo.generation} 代内接力阶段进展（共 ${view.config?.relay_stages || relayStages.length} 段）`),
+          h("div", { className: "eg-cell-chips", style: { marginTop: "6px" } },
+            relayStages.map((st) => {
+              const lead = st.leader;
+              const openStage = st.evolver?.trajectory?.dir ? () => go({
+                page: "evolver",
+                id: `${view.run_id}|${liveInfo.generation}|${st.stage}`,
+                back: { page: "evolution", id: view.run_id, focus: { generation: liveInfo.generation } },
+              }) : null;
+              return h(openStage ? "button" : "span", {
+                key: st.stage, type: openStage ? "button" : undefined, className: "eg-chip",
+                onClick: openStage || undefined,
+                title: openStage ? `点开查看第 ${liveInfo.generation} 代接力阶段 ${st.stage} 评审会话` : undefined,
+              }, `阶段 ${st.stage}：`,
+              st.finished
+                ? (lead?.advanced
+                  ? h("b", { className: "eg-good" }, `${lead.label} ${signed(lead.mean_delta, 3)} (${lead.better}/${lead.paired})`)
+                  : h("span", { className: "eg-faint" }, "保留原起点"))
+                : h("span", { className: "eg-faint" }, st.plan_id ? "小批快筛中…" : "评审中…"));
+            }))) : null,
+        liveInfo.scored.length ? h(Fragment, null,
+          h("div", { className: "eg-label", style: { marginTop: 0 } },
+            `第 ${liveInfo.generation} 代内实时变化（已完结 ${liveInfo.scored.length} 个回合，随进度自动更新）`),
+          candList.length ? candList.map((item) => h("div", { key: item.candidate.name, style: { marginTop: "6px" } },
+            h("div", { className: "eg-live-row" },
+              h(Tag, { tone: item.side === "above" ? "success" : item.side === "below" ? "danger" : "info" }, `候选 ${item.candidate.name} · 暂估`),
+              h("span", null, "均值 ", h("b", { className: toneClass(item.after, 3) }, signed(item.after, 3)),
+                isNum(item.before) ? `（在任 ${signed(item.before, 3)}）` : ""),
+              isNum(item.delta) ? h("span", null, "配对差 ", h("b", { className: toneClass(item.delta, 3) }, signed(item.delta, 4)),
+                `（${item.paired}/${item.totalTasks} 任务中 ${item.better} 个更好）`) : null),
+            h("div", { className: "eg-cell-chips", style: { marginTop: "6px" } },
+              item.taskPoints.map((tp) => h("span", {
+                key: tp.task, className: "eg-chip",
+                style: { background: isNum(tp.delta) ? mix(tp.delta, 0.03) : undefined },
+                title: `${taskShort(catalog, tp.task)}：候选 ${signed(tp.candidate, 4)}`
+                  + `${isNum(tp.incumbent) ? ` vs 在任 ${signed(tp.incumbent, 4)}（差 ${signed(tp.delta, 4)}${tp.fromPrior ? "，在任暂用上一代基线" : ""}）` : ""}`,
+              }, `${taskName(catalog, tp.task)} ${signed(tp.candidate, 3)}`,
+              isNum(tp.delta) ? h("span", { className: toneClass(tp.delta, 3) }, ` (${signed(tp.delta, 3)})`) : null)))))
+            : h("div", { className: "eg-live-row" },
+              h(Tag, { tone: "info" }, `第 ${liveInfo.generation} 代${relayStages.length ? "接力" : "基线"} · 暂估`),
+              h("span", null, isNum(liveInfo.provisionalIncumbent)
+                ? `已完成 ${liveInfo.incTasksDone}/${liveInfo.totalTasks} 个任务，暂估均分 ` : `已完结 ${liveInfo.scored.length} 个回合`,
+              isNum(liveInfo.provisionalIncumbent)
+                ? h("b", { className: toneClass(liveInfo.provisionalIncumbent, 3) }, signed(liveInfo.provisionalIncumbent, 3)) : null))) : null);
+    }
+
+    function ScoreCard({ view, catalog, onPick, go, liveInfo }) {
       const level = versionLevels(view);
-      if (!lastAttempts(view).some((round) => isNum(level(round.incumbent)))) return null; // nothing scored yet
+      const hasSettled = lastAttempts(view).some((round) => isNum(level(round.incumbent)));
+      const hasLive = Boolean(liveInfo);
+      if (!hasSettled && !hasLive) return null; // nothing scored yet
+      const chart = h(ScoreChart, { view, catalog, onPick, liveInfo });
       const icon = (body) => h("svg", { width: 28, height: 14, "aria-hidden": "true" }, body);
-      return h(Card, { title: "成绩怎样变化", hint: "横线是在任版本（当前在用的版本）的成绩：平着表示没有换版本，往上跳一次就是换上了更好的版本。每个圆点是一个候选，竖线是它和在任版本之差的误差范围。点一个候选，看那一代的过程。" },
+      return h(Card, { title: "成绩怎样变化", hint: "横线是在任版本（当前在用的版本）的成绩：平着表示没有换版本，往上跳一次就是换上了更好的版本。每个圆点是一个候选，竖线是它和在任版本之差的误差范围；进行中的一代用虚线标出实时暂估进展。点一个候选，看那一代的过程。" },
         h("div", { className: "eg-chart" }, chart),
         h("div", { className: "eg-legend eg-chart" },
           h("span", null, icon(h("line", { className: "trunk", x1: 1, x2: 27, y1: 7, y2: 7 })), "在任版本的成绩"),
@@ -2443,8 +2975,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h("span", null, icon(h("g", { className: "cand", "data-side": "below" }, h("line", { x1: 14, x2: 14, y1: 1, y2: 13 }), h("circle", { cx: 14, cy: 7, r: 4 }))),
             "整段在下方：可信地更差"),
           h("span", null, icon(h("line", { className: "adopt", x1: 1, x2: 27, y1: 12, y2: 2 })), "采纳"),
+          hasLive ? h("span", null, icon(h("line", { className: "live-link", x1: 1, x2: 27, y1: 12, y2: 2 })), "当前代进行中（暂估，随已完成回合更新）") : null,
           (view.ancestry || []).length ? h("span", null, icon(h("line", { className: "before", x1: 1, x2: 27, y1: 12, y2: 2 })), "此前的运行（起点是怎么来的）") : null,
-          h("span", null, icon(h("line", { className: "ref", x1: 1, x2: 27, y1: 7, y2: 7 })), "对照：宿主内置的预报方法（不参与进化）")));
+          h("span", null, icon(h("line", { className: "ref", x1: 1, x2: 27, y1: 7, y2: 7 })), "对照：宿主内置的预报方法（不参与进化）")),
+        h(LiveIntraGenPanel, { view, catalog, go, liveInfo }));
     }
 
     function HarnessCard({ view }) {
@@ -2488,6 +3022,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           ["模型服务故障时", `${!isNum(config.outage_minutes) ? "–" : config.outage_minutes > 0 ? `最多等 ${config.outage_minutes} 分钟` : "不等"}`
             + `${config.auto_resume ? "；停下后后端自动继续" : ""}`],
           ["采纳后自动复核", config.check_adoptions ? "每次采纳后在训练任务的封存时期 validation 上复核" : "不复核（可以在「概览」的独立验证里补做）"],
+          ["快轨 / 早停剪枝", `${config.template_fast_track ? "开启纯模板确定性快轨" : "常规双层回合"}；${config.early_prune ? "第 0 重复后劣势剪枝" : "跑满全部重复"}`],
+          ["代内小批接力", Number(config.relay_stages || 1) > 1
+            ? `${config.relay_stages} 阶段接力（每阶段 ${config.relay_candidates || `自动 ${Math.min(4, Math.max(2, Number(config.candidates || 1)))}`} 候选 × ${config.relay_batch || "自动分层"} 任务） → 终审 ${config.candidates} 候选`
+            : "关闭（单段全量）"],
           ["采纳门槛", gateText(view.gates)],
           ["训练任务", (view.suite?.train || []).map((task) => taskShort(catalog, task)).join("、")],
           ["任务组", h(Mono, null, config.suite || "")],
@@ -2581,8 +3119,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const r = Number(values.repeats) || 0;
       const c = Math.max(1, Number(values.concurrency) || 1);
       const m = Number(values.minutes) || 0;
-      const episodes = n * r * (1 + g * (k + 1));
-      const hours = (Math.ceil((n * r) / c) * m + g * ((Number(values.evolver_minutes) || 0) + Math.ceil((n * r * (k + 1)) / c) * m)) / 60;
+      const rs = Math.max(1, Number(values.relay_stages) || 1);
+      const rc = rs > 1 ? (Number(values.relay_candidates) > 0 ? Number(values.relay_candidates) : Math.min(4, Math.max(2, k || 1))) : 0;
+      const rb = rs > 1 ? (Number(values.relay_batch) > 0 ? Math.min(n, Number(values.relay_batch)) : (n ? Math.max(1, Math.ceil(n / rs)) : 0)) : 0;
+      const relayEpsPerGen = rs > 1 ? rs * rb * rc : 0;
+      const episodes = n * r + g * (n * r * (k + 1) + relayEpsPerGen);
+      const evolverSessions = g * rs;
+      const relayHoursPerGen = rs > 1 ? (rs * Math.ceil((rb * rc) / c) * m) / 60 : 0;
+      const hours = (Math.ceil((n * r) / c) * m + g * ((Number(values.evolver_minutes) || 0) + Math.ceil((n * r * (k + 1)) / c) * m)) / 60 + g * relayHoursPerGen;
       const budget = episodes * (Number(values.tokens) || 0) + g * (Number(values.evolver_tokens) || 0);
       const field = (key, label, attrs = {}, note = "") => h("label", { className: "eg-field", key },
         h("span", null, label), h("input", { className: "eg-input", value: values[key] ?? "", onChange: set(key), ...attrs }),
@@ -2615,7 +3159,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const checked = (key) => values[key] === true || values[key] === "true";
       const check = (key, label) => h("label", { className: "eg-check", key },
         h("input", { type: "checkbox", checked: checked(key), onChange: (event) => setValues((old) => ({ ...old, [key]: event.target.checked })) }), label);
-      const estimate = `最多 ${episodes} 个回合和 ${g} 次评审会话，约 ${hours.toFixed(1)} 小时，计费 token 上限约 ${(budget / 1e6).toFixed(0)}M。`;
+      const estimate = `最多 ${episodes} 个回合${rs > 1 ? `（含每代 ${rs} 阶段接力快筛 ${relayEpsPerGen} 回合）` : ""}和 ${evolverSessions} 次评审会话，约 ${hours.toFixed(1)} 小时，计费 token 上限约 ${(budget / 1e6).toFixed(0)}M。`;
       return h("form", { onSubmit: submit },
         h("button", { type: "button", className: "eg-back", onClick: () => go({ page: null }) }, "← 全部进化运行"),
         h(PageHead, { title: "新建 Harness 进化", text: "第 0 代先让起点 Harness 在每个训练任务上跑一遍，作为基线。之后每一代，评审智能体读完成绩和过程，改出几个候选；候选和在任版本在每个训练任务上同时跑，只有可信地更好才换上。运行在后台进行，关闭页面不影响。" }),
@@ -2632,7 +3176,17 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         h(Card, { title: "2. 进化多久、多快" },
           h("div", { className: "eg-form" },
             field("generations", "代数", { type: "number", min: 1, max: 30, step: 1 }, "代数越多，找到改进的机会越多"),
-            field("candidates", "每代候选数", { type: "number", min: 1, max: 6, step: 1 }, "多个候选时门槛按 Bonferroni 加严")),
+            field("candidates", "每代终审候选数", { type: "number", min: 1, max: 6, step: 1 }, "进入全量门控的候选数；多个候选时门槛按 Bonferroni 加严"),
+            h("label", { className: "eg-field" }, h("span", null, "代内小批接力进化"),
+              h("select", { className: "eg-input", value: String(values.relay_stages ?? 1), onChange: set("relay_stages") },
+                h("option", { value: "1" }, "关闭（单段全量）"),
+                h("option", { value: "2" }, "2 阶段接力（推荐：互补子集快筛 → 优胜接力 → 全量终审）"),
+                h("option", { value: "3" }, "3 阶段接力（更密迭代：3 轮小批接力 → 全量终审）")),
+              h("small", null, "在单代内部并行多候选快筛并基于优胜版本接力迭代，最后仅选最优者进入全量门控，不增加 Bonferroni 惩罚")),
+            rs > 1 ? field("relay_candidates", "每接力阶段候选数（0 = 自动）", { type: "number", min: 0, max: 6, step: 1 },
+              `当前自动为 ${rc} 个并行候选`) : null,
+            rs > 1 ? field("relay_batch", "每接力阶段抽样任务数（0 = 自动）", { type: "number", min: 0, max: Math.max(1, n), step: 1 },
+              `当前自动分层均分为每阶段 ${rb} 个任务`) : null),
           h("div", { className: "eg-field", style: { marginTop: "14px" } }, h("span", null, "电脑负载：同时运行几个回合"),
             h("div", { className: "eg-actions" }, LOADS.map(([count, name, note]) => h(Button, { key: count, variant: c === count ? "primary" : "outline",
               onClick: () => setValues((old) => ({ ...old, concurrency: String(count) })) }, `${name}（${count} 个）${note ? ` · ${note}` : ""}`))),
@@ -2642,9 +3196,23 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           h("div", { className: "eg-form", style: { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" } },
             h(ModelSelect, { label: "研究智能体（解任务）", value: values.model, onChange: set("model"), routes,
               empty: `由 Harness 决定（起点版本用 ${catalog?.harness_model || "DeepSeek"}）`,
-              note: "固定后，每个回合都用这个模型；不固定时由各版本 Harness 的 [agent] 决定（只能是 DeepSeek 模型）。" }),
+              note: "固定后，每个回合都用这个模型；不固定时由各版本 Harness 的 [agent] 决定（支持 <提供方>/<模型> 或 DeepSeek 模型 id）。" }),
             h(ModelSelect, { label: "评审智能体（改 Harness）", value: values.evolver_model, onChange: set("evolver_model"), routes,
               note: "每一代读证据、写候选的评审会话用这个模型。" })),
+          (() => {
+            const pair = pickAsymmetricModels(routes);
+            if (!pair) return null;
+            const active = modelRef(values.model) === pair.fast && modelRef(values.evolver_model) === pair.strong;
+            return h("div", { className: "eg-actions", style: { marginTop: "10px", alignItems: "center", flexWrap: "wrap" } },
+              h(Button, {
+                variant: active ? "primary" : "outline",
+                onClick: () => {
+                  setValues((old) => ({ ...old, model: pair.fast, evolver_model: pair.strong }));
+                  toast(`已设为非对称搭配：解题 ${pair.fast} + 评审 ${pair.strong}`, "success");
+                },
+              }, `非对称推荐：快模型解题 (${pair.fastLabel}) + 强推理评审 (${pair.strongLabel})`),
+              h("small", { className: "eg-faint" }, "HarnessOpt-Bench 范式：内循环用高吞吐快模型多轮试错，外循环用强推理模型做跨任务病灶归纳与 Harness 改写。"));
+          })(),
           h("div", { style: { marginTop: "12px" } },
             h(ModelBenchmarkBox, { routes, onApply: (picked) => setValues((old) => ({ ...old, model: picked, evolver_model: picked })) })),
           catalog?.models?.error ? h(Alert, { tone: "warning" }, `读取 DSH 的模型设置失败：${catalog.models.error}`) : null),
@@ -2671,7 +3239,9 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             field("outage_minutes", "模型服务故障时最多等几分钟", { type: "number", min: 0, step: 10 }, "测试请求也没有回复时不开始新回合、每分钟试一次；等满还没恢复，运行停下；0 = 不等")),
           h("div", { className: "eg-checks" },
             check("auto_resume", "自动继续：服务恢复后，或后端（DSH）重启后，后端自己接着运行"),
-            check("check_adoptions", "每次采纳后，在训练任务更晚的封存时期上复核一次（只重评程序，评审看不到结果）")))),
+            check("check_adoptions", "每次采纳后，在训练任务更晚的封存时期上复核一次（只重评程序，评审看不到结果）"),
+            check("template_fast_track", "纯模板确定性快轨：当候选仅改动 template/ 时，直接在隐藏期确定性比较模板，免跑昂贵的智能体回合"),
+            check("early_prune", "第 0 重复后早停剪枝：每任务多重复时，若候选在首轮过半任务上显著劣于在任版本则跳过后续重复")))),
         problem ? h(Alert, { tone: "danger" }, problem) : null,
         h("div", { className: "eg-actions", style: { marginTop: "16px" } },
           h(Button, { variant: "primary", disabled: busy, onClick: () => submit() }, busy ? "正在启动…" : "开始进化"),
@@ -2683,23 +3253,37 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     /* ---- episodes ------------------------------------------------------------------------------------------ */
 
+    const EPISODE_PAGE = 100;
     function EpisodeList({ go, catalog }) {
-      const { data, error } = useResource(Api.episodes, { interval: 8000 });
+      const [limit, setLimit] = useState(EPISODE_PAGE);
+      const [statusFilter, setStatusFilter] = useState("");
+      const { data, error } = useResource(Api.episodesPage(limit, 0, statusFilter), { interval: 8000 });
       const items = data || [];
+      const hasMore = items.length >= limit;
       return h(Fragment, null,
-        h(PageHead, { title: "回合", text: "一个回合是 DSH 智能体在隔离工作区里独立解一个任务的完整过程：读数据、查资料、写代码、做实验、提交预测程序，再由宿主在隐藏时期上逐时刻打分。完整轨迹都会保存。" }),
+        h(PageHead, {
+          title: "回合",
+          text: "一个回合是 DSH 智能体在隔离工作区里独立解一个任务的完整过程：读数据、查资料、写代码、做实验、提交预测程序，再由宿主在隐藏时期上逐时刻打分。完整轨迹都会保存。",
+          actions: h("div", { className: "eg-actions" },
+            [["", "全部"], ["running", "运行中"], ["finished", "已完成"], ["infra_failed", "服务故障"]].map(([val, label]) =>
+              h(Button, { key: val || "all", variant: statusFilter === val ? "primary" : "outline",
+                onClick: () => { setStatusFilter(val); setLimit(EPISODE_PAGE); } }, label))),
+        }),
         error ? h(Alert, { tone: "danger" }, `读取失败：${error.message}`) : null,
         data && !items.length ? h(Empty, { title: "还没有回合", text: "进化运行和验证会产生回合，也可以用 ecogym episode run 单独运行。" }) : null,
-        items.length ? h(Card, null, h(Table, { head: ["任务", "来源", "状态", ["隐藏期总分", "num"], ["本地最好", "num"], "模型", ["Token", "num"], "开始"] },
-          items.map((item) => h("tr", { key: item.episode, className: "eg-click", onClick: () => go({ page: "episode", id: item.episode }) },
-            h("td", null, h(TaskLabel, { catalog, id: item.task_id })),
-            h("td", null, item.context?.role ? `${roleText(item.context)}${item.context.generation !== undefined ? ` · 第 ${item.context.generation} 代` : ""}` : "单独运行"),
-            h("td", null, h(StatusTag, { map: EP_STATUS, keyName: epKey(item) })),
-            h("td", { className: `num ${toneClass(item.score, 4)}` }, signed(item.score)),
-            h("td", { className: "num" }, signed(item.best_local)),
-            h("td", null, item.model || "–"),
-            h("td", { className: "num" }, tokens(item.tokens)),
-            h("td", null, when(item.started_at)))))) : null);
+        items.length ? h(Card, null,
+          h(Table, { head: ["任务", "来源", "状态", ["隐藏期总分", "num"], ["本地最好", "num"], "模型", ["Token", "num"], "开始"] },
+            items.map((item) => h("tr", { key: item.episode, className: "eg-click", onClick: () => go({ page: "episode", id: item.episode }) },
+              h("td", null, h(TaskLabel, { catalog, id: item.task_id })),
+              h("td", null, item.context?.role ? `${roleText(item.context)}${item.context.generation !== undefined ? ` · 第 ${item.context.generation} 代` : ""}` : "单独运行"),
+              h("td", null, h(StatusTag, { map: EP_STATUS, keyName: epKey(item) })),
+              h("td", { className: `num ${toneClass(item.score, 4)}` }, signed(item.score)),
+              h("td", { className: "num" }, signed(item.best_local)),
+              h("td", null, item.model || "–"),
+              h("td", { className: "num" }, tokens(item.tokens)),
+              h("td", null, when(item.started_at))))),
+          hasMore ? h("div", { className: "eg-actions", style: { marginTop: "12px", justifyContent: "center" } },
+            h(Button, { onClick: () => setLimit((n) => n + EPISODE_PAGE) }, `加载更多（当前已显示 ${items.length} 条）`)) : null) : null);
     }
 
     function CellMatrix({ task, cells }) {
@@ -2746,7 +3330,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         h("button", { className: "eg-back", onClick: () => go(back || { page: null }) },
           back?.focus ? `← 返回运行的第 ${back.focus.generation} 代` : "← 返回"),
         h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" },
-          h("div", { className: "eg-title-line" }, h("h1", null, record.label || record.episode), h(StatusTag, { map: EP_STATUS, keyName: epKey(record) })),
+          h("div", { className: "eg-title-line" }, h("h1", null, record.label || record.episode),
+            h(StatusTag, { map: EP_STATUS, keyName: epKey(record) }),
+            finished.rescue_triggered ? h(Tag, { tone: "warning" }, "触发预算救援") : null,
+            finished.hook_fired ? h(Tag, { tone: "neutral" }, "触发审计钩子") : null),
           h("div", { className: "eg-meta" },
             h("span", null, h("b", null, "任务"), taskShort(catalog, record.task_id)),
             h("span", null, h("b", null, "Harness"), h(Mono, null, short(record.harness?.digest)), ` ${record.harness?.name || ""}`),
@@ -2994,10 +3581,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     }
 
     function EvolverPage({ id, go, catalog, back }) {
-      const text = String(id || "");
-      const run = text.slice(0, text.lastIndexOf("|"));
-      const generation = text.slice(text.lastIndexOf("|") + 1);
-      const { data, error } = useResource(Api.evolverSession(run, generation, true));
+      const [run = "", generation = "", stage = ""] = String(id || "").split("|");
+      const { data, error } = useResource(Api.evolverSession(run, generation, true, stage || null));
       const [flash, setFlash] = useState(null);
       useEffect(() => {
         if (!flash) return undefined;
@@ -3016,12 +3601,14 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
       const trouble = sessionTrouble(session);
       const calls = session.activity?.tool_calls || {};
       const used = Object.values(calls).reduce((sum, count) => sum + count, 0);
+      const stageLabel = stage ? ` · 接力阶段 ${stage}${data.total_stages ? `/${data.total_stages}` : ""}` : "";
       return h(Fragment, null, returning,
         h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" },
-          h("div", { className: "eg-title-line" }, h("h1", null, `第 ${data.generation} 代的评审会话`), h(StatusTag, { map: SESSION_STATUS, keyName: session.status })),
+          h("div", { className: "eg-title-line" }, h("h1", null, `第 ${data.generation} 代${stageLabel}的评审会话`), h(StatusTag, { map: SESSION_STATUS, keyName: session.status })),
           h("p", null, "评审智能体在自己的工作区里读证据、在候选目录里改 Harness，用宿主的工具检查。下面依次是它看过的材料、关键动作、产出的候选、最后的总结和完整的每一步。"),
           h("div", { className: "eg-meta" },
             h("span", null, h("b", null, "运行"), h(Link, { onClick: () => go(toRun) }, data.run_id)),
+            stage ? h("span", null, h("b", null, "接力阶段"), `第 ${stage}${data.total_stages ? ` / ${data.total_stages}` : ""} 段`) : null,
             h("span", null, h("b", null, "这一代的在任"), h(Mono, null, short(data.incumbent))),
             h("span", null, h("b", null, "开始"), when(data.started_at, true))))),
         trouble ? h(Alert, { tone: "danger" }, h("b", null, trouble[0]), trouble[1]) : null,

@@ -5,7 +5,7 @@
 ![ecogym 0.5.0](https://img.shields.io/badge/ecogym-0.5.0-2ea44f)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![macOS](https://img.shields.io/badge/agents-macOS-555555)
-![DeepSeek Harness 0.1.5-rc.2](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5--rc.2-4d6bfe)
+![DeepSeek Harness 0.2.2-rc.5](https://img.shields.io/badge/DeepSeek%20Harness-0.2.2--rc.5-4d6bfe)
 
 ecogym 是一个训练场。给它一组生态预测任务，例如“根据温室过去的气候和控制记录，预报未来 1、6、24 小时的室内气温、湿度和 CO₂”，它会这样工作：
 
@@ -67,7 +67,7 @@ ecogym 是一个训练场。给它一组生态预测任务，例如“根据温�
 |---|---|
 | macOS | 智能体和被评分的程序在 `sandbox-exec` 沙箱里运行 |
 | Python 3.11+ | 运行 ecogym 本身 |
-| DeepSeek Harness（`dsh`） | 已在 0.1.5-rc.2 上验证；智能体的会话都是 DSH 的无头会话 |
+| DeepSeek Harness（`dsh`） | 已在 0.2.2-rc.5 上验证；智能体的会话都是 DSH 的无头会话 |
 | 一个模型提供方 | DeepSeek 官方接口（`DEEPSEEK_API_KEY`），或 DSH 设置里任一 `openai-completions` 类型的提供方 |
 | 数据 | Autonomous Greenhouse Challenge 的 [2018 黄瓜](https://doi.org/10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a)和 [2019 番茄](https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7) |
 
@@ -370,7 +370,7 @@ ecogym seal <run> --stage validation                       # 封存评测，每�
 
 ## 已知限制
 
-- 沙箱只实现了 macOS（`sandbox-exec`）；DSH 只在 0.1.5-rc.2 上验证过。服务是单机、单用户的。
+- 沙箱支持 macOS（`sandbox-exec`）与 Linux（`bwrap`）；DSH 已在 0.2.2-rc.5 上验证。服务是单机、单用户的。
 - 目前只有温室一个领域。留出隔间和训练隔间共享天气和日历，主要检验向其他控制策略的迁移；向未来时期的迁移由封存期检验。
 - 在已经不错的版本附近，候选的真实增益常在 +0.005 到 +0.015 之间。4 个训练任务确认不了这么小的增益；8 个训练任务、每个 2 个回合时，几乎每个任务都变好的候选，+0.005 左右的增益也能确认，但一代要跑 48 个回合。
 - 本地检验期只有 9 到 14 天，智能体在好模板上的小改动多半是过拟合本地检验，所以替换模板要求本地高 0.02。

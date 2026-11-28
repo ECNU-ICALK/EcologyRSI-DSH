@@ -57,6 +57,7 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
 REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")  # stored as reasoning_content
 CAPTURE_LIMIT = 16_000_000  # bytes of one response kept for assembly
 RAW_LOG_LIMIT = 200_000  # characters of a response that cannot be assembled
+MAX_REQUEST_BYTES = 64_000_000  # bytes of one incoming request body accepted from a session
 CACHE_WEIGHT = 0.1  # budget weight of a prompt token served from the provider's cache
 DRAIN_SECONDS = 10.0  # how long ``close`` waits for cut-off calls to finish and be recorded
 # TCP connect, proxy tunnel and TLS handshake. A healthy handshake takes a second or two; in evo:27d3aaf8aee2 98 of
@@ -64,6 +65,196 @@ DRAIN_SECONDS = 10.0  # how long ``close`` waits for cut-off calls to finish and
 CONNECT_TIMEOUT = 15.0
 UPSTREAM_TIMEOUT = 75.0  # response headers, and the first byte (TTFB) from the provider, once connected
 STREAM_TIMEOUT = 45.0  # idle silence between chunks once the upstream response has started
+CALL_TIMEOUT = 180.0  # hard total wall-time cap for a single LLM call (prevents slow trickle loops burning an episode)
+IDLE_CONNECTION_TTL = 55.0  # reuse keep-alive sockets safely below common 60 s upstream idle timeouts
+MAX_IDLE_PER_UPSTREAM = 8
+_STALE_CONN_ERRORS = (http.client.RemoteDisconnected, http.client.BadStatusLine, BrokenPipeError,
+                      ConnectionResetError, ConnectionAbortedError, ssl.SSLEOFError)
+_SSL_LOCK = threading.Lock()
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+class _StreamAbortedError(OSError):
+    """Raised when the gateway cuts a degenerate or runaway upstream stream early."""
+
+
+class _RepetitionBreaker:
+    """Detects degenerate repeating token loops (e.g. ``carecarecare...``) on SSE streams in O(1) memory."""
+
+    def __init__(self, *, max_period: int = 24, min_chars: int = 120, min_repeats: int = 12) -> None:
+        self.max_period = max_period
+        self.min_chars = min_chars
+        self.min_repeats = min_repeats
+        self._line_buf = ""
+        self._tail = ""
+        self._since_check = 0
+
+    def feed(self, chunk: bytes) -> str | None:
+        """Feed one raw SSE byte chunk; return a diagnostic message if a repeating loop is detected."""
+
+        self._line_buf += chunk.decode("utf-8", "replace")
+        if "\n" not in self._line_buf:
+            return None
+        lines = self._line_buf.split("\n")
+        self._line_buf = lines.pop()
+        added = []
+        for line in lines:
+            text = line.strip()
+            if not text.startswith("data:"):
+                continue
+            payload = text[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            for choice in event.get("choices") or ():
+                delta = (choice or {}).get("delta") or {}
+                for key in ("content", *REASONING_FIELDS):
+                    piece = delta.get(key)
+                    if isinstance(piece, str) and piece:
+                        added.append(piece)
+        if not added:
+            return None
+        joined = "".join(added)
+        self._tail = (self._tail + joined)[-512:]
+        self._since_check += len(joined)
+        if self._since_check < 48 or len(self._tail) < self.min_chars:
+            return None
+        self._since_check = 0
+        return self._detect(self._tail)
+
+    def _detect(self, tail: str) -> str | None:
+        n = len(tail)
+        for period in range(1, min(self.max_period, n // self.min_repeats) + 1):
+            unit = tail[-period:]
+            if not any(ch.isalnum() for ch in unit):
+                continue  # ignore whitespace / markdown rule / indentation runs
+            need = max(self.min_repeats, (self.min_chars + period - 1) // period)
+            span = period * need
+            if span > n:
+                continue
+            window = tail[-span:]
+            if window == unit * need:
+                return f"degenerate repetition loop ({unit!r} repeated {need}+ times)"
+        return None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Shared default SSL context so every upstream call does not reload system CA certificates."""
+
+    global _SSL_CONTEXT
+    with _SSL_LOCK:
+        if _SSL_CONTEXT is None:
+            _SSL_CONTEXT = ssl.create_default_context()
+        return _SSL_CONTEXT
+
+
+class _BodyTooLargeError(ValueError):
+    """Incoming request body exceeds the gateway's safety cap."""
+
+
+def _read_request_body(rfile: Any, headers: Any, limit: int) -> bytes:
+    """Read an HTTP request body (Content-Length or chunked) within ``limit`` bytes."""
+
+    transfer = (headers.get("Transfer-Encoding") or "").lower()
+    if "chunked" in transfer:
+        out = bytearray()
+        while True:
+            line = rfile.readline(65536)
+            if not line:
+                raise ValueError("unexpected EOF in chunked request body")
+            size_hex = line.split(b";", 1)[0].strip()
+            size = int(size_hex, 16)
+            if size < 0 or len(out) + size > limit:
+                raise _BodyTooLargeError(f"request body exceeds {limit} bytes")
+            if size == 0:
+                while True:
+                    trailer = rfile.readline(65536)
+                    if not trailer or trailer in (b"\r\n", b"\n"):
+                        break
+                return bytes(out)
+            chunk = rfile.read(size)
+            if len(chunk) != size:
+                raise ValueError("truncated chunk in request body")
+            out.extend(chunk)
+            crlf = rfile.readline(65536)
+            if crlf not in (b"\r\n", b"\n"):
+                raise ValueError("malformed chunk terminator")
+    raw_len = headers.get("Content-Length")
+    if raw_len is None or raw_len == "":
+        return b""
+    try:
+        length = int(raw_len)
+    except ValueError:
+        raise ValueError("invalid Content-Length") from None
+    if length < 0:
+        raise ValueError("negative Content-Length")
+    if length > limit:
+        raise _BodyTooLargeError(f"request body exceeds {limit} bytes")
+    return rfile.read(length) if length else b""
+
+
+class _ConnPool:
+    """Thread-safe keep-alive HTTP(S) connection pool keyed by upstream endpoint."""
+
+    def __init__(self, *, max_idle: int = MAX_IDLE_PER_UPSTREAM, ttl: float = IDLE_CONNECTION_TTL) -> None:
+        self._max_idle = max_idle
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._idle: dict[tuple[str, str, int, str], list[tuple[float, http.client.HTTPConnection]]] = {}
+        self._closed = False
+
+    def acquire(
+        self,
+        key: tuple[str, str, int, str],
+        factory: Callable[[], http.client.HTTPConnection],
+    ) -> tuple[http.client.HTTPConnection, bool]:
+        now = time.monotonic()
+        stale: list[http.client.HTTPConnection] = []
+        picked: http.client.HTTPConnection | None = None
+        with self._lock:
+            if not self._closed:
+                bucket = self._idle.get(key)
+                while bucket:
+                    stored_at, conn = bucket.pop()
+                    if now - stored_at <= self._ttl and conn.sock is not None:
+                        picked = conn
+                        break
+                    stale.append(conn)
+        for conn in stale:
+            with contextlib.suppress(Exception):
+                conn.close()
+        if picked is not None:
+            return picked, True
+        return factory(), False
+
+    def release(self, key: tuple[str, str, int, str], conn: http.client.HTTPConnection) -> None:
+        drop = False
+        with self._lock:
+            if self._closed or conn.sock is None:
+                drop = True
+            else:
+                bucket = self._idle.setdefault(key, [])
+                if len(bucket) >= self._max_idle:
+                    drop = True
+                else:
+                    bucket.append((time.monotonic(), conn))
+        if drop:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+    def close_all(self) -> None:
+        with self._lock:
+            self._closed = True
+            conns = [conn for bucket in self._idle.values() for _, conn in bucket]
+            self._idle.clear()
+        for conn in conns:
+            with contextlib.suppress(Exception):
+                conn.close()
 
 
 def _abort(connection: Any) -> None:
@@ -201,7 +392,7 @@ class Gateway:
                  token_budget: int = 3_000_000, deadline: float | None = None, proxy: str | None = None,
                  routes: dict[str, tuple[str, str, dict[str, str]]] | None = None, chat: str | None = None,
                  upstream_timeout: float = UPSTREAM_TIMEOUT, stream_timeout: float = STREAM_TIMEOUT,
-                 connect_timeout: float = CONNECT_TIMEOUT) -> None:
+                 connect_timeout: float = CONNECT_TIMEOUT, call_timeout: float = CALL_TIMEOUT) -> None:
         self.token = token
         self.chat = chat
         self.search_enabled = True
@@ -217,6 +408,7 @@ class Gateway:
         self.upstream_timeout = float(upstream_timeout)
         self.stream_timeout = float(stream_timeout)
         self.connect_timeout = min(float(connect_timeout), self.upstream_timeout)
+        self.call_timeout = float(call_timeout)
         self.tokens = 0  # every token the provider reported
         self.metered = 0  # cost-weighted tokens, what the budget counts
         self.calls = 0
@@ -226,14 +418,19 @@ class Gateway:
         self.last_failure = ""  # status and provider message of the latest failed call, for the session record
         self._outcomes: list[tuple[float, bool]] = []  # (awake start, answered) for chronological stall accounting
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._log_stream: Any = None
         self._server: ThreadingHTTPServer | None = None
         self.on_call: Callable[[dict[str, Any]], None] | None = None
         self._closed = False  # set by close: no new call is taken
         self._sealed = False  # set once close returns: nothing more is written to the log
         self._active: dict[int, Any] = {}  # calls in progress -> their upstream connection (None before it opens)
+        self._pool = _ConnPool()
         self._calls_started = 0
         self.unsettled = 0  # calls still running when close gave up waiting (the session's numbers may miss them)
         self.late = 0  # calls recorded after the session was sealed: counted here only, never logged
+        self.degenerate_aborts = 0  # SSE streams terminated due to degenerate repetition loops
+        self._degenerate_streak = 0  # consecutive calls hitting degenerate loops (2nd+ terminates gracefully)
 
     @property
     def port(self) -> int:
@@ -305,6 +502,7 @@ class Gateway:
 
         with self._lock:
             self._closed = True
+        self._pool.close_all()
         end = time.monotonic() + timeout
         while True:
             with self._lock:
@@ -321,6 +519,12 @@ class Gateway:
         with self._lock:
             self.unsettled = len(self._active)
             self._sealed = True
+        with self._write_lock:
+            if self._log_stream is not None:
+                with contextlib.suppress(OSError):
+                    self._log_stream.flush()
+                    self._log_stream.close()
+                self._log_stream = None
         return self.unsettled
 
     def stop(self) -> None:
@@ -364,6 +568,12 @@ class Gateway:
             return f"the session token budget ({self.token_budget} cost-weighted tokens) is spent"
         return None
 
+    def pool_key(self, upstream: Any) -> tuple[str, str, int, str]:
+        host = upstream.hostname or ""
+        port = upstream.port or (443 if upstream.scheme == "https" else 80)
+        proxy_id = self.proxy.geturl() if self.proxy is not None else ""
+        return (upstream.scheme or "https", host, port, proxy_id)
+
     def connection(self, upstream: Any) -> http.client.HTTPConnection:
         """A connection whose timeout covers connecting only (``connect_timeout``): ``_relay`` connects it, then
         allows ``upstream_timeout`` for the response."""
@@ -372,7 +582,7 @@ class Gateway:
         port = upstream.port or (443 if upstream.scheme == "https" else 80)
         if upstream.scheme == "http":
             return http.client.HTTPConnection(host, port, timeout=self.connect_timeout)
-        context = ssl.create_default_context()
+        context = _ssl_context()
         if self.proxy is not None:
             connection = http.client.HTTPSConnection(self.proxy.hostname or "", self.proxy.port or 80,
                                                      timeout=self.connect_timeout, context=context)
@@ -391,11 +601,19 @@ class Gateway:
             self.calls += 1
             self.tokens += tokens_of(entry.get("usage"))
             self.metered += metered_tokens(entry.get("usage"))
+            if entry.get("degenerate_loop"):
+                self.degenerate_aborts += 1
+                self._degenerate_streak += 1
+            elif entry.get("status") == 200 and "error" not in entry:
+                self._degenerate_streak = 0
             # an empty 200 is no answer: a provider coming back from an outage sent those, and sessions whose
             # only "answers" were empty would otherwise count as having run
             if entry.get("status") == 200 and "error" not in entry and ("reply" in entry or "response" in entry):
                 self.answered += 1
                 self._outcomes.append((began, True))
+            elif entry.get("aborted_by_close"):
+                # Interrupted because the session itself closed/timed out: not a provider outage.
+                self.failed += 1
             else:
                 self.failed += 1
                 self._outcomes.append((began, False))
@@ -405,8 +623,14 @@ class Gateway:
             entry["seq"] = self.calls
             entry["tokens_total"] = self.tokens
             entry["metered_total"] = self.metered
-            with self.log_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # Serialize outside _lock so large payloads do not stall concurrent call accounting.
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        with self._write_lock:
+            if not self._sealed:
+                if self._log_stream is None:
+                    self._log_stream = self.log_path.open("a", encoding="utf-8")
+                self._log_stream.write(line)
+                self._log_stream.flush()
         if self.on_call is not None:
             self.on_call({key: entry.get(key) for key in ("seq", "path", "status", "usage", "seconds", "model")})
 
@@ -437,7 +661,14 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             self._forward("POST")
 
         def _forward(self, method: str) -> None:
-            body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) if method == "POST" else b""
+            try:
+                body = _read_request_body(self.rfile, self.headers, MAX_REQUEST_BYTES) if method == "POST" else b""
+            except _BodyTooLargeError as error:
+                self.close_connection = True
+                return self._json(413, str(error))
+            except ValueError as error:
+                self.close_connection = True
+                return self._json(400, f"malformed request body: {error}")
             if self._token() != gateway.token:
                 return self._json(401, "unauthorized")
             found = gateway.upstream_for(self.path)
@@ -485,28 +716,49 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 entry["model"] = entry["request"].get("model")
             captured = bytearray()
             content_type = ""
-            connection = None
+            pool_key = gateway.pool_key(upstream)
+            connection: http.client.HTTPConnection | None = None
+            reused = False
+            writing_downstream = False
             try:
-                connection = gateway.connection(upstream)
-                if not gateway._attach(ident, connection):  # the session ended before this call went upstream
-                    raise ConnectionAbortedError("the session ended before the call went upstream")
-                connection.connect()  # TCP, proxy tunnel and TLS handshake, within connect_timeout
-                # each phase's time is logged, so the timeouts can be set from data (a call's total time alone
-                # cannot tell a slow prefill from a dead stream)
-                entry["connect_seconds"] = round(time.monotonic() - started, 3)
-                if connection.sock is not None:
-                    connection.sock.settimeout(gateway.upstream_timeout)
-                connection.request(method, path, body=body or None, headers=headers)
-                response = connection.getresponse()
+                connection, reused = gateway._pool.acquire(pool_key, lambda: gateway.connection(upstream))
+                response: http.client.HTTPResponse | None = None
+                for attempt in range(2):
+                    if not gateway._attach(ident, connection):  # the session ended before this call went upstream
+                        raise ConnectionAbortedError("the session ended before the call went upstream")
+                    try:
+                        if not reused:
+                            connection.connect()  # TCP, proxy tunnel and TLS handshake, within connect_timeout
+                            # each phase's time is logged, so the timeouts can be set from data
+                            entry["connect_seconds"] = round(time.monotonic() - started, 3)
+                        else:
+                            entry["connect_seconds"] = 0.0
+                        entry["reused_connection"] = reused
+                        if connection.sock is not None:
+                            connection.sock.settimeout(gateway.upstream_timeout)
+                        connection.request(method, path, body=body or None, headers=headers)
+                        response = connection.getresponse()
+                        break
+                    except _STALE_CONN_ERRORS:
+                        # Keep-alive socket closed while idle: retry transparently once on a fresh connection.
+                        if reused and attempt == 0 and not gateway._closed:
+                            with contextlib.suppress(Exception):
+                                connection.close()
+                            connection = gateway.connection(upstream)
+                            reused = False
+                            continue
+                        raise
+                assert response is not None
                 entry["status"] = response.status
                 entry["headers_seconds"] = round(time.monotonic() - started, 3)
                 content_type = response.getheader("Content-Type", "")
                 self.send_response(response.status)
-                for key, value in response.getheaders():
-                    if key.lower() not in HOP:
-                        self.send_header(key, value)
+                for hkey, value in response.getheaders():
+                    if hkey.lower() not in HOP:
+                        self.send_header(hkey, value)
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                breaker = _RepetitionBreaker() if "event-stream" in content_type else None
                 while True:
                     chunk = response.read1(65536)
                     if not chunk:
@@ -517,13 +769,57 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                             connection.sock.settimeout(gateway.stream_timeout)
                     if len(captured) < CAPTURE_LIMIT:
                         captured.extend(chunk[: CAPTURE_LIMIT - len(captured)])
+                    if breaker is not None:
+                        loop_reason = breaker.feed(chunk)
+                        if loop_reason is not None:
+                            entry["degenerate_loop"] = True
+                            with gateway._lock:
+                                repeat_hit = gateway._degenerate_streak >= 1
+                            if repeat_hit:
+                                # Consecutive repetition on retry: end SSE cleanly as length-truncated so DSH
+                                # advances instead of re-sending the identical prompt into another loop.
+                                entry["degenerate_graceful_stop"] = True
+                                stop_evt = (
+                                    b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n'
+                                    b"data: [DONE]\n\n"
+                                )
+                                writing_downstream = True
+                                self.wfile.write(f"{len(stop_evt):X}\r\n".encode() + stop_evt + b"\r\n")
+                                self.wfile.flush()
+                                writing_downstream = False
+                                with contextlib.suppress(Exception):
+                                    connection.close()
+                                connection = None
+                                break
+                            raise _StreamAbortedError(loop_reason)
+                    if gateway.call_timeout > 0 and time.monotonic() - started > gateway.call_timeout:
+                        raise _StreamAbortedError(f"single LLM call exceeded {gateway.call_timeout:.0f}s")
+                    writing_downstream = True
                     self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                     self.wfile.flush()
+                    writing_downstream = False
+                writing_downstream = True
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-                connection.close()
+                writing_downstream = False
+                keep_alive = (
+                    connection is not None
+                    and not gateway._closed
+                    and not response.will_close
+                    and (response.getheader("Connection") or "").lower() != "close"
+                    and response.isclosed()
+                )
+                if keep_alive and connection is not None:
+                    gateway._pool.release(pool_key, connection)
+                elif connection is not None:
+                    connection.close()
+                connection = None
             except (OSError, http.client.HTTPException) as error:
                 entry["error"] = f"{type(error).__name__}: {error}"
+                deadline_hit = gateway.deadline is not None and clock.now() >= gateway.deadline
+                client_gone = isinstance(error, (BrokenPipeError, ConnectionResetError))
+                if gateway._closed or (client_gone and (writing_downstream or deadline_hit)):
+                    entry["aborted_by_close"] = True
                 if "status" not in entry:
                     with contextlib.suppress(OSError):
                         self._json(502, f"upstream failed: {type(error).__name__}")
@@ -549,5 +845,5 @@ def _handler(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-__all__ = ["CACHE_WEIGHT", "CONNECT_TIMEOUT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH", "STREAM_TIMEOUT",
-           "UPSTREAM_TIMEOUT", "Gateway", "assemble", "metered_tokens", "tokens_of", "usage_of"]
+__all__ = ["CACHE_WEIGHT", "CALL_TIMEOUT", "CONNECT_TIMEOUT", "PREFIX", "ROUTE_PREFIX", "SEARCH_PATH",
+           "STREAM_TIMEOUT", "UPSTREAM_TIMEOUT", "Gateway", "assemble", "metered_tokens", "tokens_of", "usage_of"]
