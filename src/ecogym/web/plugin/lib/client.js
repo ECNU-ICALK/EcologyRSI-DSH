@@ -656,6 +656,33 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         tested ? h("small", null, tested) : null);
     }
 
+    /** Pick an asymmetric fast-executor + strong-evolver pair from runnable routes (HarnessOpt-Bench pattern). */
+    function pickAsymmetricModels(routes) {
+      const options = (routes || []).filter((r) => r.runnable).flatMap((r) => r.options || []);
+      if (!options.length) return null;
+      const fastScore = (opt) => {
+        const s = `${opt.value} ${opt.label || ""}`.toLowerCase();
+        let score = 0;
+        if (/flash|mini|lite|haiku|small|turbo/.test(s)) score += 3;
+        if (/deepseek-v4\.1-flash|s2\.1-flash/.test(s)) score += 2;
+        if (/pro|reasoner|opus|r1|thinking|max/.test(s)) score -= 2;
+        return score;
+      };
+      const strongScore = (opt) => {
+        const s = `${opt.value} ${opt.label || ""}`.toLowerCase();
+        let score = 0;
+        if (/pro|reasoner|opus|r1|thinking|gpt-5|o3|max/.test(s)) score += 4;
+        if (/sonnet|v4-pro|v4\.1-pro|deepseek-reasoner/.test(s)) score += 2;
+        if (/flash|mini|lite|haiku|small/.test(s)) score -= 2;
+        return score;
+      };
+      const fast = [...options].sort((a, b) => fastScore(b) - fastScore(a))[0];
+      const strongPool = options.filter((o) => o.value !== fast.value);
+      if (!strongPool.length) return null;
+      const strong = [...strongPool].sort((a, b) => strongScore(b) - strongScore(a))[0];
+      return { fast: fast.value, fastLabel: fast.label || fast.value, strong: strong.value, strongLabel: strong.label || strong.value };
+    }
+
     /** Side-by-side stability benchmark for candidate model routes (sequential + concurrent streamed tool calls). */
     function ModelBenchmarkBox({ routes, onApply }) {
       const runnableOptions = useMemo(
@@ -1959,7 +1986,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           liveInfo: liveInfo?.generation === round.generation ? liveInfo : null })));
     }
 
-    function RelayStagesStep({ view, round, catalog, go, back }) {
+    function RelayStagesStep({ view, round, index, catalog, go, back }) {
       const stages = round.relay_stages || [];
       if (!stages.length) return null;
       return h(Fragment, null,
@@ -1990,7 +2017,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
             h("div", { className: "eg-faint", style: { marginTop: "4px" } },
               `出发版本：${startLabel} · 抽样任务（${tasks.length}）：${tasks.map((task) => taskName(catalog, task)).join("、") || "–"}`),
             ranking.length ? h(Table, { head: ["阶段候选", ["配对均差 Δ", "num"], ["更好 / 配对", "num"], ["候选均分", "num"], "结论"] },
-              ranking.map((row) => h("tr", { key: row.name },
+              ranking.map((row) => h("tr", { key: row.name, id: `eg-cand-${index}-${row.name}` },
                 h("td", null, h("b", null, row.label || row.name), " ", h(Mono, null, short(row.digest)),
                   carriedNames.has(row.name) ? h(Fragment, null, " ", h(Tag, { tone: "info" }, "上段胜出对照")) : null),
                 h("td", { className: `num ${toneClass(row.mean_delta, 4)}` }, signed(row.mean_delta, 4)),
@@ -2012,7 +2039,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         ["起点版本在每个训练任务上运行", h(EpisodeGrid, { view, round, catalog, go, back, liveInfo })],
         ["结果", h(Outcome, { view, round })],
       ] : [
-        ...(hasRelay ? [["代内小批接力：分层快筛与优胜接力", h(RelayStagesStep, { view, round, catalog, go, back })]] : []),
+        ...(hasRelay ? [["代内小批接力：分层快筛与优胜接力", h(RelayStagesStep, { view, round, index, catalog, go, back })]] : []),
         ["评审：读证据，找问题", h(EvolverStep, { view, round, go, back })],
         [hasRelay ? "终审候选：从接力中胜出的版本" : "候选：从哪里出发，改了什么，为什么", h(CandidatesStep, { view, round, index, catalog, focus })],
         [hasRelay ? "终审回合：胜出候选与在任版本在全部训练任务上正式配对" : "回合：候选和在任版本在每个训练任务上各跑几次", h(EpisodeGrid, { view, round, catalog, go, back, liveInfo })],
@@ -2085,8 +2112,8 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
 
     const READ_GROUPS = { brief: "说明", guide: "说明", evidence: "证据", summary: "回合摘要", transcript: "回合会话记录", program: "回合的程序",
       episode: "回合", archive: "存档版本", incumbent: "在任版本", candidate: "候选", proposal: "提案", other: "其他" };
-    const EVIDENCE_FILES = { "overview.md": "证据总览", "archive.md": "以往候选", "lessons.md": "内循环笔记", "contrasts.md": "回合对照",
-      "prior_runs.md": "以往运行", "expert.md": "专家意见" };
+    const EVIDENCE_FILES = { "triage.md": "病灶分诊与效率归因", "overview.md": "证据总览", "archive.md": "以往候选",
+      "lessons.md": "内循环笔记", "contrasts.md": "回合对照", "prior_runs.md": "以往运行", "expert.md": "专家意见" };
     const whereText = (where) => (where[0] ? `线程 ${where[0] + 1} 第 ${where[1]} 步` : `第 ${where[1]} 步`);
 
     function readText(item) {
@@ -2591,6 +2618,70 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     const S = { width: 960, height: 290, left: 54, right: 184, top: 26, bottom: 46 };
     const REFERENCE_NAMES = { expert: "专家模型", recipe_seed: "recipe 种子" };
 
+    function relayStagePoints(round, baseLevel) {
+      const stages = round.relay_stages || [];
+      if (!stages.length) return [];
+      const byDigest = new Map();
+      for (const st of stages) {
+        const metaByName = new Map((st.candidates || []).map((c) => [c.name, c]));
+        for (const row of st.ranking || []) {
+          if (!isNum(row.mean_delta) || !(row.paired > 0)) continue;
+          const meta = metaByName.get(row.name) || {};
+          const key = row.digest || row.name;
+          let rec = byDigest.get(key);
+          if (!rec) {
+            rec = {
+              name: row.name,
+              label: row.label || `g${round.generation}${row.name}`,
+              digest: row.digest,
+              summary: row.summary || meta.summary || "",
+              stage: st.stage,
+              advanced: Boolean(st.leader?.advanced && st.leader?.name === row.name),
+              byTask: new Map(),
+              meanScore: row.mean_score,
+            };
+            byDigest.set(key, rec);
+          } else if (st.leader?.advanced && st.leader?.name === row.name) {
+            rec.advanced = true;
+          }
+          for (const td of row.task_deltas || []) {
+            if (td?.task && isNum(td.delta)) rec.byTask.set(td.task, td.delta);
+          }
+        }
+      }
+      return [...byDigest.values()].map((rec) => {
+        const deltas = [...rec.byTask.values()];
+        const delta = deltas.length ? mean(deltas) : 0;
+        let interval = [delta, delta];
+        if (deltas.length >= 3) {
+          const variance = deltas.reduce((s, d) => s + (d - delta) ** 2, 0) / (deltas.length - 1);
+          const half = 1.96 * Math.sqrt(variance / deltas.length);
+          interval = [delta - half, delta + half];
+        } else if (deltas.length === 2) {
+          interval = [Math.min(...deltas), Math.max(...deltas)];
+        }
+        const side = deltas.length >= 2 && interval[0] > 0 ? "above"
+          : deltas.length >= 2 && interval[1] < 0 ? "below" : "noise";
+        return {
+          round,
+          candidate: { name: rec.name, digest: rec.digest, summary: rec.summary, status: "proposed" },
+          decision: { delta, interval, reason: "relay_screening" },
+          side,
+          before: baseLevel,
+          after: isNum(rec.meanScore) ? rec.meanScore : baseLevel + delta,
+          provisional: true,
+          relayStage: rec.stage,
+          relayAdvanced: rec.advanced,
+          live: {
+            paired: deltas.length,
+            totalTasks: Math.max(deltas.length, (stages[0]?.tasks || []).length),
+            better: deltas.filter((d) => d > 0).length,
+            candScored: deltas.length,
+          },
+        };
+      });
+    }
+
     /**
      * The run's score over its generations: a flat line for the incumbent (a step up is an adoption), a dot per
      * candidate with the interval of its gain drawn around the line, the earlier runs that evolved the starting
@@ -2627,25 +2718,32 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         const settled = (column.round.candidates || []).filter((candidate) => byCandidate.has(candidate)).map((candidate) => byCandidate.get(candidate));
         if (settled.length) {
           column.points = settled;
-        } else if (!column.round.finished && liveInfo && liveInfo.generation === column.round.generation && liveInfo.candidates.size) {
-          column.points = [...liveInfo.candidates.values()]
-            .filter((item) => item && (isNum(item.delta) || isNum(item.after)))
-            .map((item) => {
-              const delta = isNum(item.delta) ? item.delta : (item.after - column.level);
-              const interval = item.interval || [delta, delta];
-              return {
-                round: column.round,
-                candidate: item.candidate,
-                decision: { delta, interval, reason: "in_progress" },
-                side: item.side,
-                before: isNum(item.before) ? item.before : column.level,
-                after: item.after,
-                provisional: true,
-                live: item,
-              };
-            });
         } else {
-          column.points = [];
+          const relayPts = relayStagePoints(column.round, column.level);
+          const seenKeys = new Set(relayPts.flatMap((pt) => [pt.candidate.name, pt.candidate.digest].filter(Boolean)));
+          const inFinalGate = Boolean(column.round.plan);
+          const livePts = (!column.round.finished && liveInfo && liveInfo.generation === column.round.generation && liveInfo.candidates.size)
+            ? [...liveInfo.candidates.values()]
+              .filter((item) => item && !item.candidate.carried_leader
+                && (inFinalGate || (!seenKeys.has(item.candidate.name) && !seenKeys.has(item.candidate.digest)))
+                && (isNum(item.delta) || isNum(item.after)))
+              .map((item) => {
+                const delta = isNum(item.delta) ? item.delta : (item.after - column.level);
+                const interval = item.interval || [delta, delta];
+                return {
+                  round: column.round,
+                  candidate: item.candidate,
+                  decision: { delta, interval, reason: "in_progress" },
+                  side: item.side,
+                  before: isNum(item.before) ? item.before : column.level,
+                  after: item.after,
+                  provisional: true,
+                  finalGate: inFinalGate,
+                  live: item,
+                };
+              })
+            : [];
+          column.points = [...relayPts, ...livePts];
         }
       }
       let reference = null;
@@ -2741,6 +2839,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         text: `${view.status === "finished" ? "最终" : "现在"}：${end.digest === view.seed?.digest ? "仍是起点" : versionAlias(view, end.digest)} ${signed(end.level, 3)}` });
       // candidates: a dot at incumbent + gain, the interval of the gain around the incumbent's line
       columns.forEach((column, index) => {
+        let prevRelayLeader = null;
         (column.points || []).forEach((point) => {
           const { candidate, decision, side, before: was, after: now, provisional, live } = point;
           const top = y(column.level + decision.interval[1]);
@@ -2748,12 +2847,17 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
           const name = `g${column.round.generation}${candidate.name}`;
           const missingVeto = !provisional && String(decision.reason || "").startsWith("missing_tasks:");
           const projected = column.level + decision.delta;
-          const labelText = provisional ? `${name} 暂估 ${signed(projected, 3)} (${signed(decision.delta, 3)})`
+          const labelText = provisional
+            ? `${name} ${point.relayStage ? "快筛" : point.finalGate ? "终审暂估" : "暂估"} ${signed(projected, 3)} (${signed(decision.delta, 3)})`
             : missingVeto ? `${name}（缺项未采纳）` : name;
           if (provisional) {
+            const chain = prevRelayLeader && (!point.relayStage || point.relayStage > prevRelayLeader.relayStage);
+            const fromX = chain ? prevRelayLeader.x : column.x0;
+            const fromY = chain ? prevRelayLeader.y : y(column.level);
             parts.push(h("path", { key: `ll${index}-${candidate.name}`, className: "live-link", "data-side": side,
-              d: `M${column.x0},${y(column.level)} L${point.x},${point.y}` }));
+              d: `M${fromX},${fromY} L${point.x},${point.y}` }));
           }
+          if (point.relayAdvanced) prevRelayLeader = point;
           parts.push(h("g", { key: `c${index}-${candidate.name}`, className: "cand", "data-side": side,
             "data-adopted": String(candidate.status === "adopted"), "data-live": (provisional || missingVeto) ? "true" : undefined,
             onClick: () => onPick({ generation: column.round.generation, name: candidate.name }) },
@@ -2793,8 +2897,16 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     }
 
     function LiveIntraGenPanel({ view, catalog, go, liveInfo }) {
-      const relayStages = liveInfo?.round?.relay_stages || [];
-      if (!liveInfo || (!liveInfo.scored.length && !relayStages.length)) return null;
+      if (!liveInfo) return null;
+      const relayStages = liveInfo.round?.relay_stages || [];
+      if (!liveInfo.scored.length && !relayStages.length) {
+        return h("div", { className: "eg-live-scores" },
+          h("div", { className: "eg-live-row" },
+            h(Tag, { tone: "info" }, `第 ${liveInfo.generation} 代 · 正在准备`),
+            h("span", null, phaseOf(view)),
+            liveInfo.generation === 1 ? h("span", { className: "eg-faint" },
+              "（第 0 代仅测定起点基线不改版本；本代候选回合完结后，圆点与实时曲线会立即显示在上方图中）") : null));
+      }
       const candList = [...liveInfo.candidates.values()];
       return h("div", { className: "eg-live-scores" },
         relayStages.length ? h("div", { style: { marginBottom: liveInfo.scored.length ? "10px" : 0 } },
@@ -2848,7 +2960,7 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
     function ScoreCard({ view, catalog, onPick, go, liveInfo }) {
       const level = versionLevels(view);
       const hasSettled = lastAttempts(view).some((round) => isNum(level(round.incumbent)));
-      const hasLive = Boolean(liveInfo && (isNum(liveInfo.provisionalIncumbent) || liveInfo.candidates.size || (liveInfo.round?.relay_stages || []).length));
+      const hasLive = Boolean(liveInfo);
       if (!hasSettled && !hasLive) return null; // nothing scored yet
       const chart = h(ScoreChart, { view, catalog, onPick, liveInfo });
       const icon = (body) => h("svg", { width: 28, height: 14, "aria-hidden": "true" }, body);
@@ -3087,6 +3199,20 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
               note: "固定后，每个回合都用这个模型；不固定时由各版本 Harness 的 [agent] 决定（支持 <提供方>/<模型> 或 DeepSeek 模型 id）。" }),
             h(ModelSelect, { label: "评审智能体（改 Harness）", value: values.evolver_model, onChange: set("evolver_model"), routes,
               note: "每一代读证据、写候选的评审会话用这个模型。" })),
+          (() => {
+            const pair = pickAsymmetricModels(routes);
+            if (!pair) return null;
+            const active = modelRef(values.model) === pair.fast && modelRef(values.evolver_model) === pair.strong;
+            return h("div", { className: "eg-actions", style: { marginTop: "10px", alignItems: "center", flexWrap: "wrap" } },
+              h(Button, {
+                variant: active ? "primary" : "outline",
+                onClick: () => {
+                  setValues((old) => ({ ...old, model: pair.fast, evolver_model: pair.strong }));
+                  toast(`已设为非对称搭配：解题 ${pair.fast} + 评审 ${pair.strong}`, "success");
+                },
+              }, `非对称推荐：快模型解题 (${pair.fastLabel}) + 强推理评审 (${pair.strongLabel})`),
+              h("small", { className: "eg-faint" }, "HarnessOpt-Bench 范式：内循环用高吞吐快模型多轮试错，外循环用强推理模型做跨任务病灶归纳与 Harness 改写。"));
+          })(),
           h("div", { style: { marginTop: "12px" } },
             h(ModelBenchmarkBox, { routes, onApply: (picked) => setValues((old) => ({ ...old, model: picked, evolver_model: picked })) })),
           catalog?.models?.error ? h(Alert, { tone: "warning" }, `读取 DSH 的模型设置失败：${catalog.models.error}`) : null),
@@ -3204,7 +3330,10 @@ button.eg-chip:hover{color:var(--dsw-alias-label-primary);outline:.5px solid var
         h("button", { className: "eg-back", onClick: () => go(back || { page: null }) },
           back?.focus ? `← 返回运行的第 ${back.focus.generation} 代` : "← 返回"),
         h("div", { className: "eg-head" }, h("div", { className: "eg-head-main" },
-          h("div", { className: "eg-title-line" }, h("h1", null, record.label || record.episode), h(StatusTag, { map: EP_STATUS, keyName: epKey(record) })),
+          h("div", { className: "eg-title-line" }, h("h1", null, record.label || record.episode),
+            h(StatusTag, { map: EP_STATUS, keyName: epKey(record) }),
+            finished.rescue_triggered ? h(Tag, { tone: "warning" }, "触发预算救援") : null,
+            finished.hook_fired ? h(Tag, { tone: "neutral" }, "触发审计钩子") : null),
           h("div", { className: "eg-meta" },
             h("span", null, h("b", null, "任务"), taskShort(catalog, record.task_id)),
             h("span", null, h("b", null, "Harness"), h(Mono, null, short(record.harness?.digest)), ` ${record.harness?.name || ""}`),

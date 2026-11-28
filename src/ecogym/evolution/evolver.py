@@ -43,6 +43,7 @@ sharing 52 to 96 % of their added lines).
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 import difflib
@@ -68,7 +69,7 @@ from ..episodes.judge import PRE_LOCAL_STAGE, Limits, calibration_pre_stage, jud
 from ..episodes.mcp import Tool, ToolError
 from ..episodes.runner import Events
 from ..episodes.sandbox import Runtime, check_workers, discover_runtime, ecogym_home, scratch_root
-from ..episodes.tools import DEFAULT_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, selection_rule_text
+from ..episodes.tools import DEFAULT_LOCAL_SELECTION, SINGLE_WINDOW_SELECTION, run_audit_hook, selection_rule_text
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench
 from ..evaluation.suite import adjusted_confidence, report_horizon_scores, signed_rank_critical
@@ -108,7 +109,7 @@ from .discovery import (
 from .ensemble import ensemble_scores
 from .evidence import related_runs, same_tasks, version_label, write_evidence
 from .methods import MethodError, canonical_source
-from .pareto import render_pareto_section
+from .pareto import crossover_pairs, extract_points, operator_schedule_section, render_pareto_section
 
 if TYPE_CHECKING:
     from .methods import MethodRegistry
@@ -121,7 +122,9 @@ SCREEN_RESERVE = 180.0  # session seconds a screen leaves for writing and checki
 VARIANT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 ARCHIVE_LIMIT = 24  # earlier candidates copied into the evolver's archive/
 SIMILAR_EDITS = 0.5  # two candidates sharing this share of their added lines get a warning
-LAYOUT = frozenset({"harness.toml", "instructions.md", "skills", "template", "memory"})  # what a harness may hold
+LAYOUT = frozenset({"harness.toml", "instructions.md", "skills", "template", "memory", "hooks"})  # harness dirs/files
+PROMPT_BLOAT_CHARS = 14_000  # combined instructions.md + memory/lessons.md chars triggering anti-bloat warning
+MAX_RECOMMENDED_SKILLS = 4  # skill directory count above which selection accuracy tends to degrade
 NOTE_KINDS = ("lesson", "finding", "dead_end")
 PROPOSAL_LIMIT = 20_000
 METHOD_RESEARCH_MODES = ("internal", "supplied", "autonomous")
@@ -325,6 +328,83 @@ def edit_overlap(first: set[str], second: set[str]) -> float:
     return len(first & second) / len(first | second) if first and second else 0.0
 
 
+def _children_counts(view: dict[str, Any], prior: Sequence[dict[str, Any]] = ()) -> dict[str, int]:
+    """How many compared candidates branched from each harness digest (base or parent) across runs."""
+
+    counts: dict[str, int] = {}
+    for other in (*prior, view):
+        for round_ in other.get("rounds") or ():
+            for candidate in round_.get("candidates") or ():
+                origin = (candidate.get("base") or {}).get("digest") or candidate.get("parent")
+                if origin:
+                    counts[str(origin)] = counts.get(str(origin), 0) + 1
+            for stage in round_.get("relay_stages") or ():
+                for candidate in stage.get("candidates") or ():
+                    if candidate.get("carried_leader"):
+                        continue
+                    origin = (candidate.get("base") or {}).get("digest") or candidate.get("parent")
+                    if origin:
+                        counts[str(origin)] = counts.get(str(origin), 0) + 1
+    return counts
+
+
+def bloat_warnings(staging: Path) -> list[str]:
+    """Non-blocking complexity warnings against prompt bloat and excessive skill proliferation."""
+
+    found: list[str] = []
+    prompt_chars = len(_read_text(staging / "instructions.md", 200_000)) + len(
+        _read_text(staging / "memory" / "lessons.md", 200_000)
+    )
+    if prompt_chars > PROMPT_BLOAT_CHARS:
+        found.append(
+            f"上下文可能过度膨胀：instructions.md 与 memory/lessons.md 合计 {prompt_chars:,} 字"
+            f"（建议不超过 {PROMPT_BLOAT_CHARS:,} 字）。建议删除过时教训或合并冗余段落，避免淹没关键指令。"
+        )
+    skills_dir = staging / "skills"
+    if skills_dir.is_dir():
+        skill_dirs = [p for p in skills_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        if len(skill_dirs) > MAX_RECOMMENDED_SKILLS:
+            found.append(
+                f"技能目录过多（{len(skill_dirs)} 个，建议 ≤ {MAX_RECOMMENDED_SKILLS} 个）："
+                "过多技能会显著降低智能体选对技能的概率，建议参考 evidence/triage.md 合并或删除零激活技能。"
+            )
+    return found
+
+
+def hook_problems(staging: Path, runtime: Runtime | None) -> list[str]:
+    """Static syntax check and fast sandboxed smoke check for optional ``hooks/audit_submission.py``."""
+
+    hook_path = staging / "hooks" / "audit_submission.py"
+    if not hook_path.exists():
+        return []
+    if hook_path.is_symlink() or not hook_path.is_file():
+        return ["hooks/audit_submission.py 必须是普通文件"]
+    source = _read_text(hook_path, 64_000)
+    try:
+        tree = ast.parse(source, filename="hooks/audit_submission.py")
+    except SyntaxError as error:
+        return [f"hooks/audit_submission.py 语法错误（第 {error.lineno} 行）：{error.msg}"]
+    has_audit = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "audit"
+        for node in tree.body
+    ) or any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "audit" for t in node.targets)
+        for node in tree.body
+    )
+    if not has_audit:
+        return ["hooks/audit_submission.py 必须定义可调用函数 audit(summary, selection, files) -> list[str]"]
+    _, err = run_audit_hook(
+        hook_path,
+        runtime,
+        summary={"status": "ok", "score": 0.0, "cells": {}},
+        selection={"delta": 0.0, "uq_horizons": {}},
+    )
+    if err and not err.startswith("audit hook skipped:") and "sandbox" not in err.lower():
+        return [f"hooks/audit_submission.py 沙箱冒烟测试失败：{err}"]
+    return []
+
+
 def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Sequence[dict[str, Any]] = (),
                    incumbent: str = "") -> str:
     """``work/archive/README.md``: what each archived version is and how it did."""
@@ -374,7 +454,11 @@ def archive_readme(view: dict[str, Any], archived: dict[str, Harness], prior: Se
         against = "–" if not parent else "本次的在任版本" if parent == incumbent else f"`{parent[:12]}`"
         summary = " ".join((harness.summary or "").split())[:200].replace("|", "/")
         lines.append(f"| `{label}/`（`{harness.digest[:12]}`） | {summary} | {result} | {better} | {against} |")
-    pareto_md = render_pareto_section(by_label, {label: h.digest for label, h in archived.items()})
+    pareto_md = render_pareto_section(
+        by_label,
+        {label: h.digest for label, h in archived.items()},
+        children_counts=_children_counts(view, prior),
+    )
     return "\n".join(lines) + "\n" + pareto_md
 
 
@@ -609,6 +693,7 @@ class EvolverTools:
             self._edits.pop(name, None)
             return {"name": name, "ok": False, "status": "invalid", "problems": [str(error)]}, None
         problems = term_problems(staging, self.forbidden)
+        problems.extend(hook_problems(staging, self.runtime))
         if (not self.pinned and harness.agent.model != self.incumbent.agent.model
                 and (problem := self.model_problem(harness.agent.model))):
             problems.append(problem)
@@ -620,7 +705,7 @@ class EvolverTools:
             problems.append(f"与{same}内容相同（harness.toml 的名称和摘要不算）：比较过的版本不会再运行，"
                             "在它上面做出新的改动")
         self._edits[name] = self._edit_sets(name, staging)
-        smoke, warnings = None, []
+        smoke, warnings = None, bloat_warnings(staging)
         if any(item["path"].startswith("template/") for item in changes):
             reports = self._judge_template(staging / "template", folder)
             report = reports[self.smoke.task.id]
@@ -637,8 +722,8 @@ class EvolverTools:
                 smoke["tasks"] = {task: {"status": item["status"], "score": item["score"],
                                          "coverage": item["coverage"], "incumbent_score": reference[task].get("score")}
                                   for task, item in reports.items()}
-                warnings = template_warnings(reports, reference, main=self.smoke.task.id, predictor_changed=any(
-                    item["path"] == "template/predictor.py" for item in changes))
+                warnings.extend(template_warnings(reports, reference, main=self.smoke.task.id, predictor_changed=any(
+                    item["path"] == "template/predictor.py" for item in changes)))
         proposal = _read_text(self.work / "proposals" / f"{name}.md", PROPOSAL_LIMIT).strip()
         if len(proposal) < 80:
             problems.append(f"proposals/{name}.md 还没有写（至少写清改动、依据、预期和风险）")
@@ -1201,7 +1286,7 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
           incumbent: Harness, limits: Limits, forbidden: Sequence[str], minutes: float, tokens: int,
           deadline: float, archived: dict[str, Harness] | None = None,
           local_selection: str = DEFAULT_LOCAL_SELECTION, relay_note: str = "",
-          starting_label: str | None = None) -> str:
+          starting_label: str | None = None, operator_guide: str = "") -> str:
     gates = suite.gates
     confidence = adjusted_confidence(gates.confidence, len(names))
     critical = signed_rank_critical(len(tasks), (1 - confidence) / 2) if gates.test == "signed_rank" else -1
@@ -1284,8 +1369,8 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
         "- 理由：写在工作区根目录的 `proposals/<名字>.md`（已有模板），不要放进候选目录——候选目录里的每个文件都会成为"
         "这个 Harness 的一部分，交给内循环智能体；",
         "- 用 `check_candidate` 检查每个候选。没有通过检查、与在任版本或以往比较过的版本相同的候选不会运行；"
-        "两个候选的改动大部分相同时会有提醒。",
-        "",
+        "两个候选的改动大部分相同时会有提醒。可选 `hooks/audit_submission.py` 会做语法与沙箱冒烟测试。",
+        *([operator_guide.strip(), ""] if operator_guide.strip() else [""]),
         "## 批量试模板（`variants/`）",
         "",
         f"每个候选要 {repeats} × {len(tasks)} 个回合、约一小时才知道结果，每代只有 {len(names)} 个；"
@@ -1317,6 +1402,8 @@ def brief(*, generation: int, suite: SuiteSpec, tasks: Sequence[TaskSpec], bench
         "",
         "## 证据（`evidence/`）",
         "",
+        "- `triage.md`：零 LLM 自动分诊报告（提交损耗/高分未交、本地→隐藏期过拟合反转、分时距瓶颈、"
+        "技能与钩子激活归因 ACT、以及 HDA 成本效率指标 ΔScore/MToken）；建议最先阅读；",
         "- `overview.md`：各版本在各训练任务上的隐藏期成绩、在任版本的逐格技能、各版本几个回合的预报平均后的成绩、"
         "上一代的比较结果，以及在任版本一路被采纳时的增益（采纳记录）；",
         "- `archive.md`：以往所有候选的改动、提案、结果和原因，以及评审员的笔记；",
@@ -1442,14 +1529,23 @@ def run_evolver(*, run_id: str, generation: int, incumbent: Harness, suite: Suit
     with Ledger(ledger_path) as ledger:
         evidence = write_evidence(work / "evidence", ledger=ledger, view=view, tasks=[task.id for task in tasks],
                                   names=_names(view, incumbent), expert_text=expert_text,
-                                  ensembles=ensemble_scores(view, benches.__getitem__), archived=archived, prior=prior)
+                                  ensembles=ensemble_scores(view, benches.__getitem__), archived=archived, prior=prior,
+                                  incumbent=incumbent)
     if relay_note.strip():
         (work / "evidence" / "relay.md").write_text(relay_note, encoding="utf-8")
+    by_label = {version_label(other["run_id"], round_["generation"], cand["name"], current=view["run_id"]): cand
+                for other in (*prior, view) for round_, cand in _compared(other)}
+    children = _children_counts(view, prior)
+    points = extract_points(by_label, {label: h.digest for label, h in archived.items()})
+    op_guide = operator_schedule_section(
+        names, points=points, children_counts=children, pairs=crossover_pairs(points)
+    )
     (work / "EVOLVE.md").write_text(brief(
         generation=generation, suite=suite, tasks=tasks, benches=benches, names=names, repeats=repeats,
         episode_minutes=episode_minutes, episode_tokens=episode_tokens, model=model, incumbent=incumbent,
         limits=limits, forbidden=forbidden, minutes=settings.minutes, tokens=gateway.token_budget, deadline=deadline,
         archived=archived, local_selection=local_selection, relay_note=relay_note, starting_label=seed_base_label,
+        operator_guide=op_guide,
     ), encoding="utf-8")
     events = Events(ledger_path, run_id, frozenset({"evolver_note", "expert_question"}))
     known = known_versions(view, incumbent, prior)
@@ -1530,5 +1626,6 @@ def _names(view: dict[str, Any], incumbent: Harness) -> dict[str, str]:
 
 
 __all__ = ["METHOD_RESEARCH_MODES", "NAMES", "EvolverSettings", "EvolverTools", "archive_readme", "archive_versions",
-           "brief", "copy_tree",
-           "edit_lines", "edit_overlap", "evolver_follow_up", "forbidden_terms", "known_versions", "run_evolver"]
+           "bloat_warnings", "brief", "copy_tree",
+           "edit_lines", "edit_overlap", "evolver_follow_up", "forbidden_terms", "hook_problems",
+           "known_versions", "run_evolver"]

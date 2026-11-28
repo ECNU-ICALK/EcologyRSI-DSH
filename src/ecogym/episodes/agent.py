@@ -392,8 +392,9 @@ def run_agent(*, root: Path, prompt: str, agent: AgentSpec, tools: list[Tool], g
             stored = store(root, trajectory, runtime.node_root / "bin" / "node", programs=programs)
         except Exception as error:  # a broken trajectory must not hide the session's own outcome
             stored = {"files": {}, "summary": {"error": f"{type(error).__name__}: {error}"}}
+    timed_out = killed or (gateway.refused > 0 and ended >= deadline)
     status = ("interrupted" if cancelled is not None else "infra_failed" if gateway.answered == 0
-              else "timeout" if killed else "finished")
+              else "timeout" if timed_out else "finished")
     final_text = stdout_path.read_text(encoding="utf-8", errors="replace")[-8000:] if stdout_path.exists() else ""
     session = Session(status=status, exit_code=exit_code, killed=killed, seconds=round(time.time() - started, 1),
                       tokens=gateway.tokens, metered_tokens=gateway.metered, llm_calls=gateway.calls,

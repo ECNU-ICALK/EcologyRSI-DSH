@@ -213,7 +213,10 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
     gateway.deadline = deadline
     with Ledger(ledger_path) as ledger:
         advice = expert.guidance(ledger, bench.task, until=config.expert_until)
-    visible = export_visible(bench, root / "work" / "data", expert=expert.render(advice) if advice else "")
+    visible = export_visible(
+        bench, root / "work" / "data", expert=expert.render(advice) if advice else "",
+        start_report=start["report"] if start else None,
+    )
     (root / "work" / "TASK.md").write_text(task_brief(bench, visible["boundaries"], minutes=config.minutes,
                                                       tokens=config.tokens, deadline=deadline, limits=config.limits,
                                                       selection_policy=config.local_selection,
@@ -222,7 +225,8 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
     (root / "work" / "notes").mkdir(exist_ok=True)
     tools = EpisodeTools(bench=bench, root=root, runtime=runtime, limits=config.limits, deadline=deadline,
                          usage=gateway.usage, event=events, start=start, programs=programs,
-                         selection_policy=config.local_selection, start_cache=start_cache)
+                         selection_policy=config.local_selection, start_cache=start_cache,
+                         budget_minutes=config.minutes)
 
     logged = []
 
@@ -295,6 +299,7 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
         **session.to_dict(), "status": status, "local_evaluations": tools.evaluations,
         "submissions": len(tools.submissions), "notes": len(tools.notes), "questions": len(tools.questions),
         "score": scored["score"], "local_check": LOCAL_STAGE,
+        "rescue_triggered": tools.rescue_triggered, "hook_fired": tools.hook_fired,
     }
     if status != session.status:
         finished["stalled"] = (f"failed model calls kept the agent from working for {session.stalled_seconds:.0f} "

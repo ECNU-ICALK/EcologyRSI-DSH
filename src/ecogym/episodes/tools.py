@@ -20,7 +20,11 @@ the latest accepted submission the session itself saw.
 from __future__ import annotations
 
 import copy
+import json
 import math
+import os
+import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -37,7 +41,7 @@ from ..kernel.fs import CopyError, copy_regular_tree
 from .classical import classical_reference_tool
 from .judge import JUDGE_PROTOCOL, PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
 from .mcp import Tool, ToolError
-from .sandbox import Runtime
+from .sandbox import Runtime, SandboxUnavailable, confine_program, scratch_root, thread_limits
 from .workspace import LOCAL_STAGE
 
 MAX_FILES = 300
@@ -329,12 +333,144 @@ def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits,
             "report": report, "evaluation": evaluation, "healthy": _healthy(report), **extra}
 
 
+HOOK_TIMEOUT = 5.0
+HOOK_MAX_WARNINGS = 8
+HOOK_WARNING_CHARS = 300
+RESCUE_MAX_SECONDS = 300.0
+RESCUE_SHARE = 0.25
+_HOOK_RUNNER = (
+    "import importlib.util, json, sys\n"
+    "payload = json.load(sys.stdin)\n"
+    "spec = importlib.util.spec_from_file_location('audit_submission', sys.argv[1])\n"
+    "mod = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(mod)\n"
+    "fn = getattr(mod, 'audit', None)\n"
+    "if not callable(fn):\n"
+    "    raise RuntimeError('hooks/audit_submission.py must define audit(summary, selection, files)')\n"
+    "out = fn(payload['summary'], payload['selection'], payload['files'])\n"
+    "if out is None:\n"
+    "    out = []\n"
+    "if not isinstance(out, (list, tuple)):\n"
+    "    raise TypeError('audit() must return a list of warning strings')\n"
+    "print(json.dumps([str(x)[:300] for x in out[:8] if str(x).strip()], ensure_ascii=False))\n"
+)
+
+
+def builtin_submission_audit(
+    summary: dict[str, Any],
+    selection: dict[str, Any],
+    *,
+    start_digest: str | None = None,
+    digest: str | None = None,
+) -> list[str]:
+    """Deterministic local-check warnings surfaced directly to the inner agent on evaluate_local/submit."""
+
+    warnings: list[str] = []
+    if start_digest and digest and digest == start_digest:
+        warnings.append("当前 submission/ 与起始模板内容完全相同，未产生有效代码改动。")
+    if summary.get("status") == "ok":
+        cells = summary.get("cells") or {}
+        if cells and all(abs(float(item.get("skill") or 0.0)) < 1e-4 for item in cells.values()):
+            warnings.append("全部计分格技能接近 0（与朴素基线无差），请检查残差方向或模型预测是否生效。")
+    uq_h = selection.get("uq_horizons") or {}
+    bad_h = [(k, float(v)) for k, v in uq_h.items() if isinstance(v, (int, float)) and float(v) < -0.03]
+    if bad_h:
+        desc = "、".join(f"h={k} ({v:+.4f})" for k, v in sorted(bad_h, key=lambda kv: kv[1]))
+        warnings.append(f"存在显著退化时距：{desc}，建议按短/长时距分开建模或增强长时距收缩正则。")
+    delta = selection.get("delta")
+    pre_delta = selection.get("pre_delta")
+    if (isinstance(delta, (int, float)) and isinstance(pre_delta, (int, float))
+            and float(delta) > REPLACE_MARGIN and float(pre_delta) < 0.0):
+        warnings.append(
+            f"近期检验窗增益 {delta:+.4f}，但更早拟合折前滚变化 {pre_delta:+.4f}，疑似过拟合近期窗口。"
+        )
+    return warnings
+
+
+def _read_program_texts(program: Path, *, max_files: int = 12, max_chars: int = 16_000) -> dict[str, str]:
+    files: dict[str, str] = {}
+    if not program.is_dir():
+        return files
+    for path in sorted(program.rglob("*.py"))[:max_files]:
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            files[path.relative_to(program).as_posix()] = path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        except OSError:
+            continue
+    return files
+
+
+def run_audit_hook(
+    hook_path: Path,
+    runtime: Runtime | None,
+    *,
+    summary: dict[str, Any],
+    selection: dict[str, Any],
+    program: Path | None = None,
+    timeout: float = HOOK_TIMEOUT,
+) -> tuple[list[str], str | None]:
+    """Run an optional Harness-provided ``hooks/audit_submission.py`` inside a networkless sandbox."""
+
+    if hook_path.is_symlink() or not hook_path.is_file():
+        return [], None
+    if runtime is None or not getattr(runtime, "python", None):
+        return [], "audit hook skipped: no sandbox runtime"
+    try:
+        descriptor = os.open(hook_path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            source = handle.read(64_000)
+    except OSError as error:
+        return [], f"cannot read audit hook: {error}"
+    payload = {
+        "summary": summary,
+        "selection": selection,
+        "files": _read_program_texts(program) if program is not None else {},
+    }
+    with tempfile.TemporaryDirectory(prefix="ecogym-hook-", dir=scratch_root()) as tmp:
+        stage_dir = Path(tmp)
+        target = stage_dir / "audit_submission.py"
+        target.write_bytes(source)
+        argv = [str(runtime.python), "-I", "-c", _HOOK_RUNNER, str(target)]
+        try:
+            cmd = confine_program(stage_dir, runtime, stage_dir / "hook.sb", argv)
+        except SandboxUnavailable as error:
+            return [], str(error)
+        env = {**os.environ, **thread_limits(1), "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            done = subprocess.run(
+                cmd,
+                input=json.dumps(payload, ensure_ascii=False),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=stage_dir,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return [], f"hooks/audit_submission.py timed out after {timeout:g}s"
+        except OSError as error:
+            return [], f"hooks/audit_submission.py failed to launch: {error}"
+    if done.returncode != 0:
+        err = (done.stderr or done.stdout or f"exit {done.returncode}").strip()[-400:]
+        return [], err
+    try:
+        parsed = json.loads(done.stdout.strip() or "[]")
+    except ValueError as error:
+        return [], f"hooks/audit_submission.py returned invalid JSON: {error}"
+    if not isinstance(parsed, list):
+        return [], "hooks/audit_submission.py output must be a JSON list"
+    cleaned = [str(item).strip()[:HOOK_WARNING_CHARS] for item in parsed[:HOOK_MAX_WARNINGS] if str(item).strip()]
+    return cleaned, None
+
+
 class EpisodeTools:
     def __init__(self, *, bench: Bench, root: Path, runtime: Runtime, limits: Limits, deadline: float,
                  usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
                  start: dict[str, Any] | None = None, programs: Path | None = None,
                  selection_policy: str = DEFAULT_LOCAL_SELECTION,
-                 reuse_local: bool | None = None, start_cache: StartCache | None = None) -> None:
+                 reuse_local: bool | None = None, start_cache: StartCache | None = None,
+                 budget_minutes: float | None = None) -> None:
         """``start`` is the judged starting program (``starting_program``), if any."""
 
         if selection_policy not in LOCAL_SELECTION_POLICIES:
@@ -346,6 +482,7 @@ class EpisodeTools:
         self.runtime = runtime
         self.limits = limits
         self.deadline = deadline
+        self.budget_minutes = budget_minutes
         self.usage = usage
         self.event = event
         self.start = start
@@ -360,6 +497,8 @@ class EpisodeTools:
         self.evaluations = 0
         self.notes: list[dict[str, Any]] = []
         self.questions: list[dict[str, Any]] = []
+        self.rescue_triggered = False
+        self.hook_fired = False
         self._lock = threading.Lock()
         self._pre_lock = threading.Lock()
         self._slots = threading.Semaphore(2)
@@ -542,8 +681,47 @@ class EpisodeTools:
             return f"起始程序（本地 {self.start['local']['score']:+.4f}）"
         return "还没有被接受的提交"
 
+    def _pacing_notice(self) -> str | None:
+        """Budget-rescue nudge (Self-HPO pattern) when time is running low with no qualifying submission."""
+
+        if self.final() is not None:
+            return None
+        left = self.deadline - clock.now()
+        window = min(RESCUE_MAX_SECONDS, RESCUE_SHARE * self.budget_minutes * 60.0) if self.budget_minutes else 180.0
+        if left <= 0 or left > window:
+            return None
+        self.rescue_triggered = True
+        custom = self.root / "harness" / "hooks" / "rescue.md"
+        if custom.is_file() and not custom.is_symlink():
+            try:
+                text = custom.read_text(encoding="utf-8", errors="replace").strip()[:1500]
+                if text:
+                    return f"[预算告急救援 · 剩 {left / 60:.1f} 分钟]\n{text}"
+            except OSError:
+                pass
+        return (
+            f"[预算告急救援 · 剩 {left / 60:.1f} 分钟] 尚无通过替换条件的合格提交！"
+            "请立即停止开放式探索，保留当前本地表现最稳的改动，调用 evaluate_local 确认覆盖率与增益后立刻 submit 锁定。"
+        )
+
+    def _audit_submission(self, program: Path, digest: str, summary: dict[str, Any],
+                          selection: dict[str, Any]) -> tuple[list[str], str | None]:
+        start_digest = self.start.get("digest") if self.start else None
+        warnings = builtin_submission_audit(summary, selection, start_digest=start_digest, digest=digest)
+        hook = self.root / "harness" / "hooks" / "audit_submission.py"
+        hook_error: str | None = None
+        if hook.is_file() and not hook.is_symlink():
+            extra, error = run_audit_hook(hook, self.runtime, summary=summary, selection=selection, program=program)
+            if extra:
+                self.hook_fired = True
+                warnings.extend(extra)
+            elif error and not error.startswith("audit hook skipped:"):
+                hook_error = error
+        return warnings[:HOOK_MAX_WARNINGS], hook_error
+
     def task_info(self) -> dict[str, Any]:
         best, final = self.best_local(), self.final()
+        rescue = self._pacing_notice()
         return {
             "minutes_left": round(max(0.0, self.deadline - clock.now()) / 60, 1),
             **self.usage(),
@@ -556,16 +734,23 @@ class EpisodeTools:
             "latest_accepted": next((item["n"] for item in reversed(self.submissions) if item["accepted"]), None),
             "scored_now": final["n"] if final is not None else "start" if self.start is not None else None,
             "best_local": None if best is None else {"n": best["n"], "score": best["local"]["score"]},
+            **({"budget_rescue": rescue} if rescue else {}),
         }
 
     def evaluate_local(self) -> dict[str, Any]:
-        number, digest, _, summary, _, selection = self._run_local("evals")
+        number, digest, program, summary, _, selection = self._run_local("evals")
         with self._lock:
             self._open()
             self.evaluations += 1
+        audit_warnings, hook_error = self._audit_submission(program, digest, summary, selection)
+        rescue = self._pacing_notice()
         self.event("episode_evaluated", {"n": number, "digest": digest, "local": summary,
-                                         "local_selection": selection})
-        return {"digest": digest[:12], "local_selection": selection, **summary}
+                                         "local_selection": selection,
+                                         **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                                         **({"hook_error": hook_error} if hook_error else {})})
+        return {"digest": digest[:12], "local_selection": selection, **summary,
+                **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                **({"budget_rescue": rescue} if rescue else {})}
 
     def submit(self, note: str = "") -> dict[str, Any]:
         number, digest, program, summary, accepted, selection = self._run_local("submissions")
@@ -573,9 +758,13 @@ class EpisodeTools:
                   "note": str(note)[:4000], "at": time.time(), "local": summary, "local_selection": selection}
         self._record(self.submissions, record)
         replaces = self.replaces_start(record)
+        audit_warnings, hook_error = self._audit_submission(program, digest, summary, selection)
+        rescue = self._pacing_notice()
         self.event("episode_submitted", {**{key: record[key] for key in ("n", "digest", "accepted", "note", "local",
                                                                         "local_selection")},
-                                         "replaces_start": replaces})
+                                         "replaces_start": replaces,
+                                         **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                                         **({"hook_error": hook_error} if hook_error else {})})
         if not accepted:
             verdict = f"未接受。请检查本地检验状态、成绩和预报覆盖率。现在评分用{self.scored_text()}。"
         elif replaces and self.final() is record:
@@ -603,7 +792,9 @@ class EpisodeTools:
                           f"至少需要 {WALK_FORWARD_MEAN_MARGIN:g}")
             verdict = f"已接受，未达到本地替换条件{detail}。现在评分用{self.scored_text()}。{caution}"
         return {"n": number, "digest": digest[:12], "accepted": accepted, "replaces_start": replaces,
-                "verdict": verdict, "local_selection": selection, **summary}
+                "verdict": verdict, "local_selection": selection, **summary,
+                **({"audit_warnings": audit_warnings} if audit_warnings else {}),
+                **({"budget_rescue": rescue} if rescue else {})}
 
     def final(self) -> dict[str, Any] | None:
         """Pick a qualifying submission under the recorded policy."""
@@ -641,5 +832,6 @@ class EpisodeTools:
 
 __all__ = ["BEST_LOCAL_SELECTION", "DEFAULT_LOCAL_SELECTION", "LOCAL_SELECTION_POLICIES", "REPLACE_MARGIN",
            "ROLLING_SELECTION", "SINGLE_WINDOW_SELECTION", "WALK_FORWARD_HORIZON_CAP", "WALK_FORWARD_MEAN_MARGIN",
-           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "StartCache", "horizon_objectives",
-           "rolling_selection", "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]
+           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "StartCache",
+           "builtin_submission_audit", "horizon_objectives", "rolling_selection", "run_audit_hook",
+           "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]

@@ -975,5 +975,378 @@ class BatchThreeRefactorTests(unittest.TestCase):
             self.assertAlmostEqual(h_ev[horizon], h_rep[horizon], places=6)
 
 
+class HarnessSelfEvolutionTests(unittest.TestCase):
+    def test_workspace_data_profile_and_baseline_weak_cells(self):
+        bench = synthetic_bench(frame=synthetic_frame(days=40))
+        start_report = {
+            "status": "ok",
+            "score": 0.085,
+            "cells": [
+                {"cell": f"{bench.task.target_names[0]}@1", "skill": 0.14, "rmse": 0.86, "baseline_rmse": 1.0},
+                {"cell": f"{bench.task.target_names[0]}@6", "skill": -0.02, "rmse": 1.02, "baseline_rmse": 1.0},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            export_visible(bench, data_dir, start_report=start_report)
+            profile = (data_dir / "profile.md").read_text(encoding="utf-8")
+            readme = (data_dir / "README.md").read_text(encoding="utf-8")
+        self.assertIn("数据与基线画像", profile)
+        self.assertIn("Lag-1 自相关", profile)
+        self.assertIn("起始模板本地检验短板", profile)
+        self.assertIn("最弱计分格", profile)
+        self.assertIn(f"`{bench.task.target_names[0]}@6`", profile)
+        self.assertIn("profile.md", readme)
+
+    def test_budget_rescue_audit_hooks_and_bloat_checks(self):
+        from ecogym.episodes.sandbox import available as sandbox_available, discover_runtime
+        from ecogym.episodes.tools import EpisodeTools, builtin_submission_audit, run_audit_hook
+        from ecogym.evolution.evolver import bloat_warnings, hook_problems
+        from ecogym.harness import store
+        from ecogym.kernel import clock
+
+        # 1. Built-in submission audit catches identical code, zero skill, degraded horizon, and pre-fold overfit
+        msgs = builtin_submission_audit(
+            {"status": "ok", "cells": {"y@1": {"skill": 0.0}}},
+            {"delta": 0.05, "pre_delta": -0.02, "uq_horizons": {"1": 0.02, "24": -0.05}},
+            start_digest="abc",
+            digest="abc",
+        )
+        self.assertEqual(len(msgs), 4)
+
+        # 2. Budget-rescue pacing notice reads custom hooks/rescue.md and flips rescue_triggered
+        bench = synthetic_bench(frame=synthetic_frame(days=30))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hooks_dir = root / "harness" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            (hooks_dir / "rescue.md").write_text("自定义救援提示：立即提交最优候选。", encoding="utf-8")
+            now = clock.now()
+            # Plenty of time left -> no rescue
+            tools_ok = EpisodeTools(
+                bench=bench, root=root, runtime=None, limits=Limits(), deadline=now + 600,
+                usage=lambda: {}, event=lambda *_: None, budget_minutes=20.0,
+            )
+            self.assertIsNone(tools_ok._pacing_notice())
+            self.assertFalse(tools_ok.rescue_triggered)
+            # Tight deadline (< min(300s, 25% of 20m = 300s)) -> triggers rescue
+            tools_tight = EpisodeTools(
+                bench=bench, root=root, runtime=None, limits=Limits(), deadline=now + 120,
+                usage=lambda: {}, event=lambda *_: None, budget_minutes=20.0,
+            )
+            notice = tools_tight._pacing_notice()
+            self.assertIsNotNone(notice)
+            self.assertIn("自定义救援提示", notice)
+            self.assertTrue(tools_tight.rescue_triggered)
+            # Once a replacing submission exists -> rescue no longer fires
+            tools_tight.submissions.append({
+                "n": 1, "accepted": True, "replaces_start": True,
+                "local": {"score": 0.2},
+                "local_selection": {"passed": True, "delta": 0.05, "candidate_score": 0.2},
+            })
+            self.assertIsNone(tools_tight._pacing_notice())
+
+            # 3. Anti-bloat warnings + Harness.install copies hooks/ + hook_problems static/sandbox checks
+            staging = root / "cand"
+            (staging / "template").mkdir(parents=True)
+            (staging / "memory").mkdir(parents=True)
+            (staging / "hooks").mkdir(parents=True)
+            (staging / "harness.toml").write_text(
+                'name = "test"\nsummary = "hook test"\n[agent]\nmodel = "deepseek-v4-flash"\n',
+                encoding="utf-8",
+            )
+            (staging / "template" / "predictor.py").write_text("class Predictor:\n    pass\n", encoding="utf-8")
+            (staging / "instructions.md").write_text("x" * 15_000, encoding="utf-8")
+            (staging / "memory" / "lessons.md").write_text("- keep concise\n", encoding="utf-8")
+            for idx in range(5):
+                sdir = staging / "skills" / f"skill_{idx}"
+                sdir.mkdir(parents=True)
+                (sdir / "SKILL.md").write_text(f"---\nname: skill_{idx}\ndescription: test\n---\n", encoding="utf-8")
+            (staging / "hooks" / "audit_submission.py").write_text(
+                "def audit(summary, selection, files):\n"
+                "    return ['custom audit triggered'] if summary.get('score', 0) <= 0 else []\n",
+                encoding="utf-8",
+            )
+            (staging / "hooks" / "rescue.md").write_text("rescue text\n", encoding="utf-8")
+            b_warns = bloat_warnings(staging)
+            self.assertEqual(len(b_warns), 2)
+
+            harness = Harness.load(staging)
+            ep_root = root / "ep"
+            (ep_root / "work").mkdir(parents=True)
+            harness.install(ep_root)
+            self.assertTrue((ep_root / "harness" / "hooks" / "audit_submission.py").is_file())
+            self.assertTrue((ep_root / "harness" / "hooks" / "rescue.md").is_file())
+
+            # Bad syntax hook is rejected statically
+            bad_staging = root / "bad_cand"
+            (bad_staging / "hooks").mkdir(parents=True)
+            (bad_staging / "hooks" / "audit_submission.py").write_text("def audit(:\n", encoding="utf-8")
+            self.assertTrue(any("语法错误" in p for p in hook_problems(bad_staging, None)))
+
+            # Missing audit() entrypoint is rejected statically
+            no_fn = root / "nofn_cand"
+            (no_fn / "hooks").mkdir(parents=True)
+            (no_fn / "hooks" / "audit_submission.py").write_text("x = 1\n", encoding="utf-8")
+            self.assertTrue(any("audit(" in p for p in hook_problems(no_fn, None)))
+
+            if sandbox_available():
+                rt = discover_runtime()
+                warns, err = run_audit_hook(
+                    staging / "hooks" / "audit_submission.py", rt,
+                    summary={"status": "ok", "score": 0.0, "cells": {}},
+                    selection={"delta": 0.0},
+                )
+                self.assertIsNone(err)
+                self.assertEqual(warns, ["custom audit triggered"])
+                self.assertEqual(hook_problems(staging, rt), [])
+                # Runtime error inside sandbox is caught by hook_problems
+                boom = root / "boom_cand"
+                (boom / "hooks").mkdir(parents=True)
+                (boom / "hooks" / "audit_submission.py").write_text(
+                    "def audit(summary, selection, files):\n    raise ValueError('boom')\n",
+                    encoding="utf-8",
+                )
+                self.assertTrue(any("沙箱冒烟测试失败" in p for p in hook_problems(boom, rt)))
+
+                # ACT hook_fired stays False when hook returns [], and flips True only when warning emitted
+                ep_tools = EpisodeTools(
+                    bench=bench, root=ep_root, runtime=rt, limits=Limits(), deadline=now + 600,
+                    usage=lambda: {}, event=lambda *_: None, budget_minutes=20.0,
+                )
+                w_quiet, err_q = ep_tools._audit_submission(
+                    staging / "template", "d1", {"status": "ok", "score": 0.2, "cells": {}}, {"delta": 0.05}
+                )
+                self.assertEqual((w_quiet, err_q), ([], None))
+                self.assertFalse(ep_tools.hook_fired)
+                w_fired, err_f = ep_tools._audit_submission(
+                    staging / "template", "d1", {"status": "ok", "score": 0.0, "cells": {}}, {"delta": 0.0}
+                )
+                self.assertIn("custom audit triggered", w_fired)
+                self.assertIsNone(err_f)
+                self.assertTrue(ep_tools.hook_fired)
+            _ = store  # keep import clean
+
+    def test_zero_llm_triage_act_and_hda_metrics(self):
+        from ecogym.evolution.evidence import triage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            h_root = Path(tmp) / "h_inc"
+            (h_root / "skills" / "active_skill").mkdir(parents=True)
+            (h_root / "skills" / "unused_skill").mkdir(parents=True)
+            inc_h = SimpleNamespace(digest="inc_digest_1234", root=h_root)
+
+            view = {
+                "incumbent": "inc_digest_1234",
+                "rounds": [{
+                    "generation": 1,
+                    "finished": True,
+                    "candidates": [{
+                        "name": "a", "digest": "cand_digest_5678",
+                        "decision": {"delta": 0.005},
+                    }],
+                    "episodes": [
+                        {"episode": "ep:1", "task": "t1", "harness": "inc_digest_1234", "status": "timeout"},
+                        {"episode": "ep:2", "task": "t1", "harness": "inc_digest_1234", "status": "finished"},
+                        {"episode": "ep:3", "task": "t1", "harness": "cand_digest_5678", "status": "finished"},
+                    ],
+                }],
+            }
+            records = {
+                "ep:1": {
+                    "episode": "ep:1", "task_id": "t1", "status": "timeout",
+                    "start": {"local": {"score": 0.05}},
+                    "evaluations": [{"local": {"score": 0.14}}],
+                    "submissions": [],
+                    "scored": {
+                        "score": 0.05, "start": True,
+                        "cells": [{"cell": "y@1", "skill": 0.10}, {"cell": "y@24", "skill": -0.04}],
+                    },
+                    "finished": {
+                        "tokens": 100_000, "seconds": 300,
+                        "rescue_triggered": True, "hook_fired": False, "final_text": "",
+                    },
+                    "notes": [],
+                },
+                "ep:2": {
+                    "episode": "ep:2", "task_id": "t1", "status": "finished",
+                    "start": {"local": {"score": 0.05}},
+                    "evaluations": [],
+                    "submissions": [{"n": 1, "local": {"score": 0.22}}],
+                    "scored": {
+                        "score": 0.12, "n": 1, "start": False,
+                        "cells": [{"cell": "y@1", "skill": 0.18}, {"cell": "y@24", "skill": 0.01}],
+                    },
+                    "finished": {
+                        "tokens": 100_000, "seconds": 250,
+                        "rescue_triggered": False, "hook_fired": True, "final_text": "used active_skill",
+                    },
+                    "notes": [],
+                },
+                "ep:3": {
+                    "episode": "ep:3", "task_id": "t1", "status": "finished",
+                    "start": {"local": {"score": 0.05}},
+                    "evaluations": [],
+                    "submissions": [{"n": 1, "local": {"score": 0.11}}],
+                    "scored": {
+                        "score": 0.09, "n": 1, "start": False,
+                        "cells": [{"cell": "y@1", "skill": 0.12}, {"cell": "y@24", "skill": 0.02}],
+                    },
+                    "finished": {
+                        "tokens": 200_000, "seconds": 400,
+                        "rescue_triggered": False, "hook_fired": False, "final_text": "",
+                    },
+                    "notes": [],
+                },
+            }
+            md = triage(
+                view, records,
+                {"inc_digest_1234": "inc", "cand_digest_5678": "g1a"},
+                harnesses={"inc_digest_1234": inc_h},
+            )
+        self.assertIn("高分未交", md)
+        self.assertIn("本地→隐藏期过拟合反转", md)
+        self.assertIn("`h=24`", md)
+        self.assertIn("hook_fired", md)
+        self.assertIn("active_skill", md)
+        self.assertIn("零激活技能", md)
+        self.assertIn("unused_skill", md)
+        self.assertIn("高成本低增益", md)
+
+    def test_triage_distinguishes_strong_template_keep_gate_block_and_trajectory_v4(self):
+        from ecogym.episodes.trajectory import sessions, summarize
+        from ecogym.evolution.evidence import triage
+
+        # 1. Verify DSH 0.2 session.v4.jsonl.zstd parsing & skill/web_search extraction
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sdir = root / "sessions" / "work-a" / "session-1"
+            sdir.mkdir(parents=True)
+            v3_lines = [
+                json.dumps({"type": "session", "id": "s1", "delegationDepth": 0}),
+                json.dumps({"type": "tool/call", "data": {"name": "read", "arguments": "{}"}}),
+            ]
+            v4_lines = [
+                json.dumps({"type": "session", "version": 4, "id": "s1", "delegationDepth": 0}),
+                json.dumps({"type": "tool/call", "data": {"name": "skill", "arguments": '{"name":"my-skill"}'}}),
+                json.dumps({"type": "tool/call", "data": {"name": "web_search", "arguments": '{"query":"q1"}'}}),
+            ]
+            # Write compressed zstd via node (available in runtime)
+            from ecogym.episodes.sandbox import discover_runtime
+
+            rt = discover_runtime()
+            if rt.node_root and (rt.node_root / "bin" / "node").is_file():
+                node = rt.node_root / "bin" / "node"
+                compress = (
+                    "const fs=require('fs'),z=require('zlib');"
+                    "fs.writeFileSync(process.argv[1],z.zstdCompressSync(Buffer.from(process.argv[2])));"
+                )
+                subprocess.run([str(node), "-e", compress, str(sdir / "session.v3.jsonl.zstd"), "\n".join(v3_lines)],
+                               check=True)
+                subprocess.run([str(node), "-e", compress, str(sdir / "session.v4.jsonl.zstd"), "\n".join(v4_lines)],
+                               check=True)
+                found = sessions(root, node)
+                self.assertEqual(len(found), 1)
+                summary = summarize(found)
+                self.assertEqual(summary["tool_calls"], {"skill": 1, "web_search": 1})
+                self.assertEqual(summary["skills"], {"my-skill": 1})
+                self.assertEqual(summary["web_queries"], ["q1"])
+
+            # 2. Verify triage distinguishes strong-template keep vs gate rejection vs weak zero-sub
+            h_root = root / "h_strong"
+            (h_root / "skills" / "my-skill").mkdir(parents=True)
+            (h_root / "skills" / "dead-skill").mkdir(parents=True)
+            strong_h = SimpleNamespace(digest="strong_1234", root=h_root)
+            calls_dir = root / "traj_ep_strong"
+            calls_dir.mkdir()
+            with gzip.open(calls_dir / "llm_calls.jsonl.gz", "wt", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "reply": {"message": {"tool_calls": [
+                        {"function": {"name": "skill", "arguments": '{"name": "my-skill"}'}}
+                    ]}}
+                }) + "\n")
+            view = {
+                "incumbent": "strong_1234",
+                "rounds": [{
+                    "generation": 1, "finished": True, "candidates": [],
+                    "episodes": [
+                        {"episode": "ep:keep", "task": "t1", "harness": "strong_1234", "status": "finished"},
+                        {"episode": "ep:gate", "task": "t1", "harness": "strong_1234", "status": "finished"},
+                        {"episode": "ep:weak", "task": "t1", "harness": "strong_1234", "status": "finished"},
+                    ],
+                }],
+            }
+            records = {
+                "ep:keep": {
+                    "episode": "ep:keep", "task_id": "t1", "status": "finished",
+                    "start": {"local": {"score": 0.22}},
+                    "evaluations": [{"local": {"score": 0.223}, "local_selection": {"passed": False}}],
+                    "submissions": [],
+                    "scored": {"score": 0.21, "start": True, "cells": []},
+                    "finished": {"tokens": 50_000, "seconds": 100, "trajectory": {"dir": str(calls_dir)}},
+                    "notes": [],
+                },
+                "ep:gate": {
+                    "episode": "ep:gate", "task_id": "t1", "status": "finished",
+                    "start": {"local": {"score": 0.05}},
+                    "evaluations": [{
+                        "local": {"score": 0.09},
+                        "local_selection": {"passed": False, "reason": "pre_fold_regression"},
+                    }],
+                    "submissions": [],
+                    "scored": {"score": 0.05, "start": True, "cells": []},
+                    "finished": {"tokens": 50_000, "seconds": 100, "refused_calls": 1},
+                    "notes": [],
+                },
+                "ep:weak": {
+                    "episode": "ep:weak", "task_id": "t1", "status": "finished",
+                    "start": {"local": {"score": 0.0}},
+                    "evaluations": [], "submissions": [],
+                    "scored": {"score": 0.0, "start": True, "cells": []},
+                    "finished": {"tokens": 50_000, "seconds": 100},
+                    "notes": [],
+                },
+            }
+            md = triage(view, records, {"strong_1234": "g1a"}, harnesses={"strong_1234": strong_h})
+        self.assertIn("强模板合规沿用 1", md)
+        self.assertIn("触顶超时 1", md)
+        self.assertNotIn("ep:keep", md)
+        self.assertIn("门控拦截:pre_fold_regression", md)
+        self.assertIn("弱模板零提交", md)
+        self.assertIn("`my-skill` | 1/3", md)
+        self.assertIn("`dead-skill`（0/3 回合）", md)
+
+    def test_dgm_parent_weights_and_operator_schedule(self):
+        from ecogym.evolution.pareto import dgm_parent_weights, operator_schedule_section
+
+        by_label = {
+            "g1a": {"status": "rejected", "parent": "seed", "decision": {
+                "delta": 0.02, "tasks": [{"delta": 0.02}, {"delta": 0.02}], "horizons": {"1": 0.03, "24": 0.01},
+            }},
+            "g1b": {"status": "rejected", "parent": "seed", "decision": {
+                "delta": 0.02, "tasks": [{"delta": 0.02}, {"delta": 0.02}], "horizons": {"1": 0.01, "24": 0.04},
+            }},
+        }
+        digests = {"g1a": "d_a", "g1b": "d_b"}
+        points = extract_points(by_label, digests)
+        # g1a already spawned 3 children -> g1b (0 children) gets 4x weight despite identical delta
+        weights = dgm_parent_weights(points, {"d_a": 3, "d_b": 0})
+        self.assertEqual(weights[0]["label"], "g1b")
+        self.assertAlmostEqual(weights[0]["weight"] / weights[1]["weight"], 4.0, places=4)
+
+        pareto_md = render_pareto_section(by_label, digests, children_counts={"d_a": 3, "d_b": 0})
+        self.assertIn("DGM 踏脚石父本推荐", pareto_md)
+        self.assertIn("衍生 0 次", pareto_md)
+
+        pairs = crossover_pairs(points)
+        op_md = operator_schedule_section(["a", "b", "c"], points=points, children_counts={"d_a": 3, "d_b": 0},
+                                          pairs=pairs)
+        self.assertIn("定向开发", op_md)
+        self.assertIn("结构探索", op_md)
+        self.assertIn("精简消融或护栏加固", op_md)
+        self.assertIn("g1a", op_md)
+        self.assertIn("g1b", op_md)
+
+
 if __name__ == "__main__":
     unittest.main()

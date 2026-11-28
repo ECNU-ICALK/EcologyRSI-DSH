@@ -6,6 +6,7 @@ A harness is a directory:
     instructions.md         working rules (the workspace's AGENTS.md)
     skills/<name>/SKILL.md  DSH skills, optionally with more files
     template/               the starting submission: predictor.py and helper modules
+    hooks/                  optional runtime guardrails (audit_submission.py, rescue.md)
     memory/lessons.md       experience carried between episodes
 
 Its digest covers every file's relative path and bytes, so equal content is
@@ -130,6 +131,8 @@ class Harness:
             shutil.copytree(self.root / "skills", skills, dirs_exist_ok=True)
         else:
             skills.mkdir(exist_ok=True)
+        if (self.root / "hooks").is_dir():
+            shutil.copytree(self.root / "hooks", episode_root / "harness" / "hooks", dirs_exist_ok=True)
         shutil.copytree(self.root / "template", work / "submission", dirs_exist_ok=True)
 
     def describe(self) -> dict[str, Any]:

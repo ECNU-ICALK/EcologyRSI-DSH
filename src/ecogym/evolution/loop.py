@@ -979,6 +979,46 @@ class Evolution:
                 break
         return found
 
+    def _task_difficulty(
+        self, view: dict[str, Any], incumbent: Harness, baseline: dict[str, float]
+    ) -> dict[str, float]:
+        """Priority score per training task for high-regret relay Stage-1 screening.
+
+        Combines gap to the best non-naive reference model (regret) with incumbent replicate spread so Stage 1
+        screens the most informative/high-regret tasks across every dataset group first.
+        """
+
+        if not baseline:
+            return {}
+        spread: dict[str, float] = {}
+        for round_ in reversed(view.get("rounds") or ()):
+            if not round_.get("finished"):
+                continue
+            by_task: dict[str, list[float]] = {}
+            for entry in round_.get("episodes") or ():
+                if (entry.get("harness") == incumbent.digest and usable(entry)
+                        and isinstance(entry.get("score"), (int, float))
+                        and math.isfinite(float(entry["score"]))):
+                    by_task.setdefault(entry["task"], []).append(float(entry["score"]))
+            for task_id, scores in by_task.items():
+                if task_id not in spread and len(scores) >= 2:
+                    spread[task_id] = max(scores) - min(scores)
+            if len(spread) >= len(self.tasks):
+                break
+        difficulty: dict[str, float] = {}
+        for task in self.tasks:
+            base = baseline.get(task.id)
+            if base is None:
+                continue
+            bench = self.benches.get(task.id)
+            refs = reference_scores(bench, SCORED_STAGE) if bench is not None else {}
+            non_naive = [float(v) for k, v in refs.items() if k != "naive" and isinstance(v, (int, float))
+                         and math.isfinite(float(v))]
+            ref_target = max(non_naive) if non_naive else 0.0
+            regret = max(0.0, ref_target - base)
+            difficulty[task.id] = round(regret + 0.5 * spread.get(task.id, 0.0), 6)
+        return difficulty
+
     def _run_evolver_session(
         self,
         run_id: str,
@@ -1145,6 +1185,7 @@ class Evolution:
         stage_cands: int,
         stage_minutes: float,
         stage_tokens: int,
+        task_difficulty: dict[str, float] | None = None,
     ) -> tuple[str, list[TaskSpec], list[dict[str, Any]]]:
         """Run one relay stage's evolver session, carry prior leader for cross-batch checks, and log its plan."""
 
@@ -1152,6 +1193,7 @@ class Evolution:
         stage_tasks = select_stage_tasks(
             self.tasks, generation=generation, stage=stage,
             total_stages=total_stages, batch_size=config.relay_batch,
+            task_difficulty=task_difficulty,
         )
         live_view = self.view(run_id)
         relay_note = render_relay_brief(
@@ -1292,6 +1334,7 @@ class Evolution:
         stage_tokens = max(min(config.evolver_tokens, 1_500_000), int(config.evolver_tokens / total_stages))
         task_by_id = {task.id: task for task in self.tasks}
         baseline = self._incumbent_baseline(view, incumbent, snapshot)
+        difficulty = self._task_difficulty(view, incumbent, baseline)
         current_round = (self.view(run_id).get("rounds") or [{}])[-1]
         saved_stages = {
             int(item["stage"]): item
@@ -1330,6 +1373,7 @@ class Evolution:
                     run_id, generation, stage, total_stages, incumbent, starting, starting_label,
                     state, snapshot, measurement, completed_stages, extra_archived, stage_seen,
                     stage_cands=stage_cands, stage_minutes=stage_minutes, stage_tokens=stage_tokens,
+                    task_difficulty=difficulty,
                 )
 
             stage_fast = (

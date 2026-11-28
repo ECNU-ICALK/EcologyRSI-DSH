@@ -179,11 +179,92 @@ def crossover_pairs(
     return [item for _, item in scored[:max_pairs]]
 
 
+def dgm_parent_weights(
+    points: Sequence[ArchivePoint],
+    children_counts: Mapping[str, int] | None = None,
+    *,
+    base_weight: float = 0.02,
+) -> list[dict[str, Any]]:
+    """Darwin-Godel decaying exploration weights: ``quality / (1 + children)``.
+
+    Stepping-stone versions that performed well yet have spawned few or zero children receive higher sampling
+    weight than heavily exploited branches, discouraging premature single-trunk collapse.
+    """
+
+    if not points:
+        return []
+    counts = children_counts or {}
+    floor = min(0.0, min(pt.delta for pt in points))
+    raw: list[tuple[ArchivePoint, int, float]] = []
+    for pt in points:
+        children = max(0, int(counts.get(pt.digest, 0)))
+        quality = max(base_weight, (pt.delta - floor) + base_weight)
+        weight = quality / (1.0 + children)
+        raw.append((pt, children, weight))
+    total = sum(w for _, _, w in raw) or 1.0
+    ranked = [
+        {
+            "label": pt.label,
+            "digest": pt.digest,
+            "delta": round(pt.delta, 6),
+            "win_share": round(pt.win_share, 4),
+            "children": children,
+            "weight": round(weight, 6),
+            "share": round(weight / total, 4),
+        }
+        for pt, children, weight in raw
+    ]
+    ranked.sort(key=lambda item: (-item["weight"], -item["delta"], item["label"]))
+    return ranked
+
+
+def operator_schedule_section(
+    names: Sequence[str],
+    *,
+    points: Sequence[ArchivePoint] = (),
+    children_counts: Mapping[str, int] | None = None,
+    pairs: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    """Explicit orthogonal mutation roles across parallel candidate slots in one generation."""
+
+    if len(names) < 2:
+        return ""
+    dgm = dgm_parent_weights(points, children_counts)
+    unexplored = next((item for item in dgm if item["children"] == 0), dgm[0] if dgm else None)
+    top_pair = pairs[0] if pairs else None
+    lines = ["", "### 本代多候选正交分工建议（Operator Schedule）", ""]
+    lines.append(
+        f"- **候选 `{names[0]}`（定向开发 / Exploit）**：基于当前起点，优先针对 `evidence/triage.md` 排在首位的"
+        "单点病灶做精准修复或单一机制升级，严格保留在任版本已验证有效的核心机制。"
+    )
+    if top_pair:
+        explore_hint = (
+            f"优先尝试帕累托交叉重组 `{top_pair['a']}`（强于 {top_pair['a_strength']}）× "
+            f"`{top_pair['b']}`（强于 {top_pair['b_strength']}），抽取两者互补结构合并。"
+        )
+    elif unexplored:
+        explore_hint = (
+            f"优先从高权未充分探索的踏脚石 `{unexplored['label']}`（Δ {unexplored['delta']:+.4f}，"
+            f"衍生 {unexplored['children']} 次）出发（`reset_candidate`），尝试不同模型族、分时距架构或特征范式。"
+        )
+    else:
+        explore_hint = "尝试与第一个候选明显不同的结构性方案（不同模型族、分时距建模或新特征来源），避免只改同类超参。"
+    lines.append(f"- **候选 `{names[1]}`（结构探索 / Explore or Crossover）**：{explore_hint}")
+    for extra in names[2:]:
+        lines.append(
+            f"- **候选 `{extra}`（精简消融或护栏加固 / Ablation & Guardrail）**：清理 `evidence/triage.md` "
+            "中零激活技能与冗余指令（反膨胀），或通过 `hooks/audit_submission.py` / `hooks/rescue.md` 加固提交门禁与预算节奏。"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def render_pareto_section(
     by_label: Mapping[str, dict[str, Any]],
     digests: Mapping[str, str],
+    *,
+    children_counts: Mapping[str, int] | None = None,
 ) -> str:
-    """Markdown section summarizing the multi-objective Pareto frontier and crossover pairs."""
+    """Markdown section summarizing the multi-objective Pareto frontier, DGM stepping stones, and crossover pairs."""
 
     points = extract_points(by_label, digests)
     if len(points) < 2:
@@ -191,9 +272,16 @@ def render_pareto_section(
     front = pareto_front(points)
     leaders = niche_leaders(points)
     pairs = crossover_pairs(points)
-    lines = ["", "## 多目标帕累托前沿与互补组合（MAP-Elites / Crossover）", ""]
+    dgm = dgm_parent_weights(points, children_counts)
+    lines = ["", "## 多目标帕累托前沿与互补组合（MAP-Elites / DGM / Crossover）", ""]
     front_text = "、".join(f"`{pt.label}`（Δ {pt.delta:+.4f}，胜率 {pt.win_share:.0%}）" for pt in front[:8])
     lines.append(f"- **非支配帕累托前沿**：{front_text}")
+    if dgm:
+        dgm_text = "、".join(
+            f"`{item['label']}`（权重 {item['share']:.0%}，Δ {item['delta']:+.4f}，衍生 {item['children']} 次）"
+            for item in dgm[:5]
+        )
+        lines.append(f"- **DGM 踏脚石父本推荐（`quality / (1 + children)` 衰减探索权）**：{dgm_text}")
     leader_bits = []
     for niche, pt in leaders.items():
         if niche == "overall":
@@ -218,8 +306,10 @@ def render_pareto_section(
 __all__ = [
     "ArchivePoint",
     "crossover_pairs",
+    "dgm_parent_weights",
     "extract_points",
     "niche_leaders",
+    "operator_schedule_section",
     "pareto_front",
     "render_pareto_section",
 ]

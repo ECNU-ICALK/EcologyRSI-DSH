@@ -77,6 +77,25 @@ class RelayHelpersTests(unittest.TestCase):
         g2_s1 = select_stage_tasks(tasks, generation=2, stage=1, total_stages=2)
         self.assertNotEqual([t.id for t in g2_s1], [t.id for t in s1])
 
+    def test_select_stage_tasks_prioritizes_high_regret_difficulty(self):
+        tasks = [
+            _fake_task("a1", "dsA"),
+            _fake_task("a2", "dsA"),
+            _fake_task("a3", "dsA"),
+            _fake_task("a4", "dsA"),
+            _fake_task("b1", "dsB"),
+            _fake_task("b2", "dsB"),
+            _fake_task("b3", "dsB"),
+            _fake_task("b4", "dsB"),
+        ]
+        # Make a4, a3 hardest in dsA and b3, b4 hardest in dsB
+        difficulty = {"a1": 0.01, "a2": 0.02, "a3": 0.15, "a4": 0.25, "b1": 0.01, "b2": 0.03, "b3": 0.30, "b4": 0.18}
+        s1 = select_stage_tasks(tasks, generation=2, stage=1, total_stages=2, task_difficulty=difficulty)
+        s2 = select_stage_tasks(tasks, generation=2, stage=2, total_stages=2, task_difficulty=difficulty)
+        self.assertEqual({t.id for t in s1}, {"a4", "a3", "b3", "b4"})
+        self.assertEqual({t.id for t in s2}, {"a1", "a2", "b1", "b2"})
+        self.assertEqual({t.id for t in s1} & {t.id for t in s2}, set())
+
     def test_rank_stage_candidates_and_outlier_guard(self):
         tasks = [_fake_task(f"t{i}", "dsA") for i in range(4)]
         cands = [

@@ -39,6 +39,8 @@ from __future__ import annotations
 import builtins
 import collections
 import difflib
+import gzip
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
@@ -48,7 +50,7 @@ from typing import Any
 import numpy as np
 
 from ..episodes.history import fold_episode
-from ..episodes.tools import SINGLE_WINDOW_SELECTION, selection_rule_text
+from ..episodes.tools import REPLACE_MARGIN, SINGLE_WINDOW_SELECTION, selection_rule_text
 from ..episodes.trajectory import submission_files
 from ..episodes.transcripts import session_threads
 from ..kernel.ledger import Ledger
@@ -68,6 +70,10 @@ CONTRAST_GAP = 0.02  # hidden-score gap below which two episodes of one version 
 CONTRAST_PAIRS = 24
 CONTRAST_DIFF = 8000  # characters of program diff per pair
 PRIOR_LIMIT = 40_000  # characters of prior_runs.md
+OVERFIT_GAP = 0.04  # local minus hidden score above which a replacing submission is flagged as overfit
+UNSUBMITTED_GAIN = 0.02  # local eval gain over start that was never submitted
+HDA_COST_RATIO_WARN = 1.25  # candidate token ratio above which small gains are flagged as inefficient
+HDA_MIN_GAIN = 0.015
 RUN_STATUS = {"running": "运行中或已中断", "finished": "已完成", "failed": "失败", "stopped": "已停止"}
 
 
@@ -117,7 +123,9 @@ def episode_summary(record: dict[str, Any], *, role: str) -> str:
              f"- 提交 {len(record['submissions'])} 次，本地检验 {len(record['evaluations'])} 次"
              + (f"；起始程序（模板）本地 {_signed(start_local, 4)}"
                 if isinstance(start_local := ((record.get("start") or {}).get("local") or {}).get("score"), float)
-                else ""), ""]
+                else "")
+             + ("；触发预算救援" if finished.get("rescue_triggered") else "")
+             + ("；触发审计钩子" if finished.get("hook_fired") else ""), ""]
     if scored:
         low, high = scored.get("interval") or [None, None]
         references = "、".join(f"{name} {_signed(value)}" for name, value in (scored.get("references") or {}).items())
@@ -775,16 +783,421 @@ def prior_runs(ledger: Ledger, view: dict[str, Any], runs: Sequence[dict[str, An
     return _clip("\n".join(head) + "\n" + "\n\n".join(blocks), PRIOR_LIMIT) + "\n"
 
 
+def _skill_names(harness: Any) -> list[str]:
+    root = getattr(harness, "root", None)
+    if root is None:
+        return []
+    skills_dir = Path(root) / "skills"
+    if not skills_dir.is_dir():
+        return []
+    return sorted(p.name for p in skills_dir.iterdir() if p.is_dir() and not p.name.startswith("."))
+
+
+def _harness_skill_map(harnesses: Mapping[str, Any] | None) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for key, item in (harnesses or {}).items():
+        digest = getattr(item, "digest", None) or str(key)
+        skills = _skill_names(item)
+        if skills and digest not in found:
+            found[digest] = skills
+    return found
+
+
+def _invoked_skills_from_calls(record: dict[str, Any]) -> set[str] | None:
+    """Parse exact ``skill`` tool invocations from ``llm_calls.jsonl.gz`` when ``activity.skills`` is absent."""
+
+    tdir = Path(((record.get("finished") or {}).get("trajectory") or {}).get("dir", ""))
+    calls_path = tdir / "llm_calls.jsonl.gz"
+    if not tdir.name or not calls_path.is_file():
+        return None
+    found: set[str] = set()
+    try:
+        with gzip.open(calls_path, "rt", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if '"skill"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                msg = (row.get("reply") or {}).get("message") or {}
+                for tc in msg.get("tool_calls") or ():
+                    fn = tc.get("function") or {}
+                    if (fn.get("name") or tc.get("name")) != "skill":
+                        continue
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except ValueError:
+                        continue
+                    if isinstance(args, dict) and args.get("name"):
+                        found.add(str(args["name"]).lower())
+    except OSError:
+        return None
+    return found
+
+
+def _episode_skill_set(record: dict[str, Any], known_skills: Sequence[str], transcript_text: str = "") -> set[str]:
+    finished = record.get("finished") or {}
+    activity = finished.get("activity") or {}
+    if isinstance(activity.get("skills"), dict) and (activity.get("sessions") or activity["skills"]):
+        return {str(k).lower() for k, v in activity["skills"].items() if v}
+    parsed = _invoked_skills_from_calls(record)
+    if parsed is not None:
+        return parsed
+    # Fallback when no trajectory files exist (e.g. unit tests): inspect transcript/final_text/notes
+    haystack = " ".join([
+        transcript_text,
+        str(finished.get("final_text") or ""),
+        *(str(note.get("text") or "") for note in record.get("notes") or ()),
+    ]).lower()
+    return {s.lower() for s in known_skills if s.lower() in haystack}
+
+
+def _best_eval_detail(record: dict[str, Any]) -> tuple[float | None, bool, str]:
+    best_score: float | None = None
+    any_passed = False
+    best_reason = ""
+    for ev in record.get("evaluations") or ():
+        sc = (ev.get("local") or {}).get("score")
+        sel = ev.get("local_selection") or {}
+        if sel.get("passed"):
+            any_passed = True
+        if isinstance(sc, (int, float)) and np.isfinite(sc):
+            val = float(sc)
+            if best_score is None or val > best_score:
+                best_score = val
+                best_reason = str(sel.get("reason") or "")
+    for sub in record.get("submissions") or ():
+        sel = sub.get("local_selection") or {}
+        sc = (sub.get("local") or {}).get("score")
+        if isinstance(sc, (int, float)) and np.isfinite(sc):
+            val = float(sc)
+            if best_score is None or val >= best_score:
+                best_score = val
+                if sel.get("reason"):
+                    best_reason = str(sel["reason"])
+    return best_score, any_passed, best_reason
+
+
+def triage(
+    view: dict[str, Any],
+    records: dict[str, dict[str, Any]],
+    names: dict[str, str],
+    *,
+    harnesses: Mapping[str, Any] | None = None,
+    transcripts_by_ep: Mapping[str, str] | None = None,
+) -> str:
+    """Zero-LLM failure triage, ACT skill/hook activation attribution, and HDA cost-efficiency metrics."""
+
+    seen_eps: set[str] = set()
+    scored_items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for round_ in view.get("rounds") or ():
+        for item in _round_all_episodes(round_):
+            ep = item.get("episode")
+            if not ep or ep in seen_eps:
+                continue
+            record = records.get(ep)
+            if not record:
+                continue
+            seen_eps.add(ep)
+            scored = record.get("scored") or {}
+            if item.get("status") in SCORED_STATUSES and isinstance(scored.get("score"), (int, float)):
+                scored_items.append((item, record))
+
+    lines = [
+        "# 病灶分诊、激活归因与效率分析（零 LLM 自动生成）",
+        "",
+        "基于规则自动汇总失败模式（提交损耗、门控拦截与局部过拟合）、分时距瓶颈、技能/钩子激活归因（ACT）与"
+        "成本效率（HDA），用于优先锁定最确定、最高杠杆的 Harness 改进点。",
+        "",
+        "## 1. 失败模式与提交损耗分诊",
+        "",
+    ]
+    if not scored_items:
+        lines.append("（暂无已评分回合可供分诊。）")
+        return "\n".join(lines) + "\n"
+
+    incumbent = str(view.get("incumbent") or "")
+    # (missed_gain, kind_tag, item, record, start_local, max_eval)
+    sub_loss: list[tuple[float, str, dict[str, Any], dict[str, Any], float | None, float | None]] = []
+    overfits: list[tuple[float, dict[str, Any], dict[str, Any], float, float]] = []
+    horizon_skills: dict[int, list[float]] = {}
+    inc_horizon_skills: dict[int, list[float]] = {}
+    rescued = 0
+    hooked = 0
+    aborts = 0
+    timeouts = 0
+    zero_subs_weak = 0
+    kept_strong_template = 0
+
+    for item, record in scored_items:
+        scored = record["scored"]
+        finished = record.get("finished") or {}
+        if finished.get("rescue_triggered"):
+            rescued += 1
+        if finished.get("hook_fired"):
+            hooked += 1
+        if (finished.get("degenerate_aborts") or 0) > 0:
+            aborts += 1
+        hit_timeout = item.get("status") == "timeout" or (finished.get("refused_calls") or 0) > 0
+        if hit_timeout:
+            timeouts += 1
+
+        for cell in scored.get("cells") or ():
+            _, _, h_str = str(cell.get("cell") or "").rpartition("@")
+            skill = cell.get("skill")
+            if h_str.isdigit() and isinstance(skill, (int, float)) and np.isfinite(skill):
+                h = int(h_str)
+                horizon_skills.setdefault(h, []).append(float(skill))
+                if item.get("harness") == incumbent:
+                    inc_horizon_skills.setdefault(h, []).append(float(skill))
+
+        start_raw = ((record.get("start") or {}).get("local") or {}).get("score")
+        start_local = float(start_raw) if isinstance(start_raw, (int, float)) and np.isfinite(start_raw) else None
+        strong_template = start_local is not None and start_local > REPLACE_MARGIN
+        max_eval, any_passed, best_reason = _best_eval_detail(record)
+        subs = record.get("submissions") or ()
+        if not subs and not strong_template:
+            zero_subs_weak += 1
+
+        if scored.get("start") or scored.get("auto") or not subs:
+            missed_gain = (max_eval - start_local) if (max_eval is not None and start_local is not None) else 0.0
+            has_high_eval = any_passed or missed_gain >= max(REPLACE_MARGIN, UNSUBMITTED_GAIN)
+            if any_passed:
+                sub_loss.append((missed_gain, "过门槛未交", item, record, start_local, max_eval))
+            elif has_high_eval:
+                tag = f"门控拦截:{best_reason}" if best_reason and best_reason != "passed" else "高分未交"
+                sub_loss.append((missed_gain, tag, item, record, start_local, max_eval))
+            elif not strong_template and not subs:
+                sub_loss.append((missed_gain, "弱模板零提交", item, record, start_local, max_eval))
+            elif strong_template and scored.get("start"):
+                kept_strong_template += 1
+        else:
+            local_val = _scored_local(record)
+            hidden_val = float(scored["score"])
+            if isinstance(local_val, (int, float)) and np.isfinite(local_val):
+                gap = float(local_val) - hidden_val
+                if gap > OVERFIT_GAP:
+                    overfits.append((gap, item, record, float(local_val), hidden_val))
+
+    total_scored = len(scored_items)
+    lines.append(
+        f"- 统计范围：{total_scored} 个已评分回合（触顶超时 {timeouts}，弱模板零提交 {zero_subs_weak}，"
+        f"强模板合规沿用 {kept_strong_template}，触发预算救援 {rescued}，触发审计钩子 {hooked}，复读熔断 {aborts}）。"
+    )
+    if sub_loss:
+        sub_loss.sort(key=lambda row: (-row[0], row[2].get("episode", "")))
+        missed_unsub = sum(1 for _, tag, *_ in sub_loss if tag in ("过门槛未交", "高分未交"))
+        gate_blocked = sum(1 for _, tag, *_ in sub_loss if tag.startswith("门控拦截:"))
+        detail_bits = []
+        if missed_unsub:
+            detail_bits.append(f"高分/过门槛漏交 {missed_unsub} 个")
+        if gate_blocked:
+            detail_bits.append(f"被本地替换门控拦截 {gate_blocked} 个")
+        weak_zero = sum(1 for _, tag, *_ in sub_loss if tag == "弱模板零提交")
+        if weak_zero:
+            detail_bits.append(f"弱模板零提交 {weak_zero} 个")
+        detail = f"（{'，'.join(detail_bits)}；优先通过 `hooks/rescue.md` 或门控针对性优化修复）" if detail_bits else ""
+        lines += [
+            f"- **提交损耗与门控拦截**：发现 {len(sub_loss)} 个异常回合{detail}：",
+            "",
+            "| 回合 | 版本 | 任务 | 模板本地分 | 最高本地分 | 提交数 | 诊断类型 | 预算救援 |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for _, tag, item, record, start_l, max_e in sub_loss[:10]:
+            h_id = str(item.get("harness") or "")
+            fin = record.get("finished") or {}
+            lines.append(
+                f"| `{record['episode']}` | {names.get(h_id, '')} `{h_id[:8]}` | `{record['task_id']}` | "
+                f"{_signed(start_l, 4)} | {_signed(max_e, 4)} | {len(record.get('submissions') or ())} | "
+                f"{tag} | {'是' if fin.get('rescue_triggered') else '否'} |"
+            )
+        lines.append("")
+    else:
+        lines.append("- **提交损耗与门控拦截**：未发现弱模板零提交、漏提交或高分门控拦截。")
+
+    if overfits:
+        overfits.sort(key=lambda row: (-row[0], row[1].get("episode", "")))
+        lines += [
+            f"- **本地→隐藏期过拟合反转（Local − Hidden > {OVERFIT_GAP:.2f}）**：共 {len(overfits)} 个替换模板的回合"
+            "出现显著回撤（建议检查特征过拟合、正则强度或在 `hooks/audit_submission.py` 中增加门禁审计）：",
+            "",
+            "| 回合 | 版本 | 任务 | 评分程序本地分 | 隐藏期得分 | 回撤 (本地−隐藏) |",
+            "|---|---|---|---|---|---|",
+        ]
+        for gap, item, record, local_v, hidden_v in overfits[:10]:
+            h_id = str(item.get("harness") or "")
+            lines.append(
+                f"| `{record['episode']}` | {names.get(h_id, '')} `{h_id[:8]}` | `{record['task_id']}` | "
+                f"{_signed(local_v, 4)} | {_signed(hidden_v, 4)} | {gap:+.4f} |"
+            )
+        lines.append("")
+    else:
+        lines.append(f"- **本地→隐藏期过拟合反转**：无回撤超过 {OVERFIT_GAP:.2f} 的提交。")
+
+    if horizon_skills:
+        lines += ["", "### 分时距隐藏期瓶颈（由弱到强）", "", "| 预报时距 | 在任版本均分 | 全部回合均分 | 样本数 |", "|---|---|---|---|"]
+        ordered_h = sorted(horizon_skills, key=lambda h: float(np.mean(inc_horizon_skills.get(h) or horizon_skills[h])))
+        for h in ordered_h:
+            inc_v = _mean(inc_horizon_skills.get(h, []))
+            all_v = _mean(horizon_skills[h])
+            lines.append(f"| `h={h}` | {_signed(inc_v, 4)} | {_signed(all_v, 4)} | {len(horizon_skills[h])} |")
+        lines.append("")
+
+    # Section 2: ACT Skill & Hook Activation Attribution
+    lines += ["## 2. 技能与钩子激活归因（ACT Attribution）", ""]
+    hook_acted = [
+        float(rec["scored"]["score"]) for _, rec in scored_items if (rec.get("finished") or {}).get("hook_fired")
+    ]
+    hook_idle = [float(rec["scored"]["score"]) for _, rec in scored_items
+                 if not (rec.get("finished") or {}).get("hook_fired")]
+    if hook_acted:
+        mean_a, mean_i = _mean(hook_acted), _mean(hook_idle)
+        diff_txt = f"，差值 {_signed((mean_a or 0.0) - (mean_i or 0.0), 4)}" if mean_i is not None else ""
+        lines.append(
+            f"- **提交审计钩子（`hook_fired`）**：触发告警 {len(hook_acted)}/{total_scored} 回合"
+            f"（{len(hook_acted) / total_scored:.0%}），触发均分 {_signed(mean_a, 4)} vs 未触发 {_signed(mean_i, 4)}{diff_txt}。"
+        )
+    else:
+        lines.append("- **提交审计钩子（`hooks/audit_submission.py`）**：尚未在任何回合触发告警（当前 Harness 未配置或未命中告警）。")
+
+    rescue_acted = [float(rec["scored"]["score"]) for _, rec in scored_items
+                    if (rec.get("finished") or {}).get("rescue_triggered")]
+    rescue_idle = [float(rec["scored"]["score"]) for _, rec in scored_items
+                   if not (rec.get("finished") or {}).get("rescue_triggered")]
+    if rescue_acted:
+        lines.append(
+            f"- **预算救援（`rescue_triggered`）**：触发 {len(rescue_acted)}/{total_scored} 回合，"
+            f"触发均分 {_signed(_mean(rescue_acted), 4)} vs 未触发 {_signed(_mean(rescue_idle), 4)}。"
+        )
+
+    skill_map = _harness_skill_map(harnesses)
+    if skill_map:
+        tx_map = transcripts_by_ep or {}
+        ep_skills: dict[str, set[str]] = {}
+        skill_totals: dict[str, list[int]] = {}  # skill -> [acted_eps, total_eps_with_skill]
+        skill_rows: list[str] = []
+        for h_digest, skill_list in skill_map.items():
+            h_eps = [(item, rec) for item, rec in scored_items if item.get("harness") == h_digest]
+            if not h_eps:
+                continue
+            label = f"{names.get(h_digest, '')} `{h_digest[:8]}`"
+            for _, rec in h_eps:
+                if rec["episode"] not in ep_skills:
+                    ep_skills[rec["episode"]] = _episode_skill_set(
+                        rec, skill_list, tx_map.get(rec["episode"], "")
+                    )
+            for skill in skill_list:
+                key = skill.lower()
+                acted = [float(rec["scored"]["score"]) for _, rec in h_eps if key in ep_skills[rec["episode"]]]
+                not_acted = [float(rec["scored"]["score"]) for _, rec in h_eps if key not in ep_skills[rec["episode"]]]
+                counts = skill_totals.setdefault(skill, [0, 0])
+                counts[0] += len(acted)
+                counts[1] += len(h_eps)
+                rate = len(acted) / len(h_eps)
+                skill_rows.append(
+                    f"| {label} | `{skill}` | {len(acted)}/{len(h_eps)} ({rate:.0%}) | "
+                    f"{_signed(_mean(acted), 4)} | {_signed(_mean(not_acted), 4)} |"
+                )
+        if skill_rows:
+            lines += [
+                "",
+                "| 版本 | 技能目录 | 激活率 | 激活回合均分 | 未激活回合均分 |",
+                "|---|---|---|---|---|",
+                *skill_rows,
+            ]
+        dead_skills = [f"`{name}`（0/{tot} 回合）" for name, (hit, tot) in sorted(skill_totals.items())
+                       if hit == 0 and tot > 0]
+        if dead_skills:
+            lines += ["", f"- ⚠ **零激活技能（建议合并或剪枝，避免上下文膨胀）**：{'、'.join(dead_skills)}。"]
+    lines.append("")
+
+    # Section 3: HDA Cost-Efficiency Attribution
+    lines += [
+        "## 3. 成本与效率归因（HDA: Harness Delta Attribution）",
+        "",
+        "对比各版本的隐藏期得分、相对在任版本增益、平均 Token 消耗与单位 Token 收益（`ΔScore / MToken`）。"
+        f"若成本倍率 > {HDA_COST_RATIO_WARN:.2f}× 且增益 < {HDA_MIN_GAIN:+.3f}，标记为高成本低增益。",
+        "",
+    ]
+    by_harness: dict[str, dict[str, list[float]]] = {}
+    for item, rec in scored_items:
+        h_id = str(item.get("harness") or "")
+        fin = rec.get("finished") or {}
+        bucket = by_harness.setdefault(h_id, {"scores": [], "tokens": [], "seconds": []})
+        bucket["scores"].append(float(rec["scored"]["score"]))
+        tok = fin.get("tokens")
+        if isinstance(tok, (int, float)) and tok > 0:
+            bucket["tokens"].append(float(tok))
+        sec = fin.get("seconds")
+        if isinstance(sec, (int, float)) and sec >= 0:
+            bucket["seconds"].append(float(sec))
+
+    decision_delta: dict[str, float] = {}
+    for round_ in view.get("rounds") or ():
+        for cand in round_.get("candidates") or ():
+            dec = cand.get("decision") or {}
+            if cand.get("digest") and isinstance(dec.get("delta"), (int, float)):
+                decision_delta[str(cand["digest"])] = float(dec["delta"])
+
+    inc_bucket = by_harness.get(incumbent) or {}
+    inc_score = _mean(inc_bucket.get("scores", []))
+    inc_tokens = _mean(inc_bucket.get("tokens", []))
+
+    lines += [
+        "| 版本 | 回合数 | 隐藏均分 | 相对在任 Δ | 均值 Token (K) | 均耗 (秒) | 成本倍率 | Δ / MToken | 效率诊断 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for h_id, bucket in by_harness.items():
+        m_score = _mean(bucket["scores"])
+        m_tok = _mean(bucket["tokens"])
+        m_sec = _mean(bucket["seconds"])
+        delta = (
+            0.0 if h_id == incumbent else decision_delta.get(
+                h_id, (m_score - inc_score) if (m_score is not None and inc_score is not None) else None
+            )
+        )
+        ratio = (m_tok / inc_tokens) if (m_tok and inc_tokens and inc_tokens > 0) else None
+        mtok_gain = (delta / max(m_tok / 1_000_000.0, 0.01)) if (delta is not None and m_tok) else None
+        mark = "（在任）" if h_id == incumbent else ""
+        if h_id == incumbent:
+            diag = "基线"
+        elif ratio is not None and delta is not None and ratio > HDA_COST_RATIO_WARN and delta < HDA_MIN_GAIN:
+            diag = "⚠ 高成本低增益"
+        elif ratio is not None and delta is not None and ratio <= 1.05 and delta > 0.005:
+            diag = "★ 提效且增分"
+        elif delta is not None and delta > 0.0:
+            diag = "正增益"
+        else:
+            diag = "无净增益"
+        tok_str = f"{m_tok / 1000:.1f}K" if m_tok is not None else "–"
+        sec_str = f"{m_sec:.0f}s" if m_sec is not None else "–"
+        ratio_str = f"{ratio:.2f}×" if ratio is not None else "–"
+        lines.append(
+            f"| {names.get(h_id, '')} `{h_id[:8]}`{mark} | {len(bucket['scores'])} | {_signed(m_score, 4)} | "
+            f"{_signed(delta, 4)} | {tok_str} | {sec_str} | {ratio_str} | {_signed(mtok_gain, 3)} | {diag} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks: Sequence[str],
                    names: dict[str, str], expert_text: str = "",
                    ensembles: dict[str, dict[str, dict[str, Any]]] | None = None,
                    archived: Mapping[str, Any] | None = None,
-                   prior: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Write ``overview.md``, ``archive.md``, ``lessons.md``, ``contrasts.md``, ``expert.md``, ``prior_runs.md``
-    and one folder per episode (``summary.md``, ``transcript.md``, the scored ``submission/``); ``archived``
-    maps the labels of the versions copied into the evolver's ``archive/`` to their harnesses, ``prior`` lists
-    the runs whose training tasks are all among this run's (``related_runs``, read from the ledger when None)."""
+                   prior: Sequence[dict[str, Any]] | None = None,
+                   incumbent: Any = None) -> dict[str, Any]:
+    """Write ``overview.md``, ``triage.md``, ``archive.md``, ``lessons.md``, ``contrasts.md``, ``expert.md``,
+    ``prior_runs.md`` and one folder per episode (``summary.md``, ``transcript.md``, the scored ``submission/``);
+    ``archived`` maps the labels of the versions copied into the evolver's ``archive/`` to their harnesses,
+    ``prior`` lists the runs whose training tasks are all among this run's (``related_runs``, read from the
+    ledger when None)."""
 
+    harness_map: dict[str, Any] = {}
+    if incumbent is not None and getattr(incumbent, "digest", None):
+        harness_map[str(incumbent.digest)] = incumbent
+    for item in (archived or {}).values():
+        if getattr(item, "digest", None):
+            harness_map[str(item.digest)] = item
     archived = _archived(archived)
 
     target.mkdir(parents=True, exist_ok=True)
@@ -804,6 +1217,7 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
     records = {episode: fold_episode(ledger.events(episode)) for episode in roles}
     episodes_dir = target / "episodes"
     programs: dict[str, dict[str, bytes]] = {}
+    transcripts_by_ep: dict[str, str] = {}
     transcripts = 0
     for episode, record in records.items():
         folder = episodes_dir / episode.replace(":", "-")
@@ -817,10 +1231,15 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
             path.write_bytes(data)
         if text := transcript(record, role=roles[episode]):
             (folder / "transcript.md").write_text(text, encoding="utf-8")
+            transcripts_by_ep[episode] = text
             transcripts += 1
     record = lineage(view, related_runs(ledger, view) if prior is None else prior)
     (target / "overview.md").write_text(overview(view, records, tasks, names, ensembles)
                                         + (f"\n{record}" if record else ""), encoding="utf-8")
+    (target / "triage.md").write_text(
+        triage(view, records, names, harnesses=harness_map, transcripts_by_ep=transcripts_by_ep),
+        encoding="utf-8",
+    )
     (target / "archive.md").write_text(archive(view, archived), encoding="utf-8")
     (target / "lessons.md").write_text(lessons(records.values(), names), encoding="utf-8")
     (target / "contrasts.md").write_text(contrasts(view, records, names, programs), encoding="utf-8")
@@ -839,4 +1258,4 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
 
 
 __all__ = ["archive", "contrast_pairs", "contrasts", "episode_summary", "lessons", "overview", "prior_runs",
-           "program_diff", "related_runs", "same_tasks", "transcript", "version_label", "write_evidence"]
+           "program_diff", "related_runs", "same_tasks", "transcript", "triage", "version_label", "write_evidence"]

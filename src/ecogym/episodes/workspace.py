@@ -49,8 +49,89 @@ def boundaries(bench: Bench) -> dict[str, Any]:
     }
 
 
-def export_visible(bench: Bench, data_dir: Path, *, expert: str = "") -> dict[str, Any]:
-    """Write the visible data, its documentation and (if any) the expert guidance into ``data_dir``."""
+def _autocorr(series: np.ndarray, lag: int) -> float | None:
+    if lag <= 0 or lag >= series.size:
+        return None
+    a, b = series[:-lag], series[lag:]
+    mask = np.isfinite(a) & np.isfinite(b)
+    if int(mask.sum()) < 8:
+        return None
+    x, y = a[mask], b[mask]
+    sx, sy = float(np.std(x)), float(np.std(y))
+    if sx <= 1e-12 or sy <= 1e-12:
+        return None
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def data_profile(
+    bench: Bench,
+    bounds: dict[str, Any],
+    columns: list[str],
+    values: list[np.ndarray],
+    *,
+    start_report: dict[str, Any] | None = None,
+) -> str:
+    """Precomputed visible-data statistics and starting-template local diagnostics (zero hidden data)."""
+
+    task = bench.task
+    season = int(task.season_steps)
+    lines = [
+        "# 预计算数据与基线画像（仅可见期）",
+        "",
+        f"自动生成于回合启动前（共 {values[0].size if values else 0} 行，"
+        f"步长 `{bench.frame.step}`，季节周期 `{season}` 步；"
+        f"本地检验 `{bounds['local_check'][0]}` → `{bounds['local_check'][1]}`）。"
+        "可直接据此跳过基础探索，优先切入建模与特征工程。",
+        "",
+        "## 列分布与自相关（仅可见数据）",
+        "",
+        "| 列 | 角色 | 有效率 | 均值 | 标准差 | P5 / P50 / P95 | Lag-1 自相关 | 季节 Lag 自相关 |",
+        "|---|---|---:|---:|---:|---|---:|---:|",
+    ]
+    for name, arr in zip(columns, values, strict=True):
+        finite = arr[np.isfinite(arr)]
+        rate = float(finite.size / arr.size) if arr.size else 0.0
+        spec = bench.frame.specs[name]
+        role = f"{spec.role}*" if name in task.target_names else spec.role
+        if finite.size == 0:
+            lines.append(f"| `{name}` | {role} | 0% | – | – | – | – | – |")
+            continue
+        p5, p50, p95 = (float(v) for v in np.percentile(finite, [5, 50, 95]))
+        ac1 = _autocorr(arr, 1) if name in task.target_names else None
+        acs = _autocorr(arr, season) if name in task.target_names and season > 1 else None
+        ac1_s = f"{ac1:+.3f}" if ac1 is not None else "–"
+        acs_s = f"{acs:+.3f}" if acs is not None else "–"
+        lines.append(
+            f"| `{name}` | {role} | {rate:.0%} | {float(np.mean(finite)):.3g} | "
+            f"{float(np.std(finite)):.3g} | {p5:.3g} / {p50:.3g} / {p95:.3g} | {ac1_s} | {acs_s} |"
+        )
+    if start_report and start_report.get("cells"):
+        cells = [cell for cell in start_report["cells"] if isinstance(cell.get("skill"), (int, float))]
+        score = start_report.get("score")
+        score_s = f"{float(score):+.4f}" if isinstance(score, (int, float)) else "–"
+        lines += ["", f"## 起始模板本地检验短板（总分 {score_s}，状态 `{start_report.get('status')}`）", ""]
+        by_h: dict[int, list[float]] = {}
+        for cell in cells:
+            _, _, hz = str(cell.get("cell", "")).partition("@")
+            if hz.isdigit():
+                by_h.setdefault(int(hz), []).append(float(cell["skill"]))
+        if by_h:
+            h_parts = [f"h={h}: `{sum(vals) / len(vals):+.4f}`" for h, vals in sorted(by_h.items())]
+            lines.append("- **分时距均值**：" + " · ".join(h_parts))
+        weakest = sorted(cells, key=lambda item: float(item["skill"]))[:4]
+        if weakest:
+            lines.append("- **最弱计分格（优先攻克）**：")
+            for cell in weakest:
+                lines.append(
+                    f"  - `{cell['cell']}`：技能 `{float(cell['skill']):+.4f}`"
+                    f"（RMSE `{float(cell.get('rmse', 0)):.4g}` vs 基线 `{float(cell.get('baseline_rmse', 0)):.4g}`）"
+                )
+    return "\n".join(lines) + "\n"
+
+
+def export_visible(bench: Bench, data_dir: Path, *, expert: str = "",
+                   start_report: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Write the visible data, its documentation, precomputed profile, and (if any) expert guidance."""
 
     data_dir.mkdir(parents=True, exist_ok=True)
     if expert.strip():
@@ -91,6 +172,8 @@ def export_visible(bench: Bench, data_dir: Path, *, expert: str = "") -> dict[st
     coverage = {name: round(float(np.isfinite(column).mean()), 3) for name, column in zip(columns, values, strict=True)}
     readme = _data_readme(bench, bounds, int(keep.sum()), coverage, expert=bool(expert.strip()))
     (data_dir / "README.md").write_text(readme, encoding="utf-8")
+    profile_text = data_profile(bench, bounds, list(columns), values, start_report=start_report)
+    (data_dir / "profile.md").write_text(profile_text, encoding="utf-8")
     return {"rows": int(keep.sum()), "columns": list(columns), "boundaries": bounds, "expert": bool(expert.strip())}
 
 
@@ -105,6 +188,7 @@ def _data_readme(bench: Bench, bounds: dict[str, Any], rows: int, coverage: dict
         "每个时间步一行，缺失值为空。",
         "- `columns.csv`：每列的含义、角色、单位、有效范围，以及读数保持可用的最长步数（用于前向填充）。",
         "- `spec.json`：裁判传给 `Predictor(spec)` 的同一份说明。",
+        "- `profile.md`：预计算的列分布、自相关与起始模板本地弱项画像（可直接参考，免去重复写基础 EDA）。",
         "- `background.md`：任务提供的背景资料。",
         *(["- `expert.md`：领域专家的提示，以及对以往回合中问题的回答。"] if expert else []),
         "",
@@ -183,7 +267,7 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 
 ## 数据与信息集
 
-- 数据都在 `data/` 下，先读 `data/README.md`。
+- 数据都在 `data/` 下，先读 `data/README.md` 和 `data/profile.md`（已预计算各列分布与起始模板弱项）。
 - 预报只能使用起点及以前的观测。{known_now}
 - 工作区以外的文件和网络都不可访问；`web_search` 可以用来查资料。
 
@@ -215,4 +299,4 @@ def task_brief(bench: Bench, bounds: dict[str, Any], *, minutes: float, tokens: 
 """
 
 
-__all__ = ["LOCAL_STAGE", "SCORED_STAGE", "boundaries", "export_visible", "task_brief"]
+__all__ = ["LOCAL_STAGE", "SCORED_STAGE", "boundaries", "data_profile", "export_visible", "task_brief"]

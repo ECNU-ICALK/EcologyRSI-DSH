@@ -46,20 +46,35 @@ def select_stage_tasks(
     stage: int,
     total_stages: int,
     batch_size: int = 0,
+    task_difficulty: Mapping[str, float] | None = None,
 ) -> list[TaskSpec]:
     """Deterministically pick a stratified, complementary mini-batch of training tasks for a relay stage.
 
-    Tasks are interleaved across ``task.dataset`` groups before slicing so every mini-batch balances groups,
-    consecutive stages within a generation draw complementary slices, and successive generations rotate their
-    starting offset.
+    Tasks are interleaved across ``task.dataset`` groups before slicing so every mini-batch balances groups and
+    consecutive stages within a generation draw complementary slices. When ``task_difficulty`` is provided,
+    each dataset bucket is sorted by descending difficulty/regret so Stage 1 screens the highest-regret tasks
+    across every dataset first; otherwise successive generations rotate their starting offset.
     """
 
     if not tasks:
         return []
-    groups: dict[str, list[TaskSpec]] = {}
-    for task in tasks:
-        groups.setdefault(task.dataset, []).append(task)
-    ordered_groups = list(groups.values())
+    groups: dict[str, list[tuple[int, TaskSpec]]] = {}
+    for idx, task in enumerate(tasks):
+        groups.setdefault(task.dataset, []).append((idx, task))
+    use_diff = bool(task_difficulty)
+    ordered_groups: list[list[TaskSpec]] = []
+    for bucket in groups.values():
+        if use_diff:
+            bucket = sorted(
+                bucket,
+                key=lambda pair: (
+                    -float(task_difficulty[pair[1].id])
+                    if pair[1].id in task_difficulty and _finite(task_difficulty[pair[1].id])
+                    else 0.0,
+                    pair[0],
+                ),
+            )
+        ordered_groups.append([task for _, task in bucket])
     ring: list[TaskSpec] = []
     max_len = max(len(bucket) for bucket in ordered_groups)
     for index in range(max_len):
@@ -69,7 +84,10 @@ def select_stage_tasks(
     count = effective_relay_batch(len(ring), total_stages=total_stages, batch_size=batch_size)
     if count >= len(ring):
         return list(ring)
-    offset = ((max(1, generation) - 1) + (max(1, stage) - 1) * count) % len(ring)
+    if use_diff:
+        offset = ((max(1, stage) - 1) * count) % len(ring)
+    else:
+        offset = ((max(1, generation) - 1) + (max(1, stage) - 1) * count) % len(ring)
     chosen: list[TaskSpec] = []
     seen: set[str] = set()
     for step in range(len(ring)):
