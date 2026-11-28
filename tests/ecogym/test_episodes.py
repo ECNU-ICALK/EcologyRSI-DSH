@@ -37,7 +37,7 @@ from .helpers import synthetic_bench, synthetic_frame
 
 try:
     RUNTIME = sbx.discover_runtime()
-except sbx.SandboxUnavailable:
+except (sbx.SandboxUnavailable, OSError):
     RUNTIME = None
 HAVE_SANDBOX = sbx.available() and RUNTIME is not None
 requires_sandbox = unittest.skipUnless(HAVE_SANDBOX, "agent runtime or sandbox-exec not available")

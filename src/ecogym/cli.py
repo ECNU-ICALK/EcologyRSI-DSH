@@ -599,8 +599,20 @@ def _progress(kind: str, body: dict[str, Any]) -> None:
               flush=True)
     elif kind == "evolver_finished":
         found = ", ".join(f"{item['name']}={item['status']}" for item in body.get("candidates", []))
-        print(f"{stamp}   evolver {body.get('status')} in {body.get('seconds', 0):.0f} s: {found or body.get('error')}",
-              flush=True)
+        stage = f" [relay {body['relay_stage']}]" if body.get("relay_stage") is not None else ""
+        print(f"{stamp}   evolver{stage} {body.get('status')} in {body.get('seconds', 0):.0f} s: "
+              f"{found or body.get('error')}", flush=True)
+    elif kind == "relay_stage_planned":
+        names = ", ".join(item["name"] for item in body.get("candidates", [])) or "none"
+        print(f"{stamp}   relay stage {body['stage']}/{body.get('total_stages')}: "
+              f"{len(body.get('tasks', []))} tasks, candidates [{names}]", flush=True)
+    elif kind == "relay_stage_finished":
+        leader = body.get("leader") or {}
+        delta = leader.get("mean_delta")
+        lead = (f"leader {leader.get('label')} ({delta:+.4f}, {leader.get('better', 0)}/{leader.get('paired', 0)})"
+                if leader.get("advanced") and isinstance(delta, (int, float))
+                else f"kept {leader.get('label') or 'incumbent'}")
+        print(f"{stamp}   relay stage {body['stage']}/{body.get('total_stages')} done -> {lead}", flush=True)
     elif kind == "candidate_proposed":
         print(f"{stamp}   candidate {body['name']} {body['digest'][:12]}: {body.get('summary', '')[:100]}", flush=True)
     elif kind == "candidate_rejected":
@@ -653,7 +665,12 @@ def cmd_evolve_run(args: argparse.Namespace) -> int:
                               outage_minutes=args.outage_minutes, auto_resume=args.auto_resume,
                               check_adoptions=args.check_adoptions, method_research=args.method_research,
                               method_registry=args.method_registry or os.environ.get("ECOGYM_METHOD_REGISTRY"),
-                              local_selection=args.local_selection)
+                              local_selection=args.local_selection,
+                              template_fast_track=args.template_fast_track,
+                              early_prune=args.early_prune,
+                              relay_stages=args.relay_stages,
+                              relay_batch=args.relay_batch,
+                              relay_candidates=args.relay_candidates)
     evolution = Evolution(config, args.ledger, on_event=None if args.json else _progress)
     if run_id is not None:
         try:  # claim only after checking the environment that will resume it
@@ -731,6 +748,14 @@ def cmd_evolve_show(args: argparse.Namespace) -> int:
                 scores.setdefault(key, []).append(entry["score"])
         means = ", ".join(f"{key} {sum(values) / len(values):+.4f} ({len(values)})" for key, values in scores.items())
         print(f"\nround {round_['generation']}  {round_.get('outcome') or 'unfinished'}  episodes: {means or '–'}")
+        for st in round_.get("relay_stages") or []:
+            leader = st.get("leader") or {}
+            delta = leader.get("mean_delta")
+            lead = (f"-> {leader.get('label')} ({delta:+.4f}, {leader.get('better', 0)}/{leader.get('paired', 0)})"
+                    if leader.get("advanced") and isinstance(delta, (int, float))
+                    else f"-> kept {leader.get('label') or 'incumbent'}")
+            print(f"  [relay {st.get('stage')}/{st.get('total_stages')}] {len(st.get('tasks') or [])} tasks, "
+                  f"{len(st.get('candidates') or [])} candidates {lead}")
         for candidate in round_["candidates"]:
             decision = candidate.get("decision") or {}
             gain = (f"gain {decision['delta']:+.4f} [{decision['interval'][0]:+.4f}, {decision['interval'][1]:+.4f}] "
@@ -955,6 +980,114 @@ def cmd_expert_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_subcommand(group, name: str, handler, help_text: str, *, ledger: bool = False):
+    sub = group.add_parser(name, help=help_text)
+    sub.set_defaults(handler=handler)
+    sub.add_argument("--json", action="store_true", help="machine-readable output")
+    if ledger:
+        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
+    return sub
+
+
+def _add_dsh_commands(commands) -> None:
+    dsh = commands.add_parser("dsh", help="the DSH plugin: DSH starts ecogym and shows the 生态进化 panel")
+    dshs = dsh.add_subparsers(dest="dsh_command", required=True)
+    for name, handler, text in (("install", cmd_dsh_install, "add the plugin to a DSH profile"),
+                                ("uninstall", cmd_dsh_uninstall, "remove the plugin from a DSH profile"),
+                                ("status", cmd_dsh_status, "where the plugin is installed and what it starts")):
+        sub = _add_subcommand(dshs, name, handler, text)
+        sub.add_argument("--profile", default="web", help="DSH profile under $DSH_HOME/profiles (default web)")
+        if name == "install":
+            sub.add_argument("--home", type=Path, default=None,
+                             help="ECOGYM_HOME of the service (default $ECOGYM_HOME or ~/.ecogym)")
+            sub.add_argument("--ledger", type=Path, default=None, help="ledger file (default <home>/ledger.sqlite3)")
+            sub.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                             help="extra environment for the service (repeatable); ECOGYM_DATA_ROOT, "
+                                  "ECOGYM_RUNTIME_PYTHON, ECOGYM_DSH_BIN and ECOGYM_CACHE_DIR are taken from "
+                                  "this shell")
+            sub.add_argument("--keep-legacy", action="store_true",
+                             help="leave the EcologyRSI plugin block in the profile's cordis.patch.yml")
+    auto = _add_subcommand(dshs, "autostart", cmd_dsh_autostart,
+                           "macOS: launchd starts `dsh --profile web --no-open` at login and after "
+                           "a crash (on), stops it and removes the job (off), or reports it")
+    auto.add_argument("action", choices=("on", "off", "status"))
+    auto.add_argument("--profile", default="web", help="a DSH profile that serves the web UI (default web)")
+    auto.add_argument("--wait", type=float, default=90.0, help="seconds `on` waits for the web address (default 90)")
+
+
+def _add_evolve_commands(commands, default_sel: str, sel_policies: Sequence[str]) -> None:
+    evolve = commands.add_parser("evolve", help="evolve an agent harness on a suite's training tasks")
+    evolves = evolve.add_subparsers(dest="evolve_command", required=True)
+    start = _add_subcommand(evolves, "run", cmd_evolve_run, "start (or --resume) an evolution run", ledger=True)
+    start.add_argument("--suite", help="suite id (see `ecogym suites`) or a suite TOML file")
+    start.add_argument("--resume", metavar="RUN", help="continue this run after its last finished round")
+    start.add_argument("--harness", default="seed", help="starting harness: seed, a directory or a stored digest")
+    start.add_argument("--generations", type=int, default=3, help="proposal rounds after the baseline round")
+    start.add_argument("--candidates", type=int, default=2, help="candidate harnesses per round (1-6)")
+    start.add_argument("--repeats", type=int, default=None,
+                       help="episodes per harness and training task per round (default: what the suite is designed "
+                            "for, 2 unless it says otherwise)")
+    start.add_argument("--minutes", type=float, default=20.0, help="time budget of one episode (awake time)")
+    start.add_argument("--tokens", type=int, default=3_000_000, help="cost-weighted token budget of one episode")
+    start.add_argument("--model", default=None,
+                       help="pin the inner agents' model, <provider>/<model> (default: each harness's own)")
+    start.add_argument("--evolver-minutes", type=float, default=30.0)
+    start.add_argument("--evolver-tokens", type=int, default=4_000_000)
+    start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
+    start.add_argument("--method-research", choices=("internal", "supplied", "autonomous"), default="autonomous",
+                       help="investigate external methods, use supplied methods, or use internal evidence")
+    start.add_argument("--method-registry", help="host-approved method directory (or ECOGYM_METHOD_REGISTRY)")
+    start.add_argument("--local-selection", choices=sel_policies, default=default_sel)
+    start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
+    start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
+    start.add_argument("--outage-minutes", type=float, default=120.0,
+                       help="how long a round waits for a model service that stopped answering (0: stop at once)")
+    start.add_argument("--auto-resume", action="store_true",
+                       help="let the service resume the run if it stops for an outage or this process dies")
+    start.add_argument("--check-adoptions", action=argparse.BooleanOptionalAction, default=False,
+                       help="check each adoption on the training tasks' sealed validation period (off by default)")
+    start.add_argument("--template-fast-track", action=argparse.BooleanOptionalAction, default=False,
+                       help="evaluate pure template-only rounds deterministically without LLM agent episodes")
+    start.add_argument("--early-prune", action=argparse.BooleanOptionalAction, default=False,
+                       help="prune clearly dominated candidates after replicate 0 when repeats >= 2")
+    start.add_argument("--relay-stages", type=int, default=1,
+                       help="intra-generation mini-batch relay stages (1: off, 2-3: multi-stage relay)")
+    start.add_argument("--relay-batch", type=int, default=0,
+                       help="training tasks per relay stage (0: auto stratified ceil(tasks / relay_stages))")
+    start.add_argument("--relay-candidates", type=int, default=0,
+                       help="parallel candidates explored per relay stage (0: auto min(4, max(2, candidates)))")
+    start.add_argument("--force", action="store_true", help="--resume even though the ledger says it is running")
+    start.add_argument("--label", default="")
+    _add_subcommand(evolves, "list", cmd_evolve_list, "evolution runs in the ledger", ledger=True)
+    _add_subcommand(evolves, "show", cmd_evolve_show, "rounds, candidates and decisions of a run",
+                    ledger=True).add_argument("run")
+    check = _add_subcommand(evolves, "verify", cmd_evolve_verify,
+                            "one-time verification on holdout tasks or a sealed period", ledger=True)
+    check.add_argument("run")
+    target = check.add_mutually_exclusive_group(required=True)
+    target.add_argument("--holdout", action="store_true", help="run seed and final harness on the holdout tasks")
+    target.add_argument("--sealed", choices=("validation", "final_test"),
+                        help="re-judge their programs on a sealed period")
+    for name, handler, text in (
+        ("finish", cmd_evolve_finish,
+         "end a stopped run where it is (its incumbent becomes the final version), to verify it"),
+        ("check-adoptions", cmd_evolve_check_adoptions,
+         "check each adoption not checked yet on the training tasks' sealed validation period"),
+    ):
+        sub = _add_subcommand(evolves, name, handler, text, ledger=True)
+        sub.add_argument("run")
+        sub.add_argument("--force", action="store_true", help="even though the ledger says it is running")
+    register_method = evolves.add_parser("register-method", help="approve a reviewed local method implementation")
+    register_method.set_defaults(handler=cmd_method_register)
+    register_method.add_argument("--registry", type=Path, required=True)
+    register_method.add_argument("method_id")
+    register_method.add_argument("program", type=Path, help="reviewed directory containing predictor.py")
+    register_method.add_argument("--source", required=True, help="canonical public source URL")
+    register_method.add_argument("--license", required=True)
+    register_method.add_argument("--revision", default="")
+    register_method.add_argument("--summary", default="")
+
+
 def build_parser() -> argparse.ArgumentParser:
     from .episodes.tools import DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES
 
@@ -962,13 +1095,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     def command(name: str, handler, help_text: str, *, task: bool = False, ledger: bool = False, method: bool = False):
-        sub = commands.add_parser(name, help=help_text)
-        sub.set_defaults(handler=handler)
-        sub.add_argument("--json", action="store_true", help="machine-readable output")
+        sub = _add_subcommand(commands, name, handler, help_text, ledger=ledger)
         if task:
             sub.add_argument("task", help="task id (see `ecogym list`)")
-        if ledger:
-            sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
         if method:
             group = sub.add_mutually_exclusive_group(required=True)
             group.add_argument("--preset", help="seed method declared in the task card")
@@ -1008,179 +1137,61 @@ def build_parser() -> argparse.ArgumentParser:
                        help="bearer token for every API call (default $ECOGYM_SERVICE_TOKEN); required beyond loopback")
     serve.add_argument("--exit-with-stdin", action="store_true", help="shut down when stdin reaches end of file")
     serve.add_argument("--no-auto-resume", action="store_true",
-                       help="never resume runs by itself (by default it resumes, every 5 minutes, the runs started "
-                            "with auto_resume that a shutdown, an outage of the model service or a crash stopped)")
-    setup = command("setup", cmd_setup, "create the agent runtime (Python with the scientific stack)")
-    setup.add_argument("--force", action="store_true", help="rebuild it")
+                       help="never resume runs by itself")
+    command("setup", cmd_setup, "create the agent runtime (Python with the scientific stack)").add_argument(
+        "--force", action="store_true", help="rebuild it")
 
-    dsh = commands.add_parser("dsh", help="the DSH plugin: DSH starts ecogym and shows the 生态进化 panel")
-    dshs = dsh.add_subparsers(dest="dsh_command", required=True)
-    for name, handler, text in (("install", cmd_dsh_install, "add the plugin to a DSH profile"),
-                                ("uninstall", cmd_dsh_uninstall, "remove the plugin from a DSH profile"),
-                                ("status", cmd_dsh_status, "where the plugin is installed and what it starts")):
-        sub = dshs.add_parser(name, help=text)
-        sub.set_defaults(handler=handler)
-        sub.add_argument("--json", action="store_true", help="machine-readable output")
-        sub.add_argument("--profile", default="web", help="DSH profile under $DSH_HOME/profiles (default web)")
-        if name == "install":
-            sub.add_argument("--home", type=Path, default=None,
-                             help="ECOGYM_HOME of the service (default $ECOGYM_HOME or ~/.ecogym)")
-            sub.add_argument("--ledger", type=Path, default=None, help="ledger file (default <home>/ledger.sqlite3)")
-            sub.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
-                             help="extra environment for the service (repeatable); ECOGYM_DATA_ROOT, "
-                                  "ECOGYM_RUNTIME_PYTHON, ECOGYM_DSH_BIN and ECOGYM_CACHE_DIR are taken from "
-                                  "this shell")
-            sub.add_argument("--keep-legacy", action="store_true",
-                             help="leave the EcologyRSI plugin block in the profile's cordis.patch.yml")
-    auto = dshs.add_parser("autostart", help="macOS: launchd starts `dsh --profile web --no-open` at login and after "
-                                             "a crash (on), stops it and removes the job (off), or reports it")
-    auto.set_defaults(handler=cmd_dsh_autostart)
-    auto.add_argument("action", choices=("on", "off", "status"))
-    auto.add_argument("--json", action="store_true", help="machine-readable output")
-    auto.add_argument("--profile", default="web", help="a DSH profile that serves the web UI (default web)")
-    auto.add_argument("--wait", type=float, default=90.0, help="seconds `on` waits for the web address (default 90)")
+    _add_dsh_commands(commands)
 
     episode = commands.add_parser("episode", help="agent episodes: a DSH agent solves a task, the judge scores it")
     episodes = episode.add_subparsers(dest="episode_command", required=True)
-
-    def episode_command(name: str, handler, help_text: str):
-        sub = episodes.add_parser(name, help=help_text)
-        sub.set_defaults(handler=handler)
-        sub.add_argument("--json", action="store_true", help="machine-readable output")
-        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
-        return sub
-
-    run_episode = episode_command("run", cmd_episode_run, "run one sandboxed agent episode on a task")
-    run_episode.add_argument("task", help="task id, or <task id>:<episode> for another episode of its dataset")
-    run_episode.add_argument("--harness", default="seed", help="seed, a harness directory, or a stored digest prefix")
-    run_episode.add_argument("--minutes", type=float, default=30.0, help="time budget (awake time)")
-    run_episode.add_argument("--tokens", type=int, default=4_000_000,
-                             help="token budget (cost-weighted: cached prompt tokens count a tenth)")
-    run_episode.add_argument("--model", default=None,
-                             help="override the harness model: <provider>/<model> (see `ecogym models`) or a "
-                                  "DeepSeek model id")
-    run_episode.add_argument("--label", default="")
-    run_episode.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=DEFAULT_LOCAL_SELECTION)
-    run_episode.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
-    episode_command("list", cmd_episode_list, "episodes in the ledger")
-    episode_command("show", cmd_episode_show, "an episode's events").add_argument("episode")
+    run_ep = _add_subcommand(episodes, "run", cmd_episode_run, "run one sandboxed agent episode on a task", ledger=True)
+    run_ep.add_argument("task", help="task id, or <task id>:<episode> for another episode of its dataset")
+    run_ep.add_argument("--harness", default="seed", help="seed, a harness directory, or a stored digest prefix")
+    run_ep.add_argument("--minutes", type=float, default=30.0, help="time budget (awake time)")
+    run_ep.add_argument("--tokens", type=int, default=4_000_000,
+                        help="token budget (cost-weighted: cached prompt tokens count a tenth)")
+    run_ep.add_argument("--model", default=None,
+                        help="override the harness model: <provider>/<model> or a DeepSeek model id")
+    run_ep.add_argument("--label", default="")
+    run_ep.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=DEFAULT_LOCAL_SELECTION)
+    run_ep.add_argument("--keep", action="store_true", help="keep the scratch workspace after the episode")
+    _add_subcommand(episodes, "list", cmd_episode_list, "episodes in the ledger", ledger=True)
+    _add_subcommand(episodes, "show", cmd_episode_show, "an episode's events", ledger=True).add_argument("episode")
 
     command("suites", cmd_suites, "task suites: training and holdout tasks")
     command("models", cmd_models, "model routes the agents can use: DeepSeek and DSH's providers")
-
-    evolve = commands.add_parser("evolve", help="evolve an agent harness on a suite's training tasks")
-    evolves = evolve.add_subparsers(dest="evolve_command", required=True)
-
-    def evolve_command(name: str, handler, help_text: str):
-        sub = evolves.add_parser(name, help=help_text)
-        sub.set_defaults(handler=handler)
-        sub.add_argument("--json", action="store_true", help="machine-readable output")
-        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
-        return sub
-
-    start = evolve_command("run", cmd_evolve_run, "start (or --resume) an evolution run")
-    start.add_argument("--suite", help="suite id (see `ecogym suites`) or a suite TOML file")
-    start.add_argument("--resume", metavar="RUN", help="continue this run after its last finished round")
-    start.add_argument("--harness", default="seed", help="starting harness: seed, a directory or a stored digest")
-    start.add_argument("--generations", type=int, default=3, help="proposal rounds after the baseline round")
-    start.add_argument("--candidates", type=int, default=2, help="candidate harnesses per round (1-6)")
-    start.add_argument("--repeats", type=int, default=None,
-                       help="episodes per harness and training task per round (default: what the suite is designed "
-                            "for, 2 unless it says otherwise)")
-    start.add_argument("--minutes", type=float, default=20.0, help="time budget of one episode (awake time)")
-    start.add_argument("--tokens", type=int, default=3_000_000, help="cost-weighted token budget of one episode")
-    start.add_argument("--model", default=None,
-                       help="pin the inner agents' model, <provider>/<model> (default: each harness's own)")
-    start.add_argument("--evolver-minutes", type=float, default=30.0)
-    start.add_argument("--evolver-tokens", type=int, default=4_000_000)
-    start.add_argument("--evolver-model", default="deepseek-v4-pro", help="the evolver's model, <provider>/<model>")
-    start.add_argument("--method-research", choices=("internal", "supplied", "autonomous"), default="autonomous",
-                       help="investigate external methods (generation 1 or after stagnation first runs a research "
-                            "session, on time and tokens beyond the evolver's), use supplied methods, or use internal "
-                            "evidence")
-    start.add_argument("--method-registry", help="host-approved method directory (or ECOGYM_METHOD_REGISTRY)")
-    start.add_argument("--local-selection", choices=LOCAL_SELECTION_POLICIES, default=DEFAULT_LOCAL_SELECTION)
-    start.add_argument("--concurrency", type=int, default=3, help="episodes running at the same time")
-    start.add_argument("--retries", type=int, default=1, help="reruns of an episode that never got a model reply")
-    start.add_argument("--outage-minutes", type=float, default=120.0,
-                       help="how long a round waits for a model service that stopped answering (0: stop at once)")
-    start.add_argument("--auto-resume", action="store_true",
-                       help="let the service (ecogym serve, the DSH panel) resume the run if it stops for an outage "
-                            "or this process dies (off by default here; on by default for runs the panel starts)")
-    start.add_argument("--check-adoptions", action=argparse.BooleanOptionalAction, default=False,
-                       help="check each adoption on the training tasks' sealed validation period (off by default)")
-    start.add_argument("--force", action="store_true", help="--resume even though the ledger says it is running")
-    start.add_argument("--label", default="")
-    evolve_command("list", cmd_evolve_list, "evolution runs in the ledger")
-    evolve_command("show", cmd_evolve_show, "rounds, candidates and decisions of a run").add_argument("run")
-    check = evolve_command("verify", cmd_evolve_verify, "one-time verification on holdout tasks or a sealed period")
-    check.add_argument("run")
-    target = check.add_mutually_exclusive_group(required=True)
-    target.add_argument("--holdout", action="store_true", help="run seed and final harness on the holdout tasks")
-    target.add_argument("--sealed", choices=("validation", "final_test"),
-                        help="re-judge their programs on a sealed period")
-    end = evolve_command("finish", cmd_evolve_finish,
-                         "end a stopped run where it is (its incumbent becomes the final version), to verify it")
-    end.add_argument("run")
-    end.add_argument("--force", action="store_true", help="even though the ledger says it is running")
-    recheck = evolve_command("check-adoptions", cmd_evolve_check_adoptions,
-                             "check each adoption not checked yet on the training tasks' sealed validation period")
-    recheck.add_argument("run")
-    recheck.add_argument("--force", action="store_true", help="even though the ledger says it is running")
-
-    register_method = evolves.add_parser("register-method", help="approve a reviewed local method implementation")
-    register_method.set_defaults(handler=cmd_method_register)
-    register_method.add_argument("--registry", type=Path, required=True)
-    register_method.add_argument("method_id")
-    register_method.add_argument("program", type=Path, help="reviewed directory containing predictor.py")
-    register_method.add_argument("--source", required=True, help="canonical public source URL")
-    register_method.add_argument("--license", required=True)
-    register_method.add_argument("--revision", default="")
-    register_method.add_argument("--summary", default="")
+    _add_evolve_commands(commands, DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES)
 
     harness = commands.add_parser("harness", help="inspect harness versions")
     harnesses = harness.add_subparsers(dest="harness_command", required=True)
-    show = harnesses.add_parser("show", help="a harness's metadata and files")
-    show.set_defaults(handler=cmd_harness_show)
+    show = _add_subcommand(harnesses, "show", cmd_harness_show, "a harness's metadata and files")
     show.add_argument("harness", help="seed, a directory or a stored digest prefix")
-    show.add_argument("--json", action="store_true")
-    compare = harnesses.add_parser("diff", help="unified diff between two harness versions")
-    compare.set_defaults(handler=cmd_harness_diff)
+    compare = _add_subcommand(harnesses, "diff", cmd_harness_diff, "unified diff between two harness versions")
     compare.add_argument("before")
     compare.add_argument("after")
-    compare.add_argument("--json", action="store_true")
 
     export = command("export", cmd_export, "training data: SFT threads, preference pairs, notes", ledger=True)
     export.add_argument("--out", required=True, help="output directory")
     export.add_argument("--min-score", type=float, default=0.0,
-                        help="SFT only from episodes with an accepted submission scoring above this on the hidden "
-                             "stage (0: the naive baseline)")
+                        help="SFT only from episodes with an accepted submission scoring above this")
     export.add_argument("--all", action="store_true", help="export every session; filter later with meta")
     export.add_argument("--margin", type=float, default=0.02, help="smallest score gap of a preference pair")
     export.add_argument("--cross-prompt", action="store_true",
                         help="also pair episodes whose prompts differ (they carry rejected_prompt)")
     export.add_argument("--no-evolver", action="store_true", help="leave out evolver sessions")
     export.add_argument("--holdout-of", action="append", default=[], metavar="SUITE",
-                        help="also leave out every episode on this suite's holdout tasks, whatever its role "
-                             "(repeatable); holdout verification episodes are always left out of training data")
+                        help="also leave out every episode on this suite's holdout tasks (repeatable)")
 
     expert = commands.add_parser("expert", help="expert questions, answers and notes")
     experts = expert.add_subparsers(dest="expert_command", required=True)
-
-    def expert_command(name: str, handler, help_text: str):
-        sub = experts.add_parser(name, help=help_text)
-        sub.set_defaults(handler=handler)
-        sub.add_argument("--json", action="store_true", help="machine-readable output")
-        sub.add_argument("--ledger", type=Path, default=default_ledger(), help="ledger file")
-        return sub
-
-    expert_command("list", cmd_expert_list, "open questions (--all: answered too) and notes").add_argument(
-        "--all", action="store_true")
-    reply = expert_command("answer", cmd_expert_answer, "answer a question (later episodes see the answer)")
+    _add_subcommand(experts, "list", cmd_expert_list, "open questions (--all: answered too) and notes",
+                    ledger=True).add_argument("--all", action="store_true")
+    reply = _add_subcommand(experts, "answer", cmd_expert_answer, "answer a question", ledger=True)
     reply.add_argument("question", help="question id, as shown by `ecogym expert list`")
     reply.add_argument("text")
     reply.add_argument("--by", default="")
-    note = expert_command("note", cmd_expert_note, "leave a note for every episode in a scope")
+    note = _add_subcommand(experts, "note", cmd_expert_note, "leave a note for every episode in a scope", ledger=True)
     note.add_argument("scope", help="* (all tasks), a dataset id, a task id or <task id>:<episode>")
     note.add_argument("text")
     note.add_argument("--by", default="")

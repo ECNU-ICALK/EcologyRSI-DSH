@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import subprocess
+import shutil
 import tarfile
 import threading
 import uuid
@@ -327,11 +327,19 @@ def _entry(record: dict[str, Any], **extra: Any) -> dict[str, Any]:
 def _attempts(ledger: Ledger, keys: set[str] | None = None) -> dict[str, list[dict[str, Any]]]:
     """Holdout episodes by exposure key (it is in their context), oldest first."""
 
-    found: dict[str, list[dict[str, Any]]] = {}
+    matched: list[tuple[str, str]] = []
     for event in ledger.events(kind="episode_started"):
         key = (event.body.get("context") or {}).get("exposure")
         if key and (keys is None or key in keys):
-            found.setdefault(key, []).append(fold_episode(ledger.events(event.run_id)))
+            matched.append((key, event.run_id))
+    if not matched:
+        return {}
+    grouped = ledger.events_by_runs([run_id for _, run_id in matched])
+    found: dict[str, list[dict[str, Any]]] = {}
+    for key, run_id in matched:
+        events = grouped.get(run_id)
+        if events:
+            found.setdefault(key, []).append(fold_episode(events))
     return found
 
 
@@ -846,7 +854,7 @@ def _seal_locked(ledger_path: Path, run_id: str, stage: str, looks: Sequence[Loo
                         with Ledger(ledger_path) as ledger:
                             _record_look(ledger, run_id, stage, look, key, judged)
             finally:
-                subprocess.run(["rm", "-r", "-f", str(scratch)], check=False)
+                shutil.rmtree(scratch, ignore_errors=True)
         if not judged:
             continue
         if remaining:

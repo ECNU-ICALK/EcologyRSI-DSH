@@ -37,6 +37,8 @@ EVENT_KINDS = frozenset({
     START,
     "round_started",
     "round_planned",
+    "relay_stage_planned",
+    "relay_stage_finished",
     "evolver_finished",
     "evolver_note",
     "expert_question",
@@ -127,13 +129,15 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
             view["owner"] = body.get("owner")
             if (current is not None and not current["finished"]
                     and current["generation"] == body["generation"]
-                    and body.get("resume_plan") and (current.get("plan") or {}).get("id") == body["resume_plan"]):
+                    and ((body.get("resume_plan") and (current.get("plan") or {}).get("id") == body["resume_plan"])
+                         or (body.get("resume_relay") and current.get("relay_stages")))):
                 current["resumed_at"] = event.at
                 pending = None
                 continue
             current = {"generation": body["generation"], "incumbent": body["incumbent"], "started_at": event.at,
                        "evolver": None, "notes": [], "candidates": {}, "episodes": [], "adopted": None,
-                       "finished": False, "guidance": body.get("guidance")}
+                       "finished": False, "guidance": body.get("guidance"),
+                       "expert_until": body.get("expert_until"), "relay_stages": []}
             pending = None
             view["rounds"].append(current)
         elif event.kind == "evolver_note":
@@ -148,10 +152,58 @@ def fold(events: Sequence[Event]) -> dict[str, Any]:
             continue
         elif event.kind == "round_planned":
             current["plan"] = body
+        elif event.kind == "relay_stage_planned":
+            stage_num = int(body["stage"])
+            existing = next((item for item in current["relay_stages"] if item["stage"] == stage_num), None)
+            if existing is None:
+                existing = {"stage": stage_num, "started_at": event.at, "episodes": [], "ranking": [],
+                            "leader": None, "finished": False, "evolver": None}
+                current["relay_stages"].append(existing)
+            existing.update({
+                "total_stages": body.get("total_stages"),
+                "plan_id": body.get("plan_id"),
+                "measurement": body.get("measurement"),
+                "tasks": list(body.get("tasks") or []),
+                "starting": body.get("starting"),
+                "candidates": list(body.get("candidates") or []),
+                "rejected": list(body.get("rejected") or []),
+                "finished": False,
+            })
+        elif event.kind == "relay_stage_finished":
+            stage_num = int(body["stage"])
+            existing = next((item for item in current["relay_stages"] if item["stage"] == stage_num), None)
+            if existing is None:
+                existing = {"stage": stage_num, "started_at": event.at, "evolver": None, "candidates": []}
+                current["relay_stages"].append(existing)
+            existing.update({
+                "total_stages": body.get("total_stages", existing.get("total_stages")),
+                "plan_id": body.get("plan_id", existing.get("plan_id")),
+                "tasks": list(body.get("tasks") or existing.get("tasks") or []),
+                "episodes": list(body.get("episodes") or []),
+                "ranking": list(body.get("ranking") or []),
+                "leader": body.get("leader"),
+                "fast_track": bool(body.get("fast_track")),
+                "finished": True,
+                "finished_at": event.at,
+            })
         elif event.kind == "evolver_finished":
-            if current["evolver"] is not None:  # a session the service cut short, reviewed again (``rerun``)
-                current.setdefault("earlier_evolvers", []).append(current["evolver"])
-            current["evolver"] = body
+            relay_stage = body.get("relay_stage")
+            if relay_stage is not None:
+                stage_num = int(relay_stage)
+                existing = next((item for item in current["relay_stages"] if item["stage"] == stage_num), None)
+                if existing is None:
+                    existing = {"stage": stage_num, "started_at": event.at, "episodes": [], "ranking": [],
+                                "leader": None, "finished": False, "evolver": None, "candidates": []}
+                    current["relay_stages"].append(existing)
+                if existing.get("evolver") is not None:
+                    existing.setdefault("earlier_evolvers", []).append(existing["evolver"])
+                existing["evolver"] = body
+                current.setdefault("relay_evolvers", []).append(body)
+                current["evolver"] = body
+            else:
+                if current["evolver"] is not None:  # a session the service cut short, reviewed again (``rerun``)
+                    current.setdefault("earlier_evolvers", []).append(current["evolver"])
+                current["evolver"] = body
         elif event.kind in ("candidate_proposed", "candidate_rejected"):
             status = "proposed" if event.kind == "candidate_proposed" else body.get("status", "rejected")
             current["candidates"][body["name"]] = {**body, "status": status, "decision": None}
@@ -220,10 +272,19 @@ def _closing(view: dict[str, Any], event: Event) -> None:
 
 
 def evolver_sessions(view: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every evolver session's record, those reviewed again after an outage included."""
+    """Every evolver session's record, those reviewed again after an outage and relay stages included."""
 
-    return [item for round_ in view["rounds"]
-            for item in [*round_.get("earlier_evolvers", []), *([round_["evolver"]] if round_.get("evolver") else [])]]
+    found: list[dict[str, Any]] = []
+    for round_ in view["rounds"]:
+        found.extend(round_.get("earlier_evolvers", []))
+        relay_evs = round_.get("relay_evolvers") or []
+        if relay_evs:
+            found.extend(relay_evs)
+            if round_.get("evolver") and round_["evolver"] is not relay_evs[-1]:
+                found.append(round_["evolver"])
+        elif round_.get("evolver"):
+            found.append(round_["evolver"])
+    return found
 
 
 def _bucket() -> dict[str, Any]:

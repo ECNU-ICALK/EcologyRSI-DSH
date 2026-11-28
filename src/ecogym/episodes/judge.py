@@ -48,7 +48,8 @@ from ..protocol.partitions import Partitions
 from ..protocol.views import SealedAccess, open_stage
 from ..solvers.base import Genome
 from .agent import Cancelled
-from .sandbox import Runtime, confine, program_profile, scratch_root, thread_limits
+from .governor import SlotCancelled, judge_governor
+from .sandbox import Runtime, confine_program, scratch_root, thread_limits
 
 JUDGE_PROTOCOL = "causal_stream/2"
 PRE_LOCAL_STAGE = "calibration_pre"
@@ -66,6 +67,7 @@ REPLY_QUEUE = 64  # replies read ahead of the judge; a program that floods its o
 JUDGE_THREADS = 1
 EPOCH = np.datetime64("1899-12-30T00:00")
 STEP_UNITS = {"1h": "h", "1d": "D"}
+_PRE_STAGE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,34 +152,35 @@ def calibration_pre_stage(bench: Bench) -> tuple[tuple[int, int], StageData] | N
     if in_pre.size < bench.task.max_horizon + max(12, bench.task.block_steps * PRE_MIN_BLOCKS):
         return None
     interval = (int(times[in_pre[0]]), int(times[in_pre[-1]]) + 1)
-    if PRE_LOCAL_STAGE in bench._stages:
-        return interval, bench._stages[PRE_LOCAL_STAGE]
-    intervals = {**bench.partitions.intervals, PRE_LOCAL_STAGE: {episode: interval}}
-    stage_rows = {**bench.partitions.rows, PRE_LOCAL_STAGE: {episode: int(in_pre.size)}}
-    parts = Partitions(bench.task.id, intervals, stage_rows, bench.partitions.calendar, bench.partitions.evidence,
-                       "pre")
-    opened = open_stage(bench.frame, parts, bench.task, PRE_LOCAL_STAGE)
-    origins = opened.take(eligible(opened, bench.task))
-    if origins.size == 0:
-        return None
-    stage_blocks = blocks(origins.time, bench.task.block_steps)
-    if np.unique(stage_blocks).size < PRE_MIN_BLOCKS:
-        return None
-    cells = bench.task.cells
-    observed = np.stack([origins.label(cell.target, cell.horizon) for cell in cells])
-    naive = baseline_values(origins, bench.task, bench.baselines)
-    data = StageData(
-        name=PRE_LOCAL_STAGE,
-        origins=origins,
-        cells=cells,
-        observed=observed,
-        baseline=np.stack([naive[cell.key] for cell in cells]),
-        blocks=stage_blocks,
-        scales=np.array([bench.scales[cell.target] for cell in cells]),
-        weights=np.array([bench.task.cell_weight(cell) for cell in cells]),
-    )
-    bench._stages[PRE_LOCAL_STAGE] = data
-    return interval, data
+    with _PRE_STAGE_LOCK:
+        if PRE_LOCAL_STAGE in bench._stages:
+            return interval, bench._stages[PRE_LOCAL_STAGE]
+        intervals = {**bench.partitions.intervals, PRE_LOCAL_STAGE: {episode: interval}}
+        stage_rows = {**bench.partitions.rows, PRE_LOCAL_STAGE: {episode: int(in_pre.size)}}
+        parts = Partitions(bench.task.id, intervals, stage_rows, bench.partitions.calendar, bench.partitions.evidence,
+                           "pre")
+        opened = open_stage(bench.frame, parts, bench.task, PRE_LOCAL_STAGE)
+        origins = opened.take(eligible(opened, bench.task))
+        if origins.size == 0:
+            return None
+        stage_blocks = blocks(origins.time, bench.task.block_steps)
+        if np.unique(stage_blocks).size < PRE_MIN_BLOCKS:
+            return None
+        cells = bench.task.cells
+        observed = np.stack([origins.label(cell.target, cell.horizon) for cell in cells])
+        naive = baseline_values(origins, bench.task, bench.baselines)
+        data = StageData(
+            name=PRE_LOCAL_STAGE,
+            origins=origins,
+            cells=cells,
+            observed=observed,
+            baseline=np.stack([naive[cell.key] for cell in cells]),
+            blocks=stage_blocks,
+            scales=np.array([bench.scales[cell.target] for cell in cells]),
+            weights=np.array([bench.task.cell_weight(cell) for cell in cells]),
+        )
+        bench._stages[PRE_LOCAL_STAGE] = data
+        return interval, data
 
 
 def stage_stream(bench: Bench, stage: str, *, sealed: SealedAccess | None = None) -> tuple[Stream, StageData]:
@@ -357,13 +360,18 @@ def run_predictor(program_dir: Path, stream: Stream, spec: dict[str, Any], runti
     """
 
     limits = limits or Limits()
-    work = Path(tempfile.mkdtemp(prefix="judge-", dir=scratch_root()))
     try:
-        run_dir = work / "program"
-        _fresh_copy(Path(program_dir).resolve(), run_dir)
-        return _run_in(run_dir, work / "program.sb", stream, spec, runtime, limits=limits, step=step, cancel=cancel)
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+        with judge_governor().slot(cancel=cancel):
+            work = Path(tempfile.mkdtemp(prefix="judge-", dir=scratch_root()))
+            try:
+                run_dir = work / "program"
+                _fresh_copy(Path(program_dir).resolve(), run_dir)
+                return _run_in(run_dir, work / "program.sb", stream, spec, runtime, limits=limits, step=step,
+                               cancel=cancel)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+    except SlotCancelled:
+        raise Cancelled("judging was cancelled") from None
 
 
 def _run_in(run_dir: Path, profile: Path, stream: Stream, spec: dict[str, Any], runtime: Runtime, *,
@@ -372,7 +380,7 @@ def _run_in(run_dir: Path, profile: Path, stream: Stream, spec: dict[str, Any], 
     (run_dir / "tmp").mkdir(exist_ok=True)
     # The allowlisted environment below sets PYTHONHASHSEED. -I would ignore it. Keep -I's safe import path
     # and disabled user site explicitly, without inheriting any other PYTHON* environment variables.
-    argv = confine(program_profile(run_dir, runtime), profile, [str(runtime.python), "-P", "-s", "-B", RUNNER])
+    argv = confine_program(run_dir, runtime, profile, [str(runtime.python), "-P", "-s", "-B", RUNNER])
     env = {"PATH": "/usr/bin:/bin", "HOME": str(run_dir), "TMPDIR": str(run_dir / "tmp"), "LANG": "en_US.UTF-8",
            "PYTHONHASHSEED": "0", **thread_limits(JUDGE_THREADS)}
     targets, horizons = spec["targets"], spec["horizons"]
@@ -409,10 +417,9 @@ def _run_in(run_dir: Path, profile: Path, stream: Stream, spec: dict[str, Any], 
             rows = _rows(stream.values)
             for position, row in enumerate(rows):
                 stop_if_cancelled()
-                if not program.send({"op": "row", "time": stamps[position], "values": row}):
+                if not program.send({"op": "step", "time": stamps[position], "values": row}):
                     status = "crashed"
                     break
-                program.send({"op": "forecast"})
                 reply = program.reply(min(limits.forecast_seconds, deadline - time.monotonic()), cancel)
                 if reply is None:
                     status = "crashed"

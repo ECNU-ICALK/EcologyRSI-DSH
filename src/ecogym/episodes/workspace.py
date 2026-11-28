@@ -78,7 +78,11 @@ def export_visible(bench: Bench, data_dir: Path, *, expert: str = "") -> dict[st
                              "" if spec.valid_min is None else spec.valid_min,
                              "" if spec.valid_max is None else spec.valid_max,
                              task.fill_age.get(spec.role, "")])
-    spec = predictor_spec(bench)
+    spec = {
+        **predictor_spec(bench),
+        "local_fit_end": bounds["local_fit_end"],
+        "target_weights": {target.name: float(target.weight) for target in task.targets},
+    }
     (data_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
     background = [f"# 背景资料（任务提供）\n\n{task.notes.strip()}" if task.notes.strip() else "# 背景资料（任务提供）"]
     if task.knowledge.strip():

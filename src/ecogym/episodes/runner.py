@@ -68,6 +68,7 @@ from .tools import (
     DEFAULT_LOCAL_SELECTION,
     REPLACE_MARGIN,
     EpisodeTools,
+    StartCache,
     selection_rule_text,
     snapshot,
     starting_program,
@@ -95,14 +96,21 @@ def _follow_up(tools: EpisodeTools, *, deadline: float, minutes: float):
     """
 
     started_at = [-1]  # local evaluations + submissions when the latest follow-up started
+    last_best: list[float | None] = [None]  # best local score at previous continuation (diminishing-returns guard)
 
     def ask(n: int, reply: str) -> str | None:
         left = deadline - clock.now()
         work = tools.evaluations + len(tools.submissions)
         if n > MAX_CONTINUATIONS or left < CONTINUE_SHARE * minutes * 60 or work == started_at[0]:
             return None
-        started_at[0] = work
         best = tools.best_local()
+        best_score = float(best["local"]["score"]) if best else None
+        # From continuation 2 onward, stop if a passing submission exists and the prior continuation made no gain.
+        if (n >= 2 and tools.final() is not None and last_best[0] is not None
+                and (best_score is None or best_score <= last_best[0] + 1e-6)):
+            return None
+        started_at[0] = work
+        last_best[0] = best_score
         state = (f"现在评分用{tools.scored_text()}；已接受的提交里本地最好 {best['local']['score']:+.4f}。"
                  if best else f"还没有被接受的提交，现在评分用{tools.scored_text()}。")
         return "\n".join([
@@ -167,7 +175,7 @@ def _final_program(tools: EpisodeTools, root: Path, programs: Path) -> dict[str,
 
 
 def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None = None,
-                cancel: threading.Event | None = None) -> dict[str, Any]:
+                cancel: threading.Event | None = None, start_cache: StartCache | None = None) -> dict[str, Any]:
     episode_id = f"ep:{uuid.uuid4().hex[:12]}"
     scratch = scratch_root()
     root = scratch / episode_id.replace(":", "-")
@@ -175,14 +183,16 @@ def run_episode(config: EpisodeConfig, ledger_path: Path, *, bench: Bench | None
         # The agent can write anywhere in its episode directory. The judge and archive both use snapshots
         # from this sibling directory, which is outside the sandbox's allowed paths.
         with tempfile.TemporaryDirectory(prefix="episode-programs-", dir=scratch) as saved:
-            return _run_episode(config, ledger_path, episode_id, root, Path(saved), bench=bench, cancel=cancel)
+            return _run_episode(config, ledger_path, episode_id, root, Path(saved), bench=bench, cancel=cancel,
+                                start_cache=start_cache)
     finally:
         if not config.keep:
             shutil.rmtree(root, ignore_errors=True)
 
 
 def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root: Path, programs: Path, *,
-                 bench: Bench | None, cancel: threading.Event | None) -> dict[str, Any]:
+                 bench: Bench | None, cancel: threading.Event | None,
+                 start_cache: StartCache | None = None) -> dict[str, Any]:
     bench = bench or Bench.open(task_spec(config.task))
     runtime = discover_runtime()
     if runtime.dsh is None or runtime.node_root is None:
@@ -198,7 +208,7 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
         path.mkdir(parents=True, exist_ok=True)
     events = Events(ledger_path, episode_id)
     harness.install(root)
-    start = starting_program(bench, root, runtime, config.limits, programs=programs)
+    start = starting_program(bench, root, runtime, config.limits, programs=programs, cache=start_cache)
     deadline = clock.now() + config.minutes * 60  # the clock starts after the starting program was judged
     gateway.deadline = deadline
     with Ledger(ledger_path) as ledger:
@@ -212,7 +222,7 @@ def _run_episode(config: EpisodeConfig, ledger_path: Path, episode_id: str, root
     (root / "work" / "notes").mkdir(exist_ok=True)
     tools = EpisodeTools(bench=bench, root=root, runtime=runtime, limits=config.limits, deadline=deadline,
                          usage=gateway.usage, event=events, start=start, programs=programs,
-                         selection_policy=config.local_selection)
+                         selection_policy=config.local_selection, start_cache=start_cache)
 
     logged = []
 

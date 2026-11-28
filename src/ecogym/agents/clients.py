@@ -39,7 +39,7 @@ LOG = logging.getLogger("ecogym.agents")
 
 DSH_DISABLED_TOOLS = (
     "tool-bash", "tool-pwsh", "tool-fs", "tool-fs-search", "tool-web", "tool-subagent", "tool-subagent-fork",
-    "tool-subagent-control", "tool-subagent-list-agents", "tool-workflow", "tool-jobs", "tool-skill",
+    "tool-subagent-control", "tool-agent-team", "tool-working-directory", "tool-workflow", "tool-jobs", "tool-skill",
     "tool-todo", "tool-goal",
 )
 

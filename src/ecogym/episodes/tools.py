@@ -19,13 +19,12 @@ the latest accepted submission the session itself saw.
 
 from __future__ import annotations
 
-import hashlib
+import copy
 import math
-import os
-import stat
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +32,10 @@ import numpy as np
 
 from ..evaluation.harness import Bench, Evaluation
 from ..kernel import clock
+from ..kernel.canonical import digest as canonical_digest
+from ..kernel.fs import CopyError, copy_regular_tree
 from .classical import classical_reference_tool
-from .judge import PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
+from .judge import JUDGE_PROTOCOL, PRE_LOCAL_STAGE, Limits, calibration_pre_stage, judge_program
 from .mcp import Tool, ToolError
 from .sandbox import Runtime
 from .workspace import LOCAL_STAGE
@@ -126,14 +127,7 @@ def rolling_selection(candidate: Evaluation, start: Evaluation) -> dict[str, Any
 def horizon_objectives(evaluation: Evaluation) -> dict[int, float]:
     """Weighted mean cell objective per forecast horizon on ``evaluation``."""
 
-    by_cell = {row["cell"]: float(row["objective"]) for row in evaluation.cells()}
-    by_horizon: dict[int, list[tuple[float, float]]] = {}
-    for cell, weight in zip(evaluation.stage.cells, evaluation.stage.weights, strict=True):
-        by_horizon.setdefault(cell.horizon, []).append((by_cell[cell.key], float(weight)))
-    return {
-        horizon: sum(val * w for val, w in pairs) / sum(w for _, w in pairs)
-        for horizon, pairs in sorted(by_horizon.items())
-    }
+    return evaluation.horizon_scores()
 
 
 def walk_forward_selection(
@@ -213,36 +207,20 @@ def snapshot(source: Path, target: Path) -> str:
         raise ToolError(f"{source.name} must be a directory")
     if not (source / "predictor.py").is_file():
         raise ToolError("submission/predictor.py is missing")
-    sha = hashlib.sha256(b"ecogym.submission/1\n")
-    count = total = 0
-    for directory, names, filenames in os.walk(source, followlinks=False):
-        for name in list(names):
-            if os.path.islink(os.path.join(directory, name)):
-                raise ToolError(f"{name}: symlinks are not allowed in a submission")
-        names[:] = sorted(name for name in names if name not in SKIP and not name.startswith("."))
-        for name in sorted(filenames):
-            path = Path(directory) / name
-            if name.startswith(".") or name.startswith("_ecogym") or name.endswith(".pyc") or name == "stderr.log":
-                continue
-            info = os.lstat(path)
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise ToolError(f"{path.relative_to(source)}: only regular files are allowed")
-            if info.st_nlink > 1:
-                raise ToolError(f"{path.relative_to(source)}: hard links are not allowed")
-            count += 1
-            total += info.st_size
-            if count > MAX_FILES or total > MAX_BYTES:
-                raise ToolError(f"submission exceeds {MAX_FILES} files or {MAX_BYTES // 1_000_000} MB")
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(descriptor, "rb") as stream:
-                data = stream.read(MAX_BYTES + 1)
-            relative = path.relative_to(source)
-            destination = target / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-            sha.update(f"{relative.as_posix()}\n{len(data)}\n".encode())
-            sha.update(data)
-    return sha.hexdigest()
+    try:
+        return copy_regular_tree(
+            source,
+            target,
+            max_files=MAX_FILES,
+            max_bytes=MAX_BYTES,
+            skip_dirs=SKIP,
+            skip_file=lambda name: (
+                name.startswith(".") or name.startswith("_ecogym") or name.endswith(".pyc") or name == "stderr.log"
+            ),
+            hash_header=b"ecogym.submission/1\n",
+        )
+    except CopyError as error:
+        raise ToolError(str(error)) from None
 
 
 def _summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -261,8 +239,74 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class StartCache:
+    """Thread-safe deterministic cache for starting-template local checks shared across replicates and rounds.
+
+    Keyed by ``(bench.digest, program_digest, limits_digest, JUDGE_PROTOCOL)``. Only healthy ``LOCAL_STAGE``
+    judgements (and their optional ``PRE_LOCAL_STAGE`` walk-forward evaluations) are cached; unhealthy runs
+    are never cached so retries can recover.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._key_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+        self._entries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def key(bench: Bench, program_digest: str, limits: Limits) -> tuple[str, str, str, str]:
+        return (bench.digest, program_digest, canonical_digest(asdict(limits)), JUDGE_PROTOCOL)
+
+    def _lock_for(self, key: tuple[str, str, str, str]) -> threading.Lock:
+        with self._guard:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = self._key_locks[key] = threading.Lock()
+            return lock
+
+    def get_or_judge(
+        self,
+        bench: Bench,
+        program_digest: str,
+        limits: Limits,
+        compute: Callable[[], tuple[dict[str, Any], Evaluation]],
+    ) -> tuple[dict[str, Any], Evaluation, dict[str, Any]]:
+        key = self.key(bench, program_digest, limits)
+        with self._lock_for(key):
+            cached = self._entries.get(key)
+            if cached is not None:
+                with self._guard:
+                    self.hits += 1
+                return cached["report"], cached["evaluation"], cached
+            report, evaluation = compute()
+            entry: dict[str, Any] = {"report": report, "evaluation": evaluation, "local": _summary(report)}
+            with self._guard:
+                self.misses += 1
+                if _healthy(report):
+                    self._entries[key] = entry
+            return report, evaluation, entry
+
+    def get_pre(self, bench: Bench, program_digest: str, limits: Limits) -> tuple[bool, Evaluation | None]:
+        key = self.key(bench, program_digest, limits)
+        with self._guard:
+            cached = self._entries.get(key)
+            if cached is not None and "pre_evaluation" in cached:
+                return True, cached["pre_evaluation"]
+        return False, None
+
+    def set_pre(self, bench: Bench, program_digest: str, limits: Limits, evaluation: Evaluation | None) -> None:
+        if evaluation is None:
+            return
+        key = self.key(bench, program_digest, limits)
+        with self._guard:
+            cached = self._entries.get(key)
+            if cached is not None and "pre_evaluation" not in cached:
+                cached["pre_evaluation"] = evaluation
+
+
 def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits, *,
-                     programs: Path | None = None) -> dict[str, Any] | None:
+                     programs: Path | None = None, cache: StartCache | None = None) -> dict[str, Any] | None:
     """Snapshot and judge ``submission/`` as the episode begins (``submissions/start``); None without a program."""
 
     program = (programs or root) / "submissions" / "start" / "program"
@@ -271,9 +315,18 @@ def starting_program(bench: Bench, root: Path, runtime: Runtime, limits: Limits,
         digest = snapshot(root / "work" / "submission", program)
     except ToolError:
         return None
-    report, evaluation = judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
-    return {"n": None, "digest": digest, "program": str(program), "start": True, "local": _summary(report),
-            "report": report, "evaluation": evaluation, "healthy": _healthy(report)}
+    if cache is not None:
+        report, evaluation, entry = cache.get_or_judge(
+            bench, digest, limits, lambda: judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
+        )
+        local = copy.deepcopy(entry["local"])
+        extra = {"pre_evaluation": entry["pre_evaluation"]} if "pre_evaluation" in entry else {}
+    else:
+        report, evaluation = judge_program(bench, program, LOCAL_STAGE, runtime, limits=limits)
+        local = _summary(report)
+        extra = {}
+    return {"n": None, "digest": digest, "program": str(program), "start": True, "local": local,
+            "report": report, "evaluation": evaluation, "healthy": _healthy(report), **extra}
 
 
 class EpisodeTools:
@@ -281,7 +334,7 @@ class EpisodeTools:
                  usage: Callable[[], dict[str, Any]], event: Callable[[str, dict[str, Any]], None],
                  start: dict[str, Any] | None = None, programs: Path | None = None,
                  selection_policy: str = DEFAULT_LOCAL_SELECTION,
-                 reuse_local: bool | None = None) -> None:
+                 reuse_local: bool | None = None, start_cache: StartCache | None = None) -> None:
         """``start`` is the judged starting program (``starting_program``), if any."""
 
         if selection_policy not in LOCAL_SELECTION_POLICIES:
@@ -296,6 +349,7 @@ class EpisodeTools:
         self.usage = usage
         self.event = event
         self.start = start
+        self.start_cache = start_cache
         self.selection_policy = selection_policy
         self._reuse_local = (runtime is not None) if reuse_local is None else reuse_local
         self._local_cache: dict[tuple[str, str], tuple[dict[str, Any], Evaluation]] = {}
@@ -387,12 +441,20 @@ class EpisodeTools:
         with self._pre_lock:
             if "pre_evaluation" in self.start:
                 return self.start["pre_evaluation"]
+            start_digest = self.start.get("digest")
+            if self.start_cache is not None and start_digest:
+                found, cached_pre = self.start_cache.get_pre(self.bench, start_digest, self.limits)
+                if found:
+                    self.start["pre_evaluation"] = cached_pre
+                    return cached_pre
             start_program = self.start.get("program")
             if not start_program:
                 return None
-            report, evaluation, _ = self._judge_stage(Path(start_program), self.start.get("digest"), PRE_LOCAL_STAGE)
+            report, evaluation, _ = self._judge_stage(Path(start_program), start_digest, PRE_LOCAL_STAGE)
             result = evaluation if _healthy(report) else None
             self.start["pre_evaluation"] = result
+            if self.start_cache is not None and start_digest and result is not None:
+                self.start_cache.set_pre(self.bench, start_digest, self.limits, result)
             return result
 
     def _run_local(self, kind: str) -> tuple[int, str, Path, dict[str, Any], bool, dict[str, Any]]:
@@ -579,5 +641,5 @@ class EpisodeTools:
 
 __all__ = ["BEST_LOCAL_SELECTION", "DEFAULT_LOCAL_SELECTION", "LOCAL_SELECTION_POLICIES", "REPLACE_MARGIN",
            "ROLLING_SELECTION", "SINGLE_WINDOW_SELECTION", "WALK_FORWARD_HORIZON_CAP", "WALK_FORWARD_MEAN_MARGIN",
-           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "horizon_objectives",
+           "WALK_FORWARD_PRE_FLOOR", "WALK_FORWARD_SELECTION", "EpisodeTools", "StartCache", "horizon_objectives",
            "rolling_selection", "selection_rule_text", "snapshot", "starting_program", "walk_forward_selection"]

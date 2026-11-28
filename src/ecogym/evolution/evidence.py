@@ -112,7 +112,8 @@ def episode_summary(record: dict[str, Any], *, role: str) -> str:
              + (f"（其中机器休眠 {asleep:.0f} 秒，不计入时限）" if (asleep := finished.get("asleep_seconds") or 0) >= 60
                 else "") + f"；token {finished.get('tokens', '–')}"
              f"（计费 {finished.get('metered_tokens', '–')}）；模型调用 {finished.get('llm_calls', '–')}"
-             f"（失败 {finished.get('failed_calls', 0)}）",
+             f"（失败 {finished.get('failed_calls', 0)}"
+             + (f"，复读熔断 ×{aborts}" if (aborts := finished.get("degenerate_aborts") or 0) else "") + "）",
              f"- 提交 {len(record['submissions'])} 次，本地检验 {len(record['evaluations'])} 次"
              + (f"；起始程序（模板）本地 {_signed(start_local, 4)}"
                 if isinstance(start_local := ((record.get("start") or {}).get("local") or {}).get("score"), float)
@@ -262,6 +263,29 @@ def _attribution_rows(attribution: dict[str, Any], round_: dict[str, Any], recor
     return lines
 
 
+def _round_all_episodes(round_: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """All scored/recorded episodes of a round, including its intra-generation relay stages (deduplicated)."""
+
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for stage in round_.get("relay_stages") or ():
+        for entry in stage.get("episodes") or ():
+            ep = entry.get("episode")
+            if ep and ep in seen:
+                continue
+            if ep:
+                seen.add(ep)
+            items.append(entry)
+    for entry in round_.get("episodes") or ():
+        ep = entry.get("episode")
+        if ep and ep in seen:
+            continue
+        if ep:
+            seen.add(ep)
+        items.append(entry)
+    return items
+
+
 def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Sequence[str],
              names: dict[str, str], ensembles: dict[str, dict[str, dict[str, Any]]] | None = None) -> str:
     """Scores of every version on every training task, its episodes' averaged forecasts (``ensembles``, see
@@ -271,7 +295,7 @@ def overview(view: dict[str, Any], records: dict[str, dict[str, Any]], tasks: Se
     cells: dict[str, dict[str, dict[str, list[float]]]] = {}
     kept: dict[str, list[int]] = {}  # harness -> [scored on the starting program, episodes that had one]
     for round_ in view["rounds"]:
-        for item in round_["episodes"]:
+        for item in _round_all_episodes(round_):
             record = records.get(item["episode"])
             scored = (record or {}).get("scored")
             if not scored or item.get("status") not in ("finished", "timeout"):
@@ -608,7 +632,7 @@ def contrast_pairs(view: dict[str, Any], records: dict[str, dict[str, Any]]) -> 
 
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for round_ in view["rounds"]:
-        for item in round_["episodes"]:
+        for item in _round_all_episodes(round_):
             record = records.get(item.get("episode") or "")
             if (record is not None and item.get("status") in SCORED_STATUSES
                     and isinstance((record.get("scored") or {}).get("score"), float)):
@@ -766,6 +790,12 @@ def write_evidence(target: Path, *, ledger: Ledger, view: dict[str, Any], tasks:
     target.mkdir(parents=True, exist_ok=True)
     roles = {}
     for round_ in view["rounds"]:
+        for stage in round_.get("relay_stages") or ():
+            for item in stage.get("episodes") or ():
+                if not item.get("episode"):
+                    continue
+                role = "在任" if item["role"] == "incumbent" else f"接力候选 {item.get('candidate')}"
+                roles[item["episode"]] = f"第 {round_['generation']} 代接力阶段 {stage.get('stage')}，{role}"
         for item in round_["episodes"]:
             if not item.get("episode"):
                 continue  # the episode raised before it could start; nothing was recorded

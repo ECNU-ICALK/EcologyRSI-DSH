@@ -36,6 +36,45 @@ from ..kernel.canonical import jsonable
 PROTOCOL_VERSION = "2025-06-18"
 KEEPALIVE_SECONDS = 15.0  # a streamed tool call sends a comment this often while it runs
 DRAIN_SECONDS = 30.0  # how long ``stop`` waits for running tool calls (their judging is cancelled first)
+MAX_REQUEST_BYTES = 8_000_000  # bytes of one MCP JSON-RPC request body
+
+
+class _BodyTooLargeError(ValueError):
+    """Incoming MCP request exceeds the safety size limit."""
+
+
+def _read_body(rfile: Any, headers: Any, limit: int = MAX_REQUEST_BYTES) -> bytes:
+    transfer = (headers.get("Transfer-Encoding") or "").lower()
+    if "chunked" in transfer:
+        out = bytearray()
+        while True:
+            line = rfile.readline(65536)
+            if not line:
+                raise ValueError("unexpected EOF in chunked body")
+            size = int(line.split(b";", 1)[0].strip(), 16)
+            if size < 0 or len(out) + size > limit:
+                raise _BodyTooLargeError(f"request exceeds {limit} bytes")
+            if size == 0:
+                while True:
+                    trailer = rfile.readline(65536)
+                    if not trailer or trailer in (b"\r\n", b"\n"):
+                        break
+                return bytes(out)
+            chunk = rfile.read(size)
+            if len(chunk) != size:
+                raise ValueError("truncated chunk")
+            out.extend(chunk)
+            if rfile.readline(65536) not in (b"\r\n", b"\n"):
+                raise ValueError("malformed chunk terminator")
+    raw_len = headers.get("Content-Length")
+    if raw_len is None or raw_len == "":
+        return b""
+    length = int(raw_len)
+    if length < 0:
+        raise ValueError("negative Content-Length")
+    if length > limit:
+        raise _BodyTooLargeError(f"request exceeds {limit} bytes")
+    return rfile.read(length) if length else b""
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -182,8 +221,15 @@ def _handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
             self._reply(200 if self._authorized() else 401)
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length)
+            try:
+                raw = _read_body(self.rfile, self.headers, MAX_REQUEST_BYTES)
+            except _BodyTooLargeError as error:
+                self.close_connection = True
+                return self._reply(413, {"error": str(error)})
+            except ValueError as error:
+                self.close_connection = True
+                return self._reply(400, {"jsonrpc": "2.0", "id": None,
+                                         "error": {"code": -32700, "message": f"bad request body: {error}"}})
             if not self._authorized():
                 return self._reply(401, {"error": "unauthorized"})
             try:

@@ -28,6 +28,23 @@ def _files() -> list[Path]:
     return files
 
 
+def _strip_yaml_scalar(raw: str) -> str:
+    """Parse a single-line YAML scalar, preserving quoted content and stripping unquoted inline comments."""
+
+    text = raw.strip()
+    if not text:
+        return ""
+    if text[0] in ("'", '"'):
+        quote = text[0]
+        end = text.find(quote, 1)
+        return text[1:end] if end != -1 else text[1:]
+    # Unquoted YAML inline comment starts with '#' preceded by whitespace (or at position 0).
+    for idx, ch in enumerate(text):
+        if ch == "#" and (idx == 0 or text[idx - 1].isspace()):
+            return text[:idx].strip()
+    return text
+
+
 def _lookup(name: str) -> str | None:
     pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.+?)\s*$")
     for path in _files():
@@ -36,9 +53,14 @@ def _lookup(name: str) -> str | None:
         except OSError:
             continue
         for line in text.splitlines():
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
             match = pattern.match(line)
             if match:
-                return match.group(1).strip("'\"")
+                val = _strip_yaml_scalar(match.group(1))
+                if val:
+                    return val
     return None
 
 

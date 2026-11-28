@@ -57,21 +57,15 @@ Holdout tasks and sealed stages are touched only by
 from __future__ import annotations
 
 import contextlib
-import functools
 import hashlib
 import math
-import os
-import re
-import socket
-import subprocess
 import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -80,12 +74,22 @@ import numpy as np
 from .. import __version__
 from ..episodes import expert, providers
 from ..episodes.agent import Cancelled
+from ..episodes.governor import configure_judge_limit
 from ..episodes.history import fold_episode
-from ..episodes.judge import JUDGE_PROTOCOL, Limits, judge_program, load_predictions, reference_scores
+from ..episodes.judge import (
+    JUDGE_PROTOCOL,
+    Limits,
+    calibration_pre_stage,
+    file_digest,
+    judge_program,
+    load_predictions,
+    reference_scores,
+    save_predictions,
+)
 from ..episodes.mcp import ToolError
 from ..episodes.runner import STALL_SHARE, EpisodeConfig, run_episode
-from ..episodes.sandbox import discover_runtime, scratch_root
-from ..episodes.tools import DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES, SINGLE_WINDOW_SELECTION
+from ..episodes.sandbox import discover_runtime, ecogym_home, scratch_root
+from ..episodes.tools import DEFAULT_LOCAL_SELECTION, LOCAL_SELECTION_POLICIES, SINGLE_WINDOW_SELECTION, StartCache
 from ..episodes.tools import snapshot as snapshot_program
 from ..episodes.workspace import LOCAL_STAGE, SCORED_STAGE
 from ..evaluation.harness import Bench, Evaluation
@@ -93,11 +97,37 @@ from ..evaluation.suite import TaskPair, adjusted_confidence, compare_suite
 from ..harness import Harness, HarnessError, behavior_digest, resolve
 from ..kernel import clock
 from ..kernel.canonical import digest
-from ..kernel.ledger import Ledger, LedgerConflict
+from ..kernel.ledger import Ledger
 from ..task.spec import TaskSpec
 from ..task.suite import signed_rank_reachable, suite_spec
-from .evolver import METHOD_RESEARCH_MODES, EvolverSettings, run_evolver
-from .fold import EVENT_KINDS, SCORED_STATUSES, evolver_sessions, fold, spending
+from .evolver import METHOD_RESEARCH_MODES, NAMES, EvolverSettings, run_evolver
+from .fold import EVENT_KINDS, SCORED_STATUSES, fold
+from .lifecycle import (
+    OUTAGE_RERUNS,
+    PROBE_EVERY,
+    SERVICE_RERUNS,
+    RunBusy,
+    RunStopped,
+    ServiceDown,
+    ServiceGate,
+    claim_resume,
+    finish_run,
+    model_key,
+    owner,
+    result_of,
+    run_models,
+    spent_by,
+    stale,
+)
+from .relay import (
+    effective_relay_batch,
+    effective_relay_candidates,
+    pick_stage_leader,
+    rank_stage_candidates,
+    render_relay_brief,
+    select_finalists,
+    select_stage_tasks,
+)
 
 PATCH_LIMIT = 60_000  # characters of unified diff kept per candidate in the ledger
 PUBLIC_REFERENCE_SECONDS = 120.0  # shared by all tasks in this optional development diagnostic
@@ -108,19 +138,11 @@ PUBLIC_REFERENCE_SECONDS = 120.0  # shared by all tasks in this optional develop
 TEMPLATE_ATTRIBUTION_SECONDS = 600.0
 
 
-class RunStopped(RuntimeError):
-    """The run was asked to stop between rounds."""
-
-
-class ServiceDown(RuntimeError):
-    """No model replies: every episode of a round, or the evolver, got none. The run fails and can be resumed.
-
-    ``outage`` is False when the episodes failed on the host instead (every one an ``error``, or a mix): waiting
-    for the model service would not help, so the run is not resumed by itself (``EvolveConfig.auto_resume``)."""
-
-    def __init__(self, message: str, *, outage: bool = True) -> None:
-        super().__init__(message)
-        self.outage = outage
+_LEGACY_CONFIG_DEFAULTS = {
+    "auto_resume": False,
+    "method_research": "internal",
+    "local_selection": SINGLE_WINDOW_SELECTION,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +167,23 @@ class EvolveConfig:
     method_research: str = "autonomous"
     method_registry: str | None = None
     local_selection: str = DEFAULT_LOCAL_SELECTION
+    template_fast_track: bool = False  # evaluate template-only candidates deterministically without LLM episodes
+    early_prune: bool = False  # prune clearly dominated candidates after replicate 0 (when repeats >= 2)
+    relay_stages: int = 1  # 1: standard single-stage round; 2-3: intra-generation mini-batch relay stages
+    relay_batch: int = 0  # tasks per relay stage (0: auto stratified ceil(tasks / relay_stages))
+    relay_candidates: int = 0  # candidates explored per relay stage (0: auto min(4, max(2, candidates)))
 
     def __post_init__(self) -> None:
         if self.generations < 1 or self.repeats < 1 or self.concurrency < 1 or self.retries < 0:
             raise ValueError("generations, repeats and concurrency must be positive, retries non-negative")
         if not 1 <= self.candidates <= 6:
             raise ValueError("candidates must lie in 1..6")
+        if not 1 <= self.relay_stages <= 3:
+            raise ValueError("relay_stages must lie in 1..3")
+        if self.relay_batch < 0:
+            raise ValueError("relay_batch must be non-negative")
+        if not 0 <= self.relay_candidates <= 6:
+            raise ValueError("relay_candidates must lie in 0..6")
         if self.minutes <= 0 or self.evolver_minutes <= 0 or self.tokens <= 0 or self.evolver_tokens <= 0:
             raise ValueError("budgets must be positive")
         if not (math.isfinite(self.outage_minutes) and self.outage_minutes >= 0):
@@ -172,20 +205,23 @@ class EvolveConfig:
 
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> EvolveConfig:
-        values = {key: value for key, value in body.items() if key != "schema"}
+        valid = {f.name for f in fields(cls)}
+        values = {key: value for key, value in body.items() if key in valid}
         values["limits"] = Limits(**values.get("limits", {}))
-        # a run recorded before 0.3.2 keeps its behaviour: it never resumes by itself and spends no sealed look on
-        # adoption checks (an outage is waited out: that changes no measurement)
-        values.setdefault("auto_resume", False)
-        values.setdefault("check_adoptions", False)
-        values.setdefault("method_research", "internal")
-        values.setdefault("local_selection", SINGLE_WINDOW_SELECTION)
+        # Runs recorded before 0.3.2 keep their historical defaults when omitted from the ledger.
+        for key, default in _LEGACY_CONFIG_DEFAULTS.items():
+            values.setdefault(key, default)
         return cls(**values)
 
     def episodes_per_round(self, tasks: int) -> tuple[int, int]:
         """Episodes in round 0 and in each later round with every candidate valid."""
 
-        return tasks * self.repeats, tasks * self.repeats * (self.candidates + 1)
+        later = tasks * self.repeats * (self.candidates + 1)
+        if self.relay_stages > 1:
+            batch = effective_relay_batch(tasks, total_stages=self.relay_stages, batch_size=self.relay_batch)
+            relay_cands = effective_relay_candidates(self.candidates, self.relay_candidates)
+            later += self.relay_stages * batch * relay_cands
+        return tasks * self.repeats, later
 
 
 @dataclass(slots=True)
@@ -235,12 +271,7 @@ def _forecast_fingerprint(evaluation: Evaluation) -> str:
 
 
 def _horizon_scores(evaluation: Evaluation) -> dict[str, float]:
-    sums: dict[str, tuple[float, float]] = {}
-    for cell, result, weight in zip(evaluation.stage.cells, evaluation.cells(), evaluation.stage.weights, strict=True):
-        key = str(cell.horizon)
-        total, total_weight = sums.get(key, (0.0, 0.0))
-        sums[key] = (total + float(weight) * result["objective"], total_weight + float(weight))
-    return {key: total / weight for key, (total, weight) in sums.items() if weight > 0}
+    return {str(horizon): score for horizon, score in evaluation.horizon_scores().items()}
 
 
 def _attribution_summary(arms: dict[str, Any], tasks: Sequence[TaskSpec]) -> dict[str, Any]:
@@ -276,12 +307,6 @@ def _attribution_summary(arms: dict[str, Any], tasks: Sequence[TaskSpec]) -> dic
     return comparisons
 
 
-def owner() -> dict[str, Any]:
-    """The process that runs a round."""
-
-    return {"pid": os.getpid(), "host": socket.gethostname()}
-
-
 def _guidance_digest(entries: list[dict[str, Any]]) -> str | None:
     return digest({"schema": "ecogym.expert-guidance/1", "entries": entries}) if entries else None
 
@@ -296,7 +321,8 @@ MEASURED_LAYERS = ("data", "domains", "episodes", "evaluation", "harness", "kern
 def measured_sources(package: Path) -> list[Path]:
     """The files whose bytes a round's measurement identity (``Evolution._measurement``) covers."""
 
-    sources = [package / "evolution" / name for name in ("loop.py", "evolver.py", "evolver.md", "methods.py")]
+    sources = [package / "evolution" / name for name in ("loop.py", "evolver.py", "evolver.md", "discovery.py",
+                                                         "lifecycle.py", "methods.py", "pareto.py", "relay.py")]
     for layer in MEASURED_LAYERS:
         root = package / layer
         # hidden files (.DS_Store) and byte code come and go without changing anything
@@ -319,257 +345,7 @@ def _require_replies(entries: list[dict[str, Any]]) -> None:
                           outage=all(entry.get("status") == "infra_failed" for entry in entries))
 
 
-PROBE_EVERY = 60.0  # seconds between test requests while a model service is down
-OUTAGE_RERUNS = 2  # reruns of one episode after confirmed outages, on top of ``retries``
-# reruns of one episode that ended ``infra_failed`` while the service answered a test request (a provider that
-# fails many calls, not all), on top of ``retries``: bounded so one congested slot does not stall a whole round
-SERVICE_RERUNS = 1
-
-
-class ServiceGate:
-    """One model service as a run's sessions see it: up, or down since a confirmed outage.
-
-    A session that got no reply asks ``confirm``: a test request (``providers.answers``) tells an outage from one
-    failed session. While the service is down no session starts (``wait``); one waiter sends a test request every
-    ``PROBE_EVERY`` seconds and all go on once it answers. A session cut short by the outage runs again without
-    using up its retries. After ``limit`` seconds down, every waiter raises ``ServiceDown``: the run stops and can
-    be resumed (by the service itself, ``EvolveConfig.auto_resume``). A provider that refuses the test request
-    (bad key, no access, unknown model) is not waited for: the run stops at once, not to be resumed by itself.
-    ``log`` records the outage's start and end.
-    """
-
-    def __init__(self, ref: str, limit: float, log: Callable[[str, dict[str, Any]], None]) -> None:
-        self.ref, self.limit, self.log = ref, limit, log
-        self._lock = threading.Lock()
-        self._up = threading.Event()
-        self._up.set()
-        self._since = 0.0
-        self._probes = 0
-        self._probing = False
-        self._gave_up: tuple[str, bool] | None = None  # why every waiter stops, and whether it was an outage
-
-    def _refused(self, note: str) -> ServiceDown:
-        return ServiceDown(f"{self.ref} refuses requests ({note}); fix the key or the model, then resume",
-                           outage=False)
-
-    def confirm(self, error: str) -> bool:
-        """After a session got no reply: True when the service is down (now, or already), so the caller waits and
-        runs the session again; False when the service answers (the failure was the session's own).
-        ``ServiceDown`` when the provider refuses: no session of this model could get a reply."""
-
-        if self.limit <= 0:
-            return False
-        if self._gave_up is not None or not self._up.is_set():
-            return True
-        state, note = providers.answers(self.ref)
-        if state == "refused":
-            raise self._refused(note)
-        if state == "ok":
-            return False
-        with self._lock:
-            if self._up.is_set():
-                self._up.clear()
-                self._since, self._probes = time.monotonic(), 1
-                self.log("outage_started", {"model": self.ref, "error": (error or "")[:500], "probe": note,
-                                            "limit_minutes": round(self.limit / 60, 1)})
-        return True
-
-    def wait(self, cancel: threading.Event) -> None:
-        """Return at once while the service is up, else once it answers again; ``ServiceDown`` when the outage
-        has lasted ``limit`` seconds, ``Cancelled`` when the run is cancelled."""
-
-        while True:
-            if self._gave_up is not None:
-                raise ServiceDown(self._gave_up[0], outage=self._gave_up[1])
-            if self._up.is_set():
-                return
-            if cancel.is_set():
-                raise Cancelled("the run was cancelled")
-            with self._lock:
-                mine, self._probing = not self._probing, True
-            if not mine:
-                self._up.wait(5.0)
-                continue
-            try:
-                if cancel.wait(PROBE_EVERY):
-                    raise Cancelled("the run was cancelled")
-                state, note = providers.answers(self.ref)
-                with self._lock:
-                    self._probes += 1
-                    waited = time.monotonic() - self._since
-                    if state == "ok":
-                        self._up.set()
-                    elif state == "refused":
-                        self._gave_up = (str(self._refused(note)), False)
-                    elif waited >= self.limit:
-                        self._gave_up = (f"{self.ref} gave no reply for {waited / 60:.0f} minutes "
-                                         f"({self._probes} test requests; the last: {note})", True)
-                    if state == "ok" or self._gave_up is not None:
-                        self.log("outage_ended", {"model": self.ref, "recovered": state == "ok",
-                                                  "seconds": round(waited), "probes": self._probes,
-                                                  **({} if state == "ok" else {"error": note})})
-            finally:
-                with self._lock:
-                    self._probing = False
-
-
-def _model_key(ref: str | None) -> str | None:
-    if not ref:
-        return None
-    try:
-        return providers.canonical(ref)
-    except ValueError:
-        return None
-
-
-def run_models(config: EvolveConfig, seed: str) -> list[str]:
-    """The models a run was started with, canonical: its inner agents' (pinned, or the starting harness's) and its
-    evolver's. The loop waits out these models' outages; the service resumes a run once they answer again."""
-
-    agents = config.model
-    if not agents:
-        with contextlib.suppress(HarnessError, OSError, ValueError):
-            agents = resolve(seed).agent.model
-    return [key for key in dict.fromkeys(_model_key(ref) for ref in (agents, config.evolver_model)) if key]
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # it exists and belongs to someone else
-        return True
-    return True
-
-
-@functools.cache
-def _booted_at() -> float | None:
-    """When this machine started (seconds since the epoch), if the system says."""
-
-    with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
-        if os.path.exists("/proc/stat"):
-            for line in Path("/proc/stat").read_text().splitlines():
-                if line.startswith("btime "):
-                    return float(line.split()[1])
-        text = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5,
-                              check=True).stdout
-        found = re.search(r"sec = (\d+)", text)
-        if found:
-            return float(found.group(1))
-    return None
-
-
-def stale(view: dict[str, Any]) -> bool:
-    """Says running, but the process named in its latest round (``owner``) is gone.
-
-    The calling process counts as gone: callers check their own threads first. A run that logged its last event
-    before this machine started is gone whatever process has its pid now. Without an owner on this host (older
-    runs, another machine) the run is stale once it has logged nothing for longer than any of its steps can take.
-    """
-
-    if view["status"] != "running":
-        return False
-    owner = view.get("owner") or {}
-    if owner.get("host") == socket.gethostname() and isinstance(owner.get("pid"), int):
-        booted = _booted_at()
-        if booted is not None and datetime.fromisoformat(view["updated_at"]).timestamp() < booted:
-            return True
-        return owner["pid"] == os.getpid() or not _pid_alive(owner["pid"])
-    config = view["config"]
-    quiet = (datetime.now(UTC) - datetime.fromisoformat(view["updated_at"])).total_seconds()
-    longest = max(float(config.get("minutes") or 0), float(config.get("evolver_minutes") or 0)) * 60
-    return quiet > longest * 2 + 1800 + float(config.get("outage_minutes") or 0) * 60  # an outage wait logs nothing
-
-
-class RunBusy(RuntimeError):
-    """The ledger says the run is running, in a process that is still alive."""
-
-
-def claim_resume(ledger_path: Path, run_id: str, *, by: str, why: str | None = None, force: bool = False,
-                 expect: int | None = None) -> dict[str, Any]:
-    """Record that this process continues a stopped or failed run (or one whose process is gone), before it starts:
-    ``evolve_resumed`` names this process as the run's owner, so the run reads as running at once and no other
-    process continues it too. The event is appended only if nothing was logged since the run was read here
-    (``Ledger.append(after=...)``; ``expect``: nor since the caller's own reading), so two processes deciding at
-    the same moment cannot both win. Returns the view the decision was taken on.
-
-    ``KeyError``: no such run; ``ValueError``: it has finished; ``RunBusy``: it runs in a live process (``force``
-    skips this check); ``LedgerConflict``: it changed meanwhile."""
-
-    with Ledger(ledger_path) as ledger:
-        events = ledger.events(run_id)
-        if not events or events[0].kind != "evolve_started":
-            raise KeyError(f"no evolution run {run_id}")
-        view = fold(events)
-        if expect is not None and events[-1].seq != expect:
-            raise LedgerConflict(f"{run_id} changed meanwhile")
-        if view["status"] == "finished":
-            raise ValueError(f"{run_id} has finished")
-        if view["status"] == "running" and not force and not stale(view):
-            raise RunBusy(f"{run_id} may still be running in another process (owner {view.get('owner') or 'unknown'}"
-                          f", last event {view['updated_at']})")
-        ledger.append(run_id, "evolve_resumed",
-                      {"by": by, "why": why or view.get("stop_reason") or ("stale" if view["status"] == "running"
-                                                                           else None),
-                       "status": view["status"], "owner": owner()}, after=events[-1].seq)
-    return view
-
-
-def result_of(view: dict[str, Any], spent: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The body of ``evolve_finished`` without its timing: the final version and what the run spent.
-
-    ``episodes`` counts the episodes its comparisons used; ``tokens`` and ``attempts`` come from ``spent``
-    (``fold.spending``: every attempt and session) when given, else from those episodes and the evolver sessions."""
-
-    episodes = [item for round_ in view["rounds"] for item in round_["episodes"]]
-    evolvers = evolver_sessions(view)
-    body = {
-        "seed": view["seed"]["digest"], "final": view["incumbent"], "adoptions": len(view["adoptions"]),
-        "rounds": sum(1 for round_ in view["rounds"] if round_["finished"]), "episodes": len(episodes),
-        "tokens": sum(item.get("tokens") or 0 for item in [*episodes, *evolvers]),
-        "metered_tokens": sum(item.get("metered_tokens") or 0 for item in [*episodes, *evolvers]),
-    }
-    if spent is not None:
-        body.update({"tokens": spent["tokens"], "metered_tokens": spent["metered_tokens"],
-                     "attempts": spent["episodes"]["attempts"] + spent["verification"]["attempts"], "spent": spent})
-    return body
-
-
-def spent_by(ledger: Ledger, view: dict[str, Any]) -> dict[str, Any]:
-    """What one run spent (``fold.spending``)."""
-
-    return spending(ledger, {view["run_id"]: view})[view["run_id"]]
-
-
-def finish_run(ledger_path: Path, run_id: str, *, force: bool = False) -> dict[str, Any]:
-    """End a stopped or failed run where it is, so it can be verified like a run that ran all its generations.
-
-    The incumbent after its last finished round is the final version and the remaining generations never run
-    (``ended_early``; the run cannot be resumed afterwards, and ``fold`` ignores whatever a straggling process
-    logs later). Verification needs a finished run because a run that could still continue has no final version
-    yet. ``RunBusy`` when it runs in a live process (``force`` skips that check; a caller running it in its own
-    threads must stop it first), ``LedgerConflict`` when it changed while this was deciding.
-    """
-
-    with Ledger(ledger_path) as ledger:
-        events = ledger.events(run_id)
-        if not events or events[0].kind != "evolve_started":
-            raise KeyError(f"no evolution run {run_id}")
-        view = fold(events)
-        if view["status"] == "finished":
-            raise ValueError(f"{run_id} has already finished")
-        if view["status"] == "running" and not force and not stale(view):
-            raise RunBusy(f"{run_id} may still be running in another process (owner {view.get('owner') or 'unknown'}"
-                          "); stop it there first")
-        finished = [round_["generation"] for round_ in view["rounds"] if round_["finished"]]
-        if not finished:
-            raise ValueError(f"{run_id} has no finished round: it has nothing to verify")
-        body = {**result_of(view, spent_by(ledger, view)), "ended_early": True,
-                "planned_generations": view["config"]["generations"], "last_generation": max(finished),
-                "was": view["status"]}
-        ledger.append(run_id, "evolve_finished", body, after=events[-1].seq)
-    return body
+_model_key = model_key
 
 
 class Evolution:
@@ -591,6 +367,7 @@ class Evolution:
         self.stop_reason: str | None = None  # why it is asked to stop (user, shutdown); set by whoever stops it
         self.on_event = on_event
         self._evaluations: dict[str, Evaluation] = {}
+        self._start_cache = StartCache()
         self._notify_lock = threading.Lock()
         self._gates: dict[str, ServiceGate] = {}  # model -> its gate, for the models the run was started with
         self.method_registry = None
@@ -630,6 +407,7 @@ class Evolution:
                 for stage in (LOCAL_STAGE, SCORED_STAGE):
                     bench.stage(stage)
                     reference_scores(bench, stage)
+                calibration_pre_stage(bench)
                 self.benches[task.id] = bench
 
     def _evaluation(self, entry: dict[str, Any]) -> Evaluation:
@@ -665,6 +443,7 @@ class Evolution:
         """Run, or continue, every remaining round; ``stop`` is polled between rounds."""
 
         started = time.monotonic()
+        configure_judge_limit(self.config.concurrency)
         try:
             with clock.awake():  # judging and the gaps between sessions too, not only the agents
                 result = self._rounds(run_id, stop)
@@ -769,13 +548,25 @@ class Evolution:
         generation = state.generation
         incumbent = resolve(state.incumbent)
         last = view["rounds"][-1] if view["rounds"] else {}
-        plan = last.get("plan") if last.get("generation") == generation and not last["finished"] else None
+        unfinished_same = last if last.get("generation") == generation and not last["finished"] else {}
+        plan = unfinished_same.get("plan")
+        resuming_relay = (
+            not plan
+            and generation > 0
+            and self.config.relay_stages > 1
+            and bool(unfinished_same.get("relay_stages"))
+            and unfinished_same.get("incumbent") == incumbent.digest
+            and unfinished_same.get("expert_until") is not None
+            and isinstance(unfinished_same.get("guidance"), dict)
+        )
         measurement = self._measurement()
         if plan:
             if plan["incumbent"] != incumbent.digest:
                 raise ValueError("the interrupted round was planned for another incumbent than the run's finished "
                                  "rounds name; the ledger is inconsistent")
             snapshot = Snapshot(plan["expert_until"], plan["guidance"])
+        elif resuming_relay:
+            snapshot = Snapshot(int(unfinished_same["expert_until"]), dict(unfinished_same["guidance"]))
         else:
             with Ledger(self.ledger_path) as ledger:
                 until = ledger.last_seq()
@@ -783,7 +574,8 @@ class Evolution:
                                             for task in self.tasks})
         self._log(run_id, "round_started", {"generation": generation, "incumbent": incumbent.digest, "owner": owner(),
                                             "expert_until": snapshot.until, "guidance": snapshot.guidance,
-                                            **({"resume_plan": plan["id"]} if plan else {})})
+                                            **({"resume_plan": plan["id"]} if plan else {}),
+                                            **({"resume_relay": True} if resuming_relay else {})})
         if plan:
             candidates = [{**item, "harness": resolve(item["digest"])} for item in plan["candidates"]]
             if plan["measurement"] != measurement:
@@ -796,19 +588,51 @@ class Evolution:
                 plan["id"] = digest({"run": run_id, **plan})
                 self._log(run_id, "round_planned", plan)
         else:
-            candidates = self._propose(run_id, generation, incumbent, view, state, snapshot) if generation else []
+            if not generation:
+                candidates = []
+            elif self.config.relay_stages > 1:
+                candidates = self._relay_propose(run_id, generation, incumbent, view, state, snapshot, measurement)
+            else:
+                candidates = self._propose(run_id, generation, incumbent, view, state, snapshot)
+            plan_candidates = []
+            for item in candidates:
+                row = {key: item[key] for key in ("name", "digest")}
+                if item.get("template_only"):
+                    row["template_only"] = True
+                if item.get("relay_origin"):
+                    row["relay_origin"] = item["relay_origin"]
+                plan_candidates.append(row)
             plan = {"schema": "ecogym.round-plan/1", "generation": generation, "incumbent": incumbent.digest,
                     "measurement": measurement, "expert_until": snapshot.until, "guidance": snapshot.guidance,
-                    "candidates": [{key: item[key] for key in ("name", "digest")} for item in candidates]}
+                    "candidates": plan_candidates}
             plan["id"] = digest({"run": run_id, **plan})
             self._log(run_id, "round_planned", plan)
         if generation and not candidates:
+            outcome = (
+                "relay_no_viable_candidate"
+                if self.config.relay_stages > 1 and any(
+                    st.get("ranking") for st in (self.view(run_id)["rounds"][-1].get("relay_stages") or ())
+                )
+                else "no_candidates"
+            )
             self._log(run_id, "round_finished", {"generation": generation, "incumbent": incumbent.digest,
-                                                 "adopted": None, "outcome": "no_candidates"})
+                                                 "adopted": None, "outcome": outcome})
             return
         jobs = [(incumbent, "incumbent", None)] + [(item["harness"], "candidate", item["name"]) for item in candidates]
-        entries = self._episodes(run_id, generation, jobs, snapshot, plan["id"])
-        self._log(run_id, "episodes_finished", {"generation": generation, "episodes": entries})
+        fast_tracked = (
+            generation > 0
+            and self.config.template_fast_track
+            and bool(candidates)
+            and all(item.get("template_only") for item in candidates)
+        )
+        if fast_tracked:
+            entries = self._fast_track_templates(run_id, generation, jobs, snapshot, plan["id"])
+        else:
+            entries = self._episodes(run_id, generation, jobs, snapshot, plan["id"])
+        self._log(run_id, "episodes_finished", {
+            "generation": generation, "episodes": entries,
+            **({"fast_track": True} if fast_tracked else {}),
+        })
         _require_replies(entries)
         if generation == 0:
             self._log(run_id, "round_finished", {"generation": 0, "incumbent": incumbent.digest, "adopted": None,
@@ -823,29 +647,49 @@ class Evolution:
             if entry["role"] == "incumbent" and usable(entry):
                 pool.setdefault(entry["task"], []).append(entry)
         confidence = adjusted_confidence(self.suite.gates.confidence, len(candidates))
+        required_replicates = 1 if fast_tracked else self.config.repeats
+        max_under_replicated = max(1, len(self.tasks) // 4) if required_replicates >= 2 else 0
         passing = []
         for candidate in candidates:
-            pairs, missing = [], []
+            pruned = any(entry.get("status") == "pruned" and entry.get("candidate") == candidate["name"]
+                         for entry in entries)
+            pairs, missing, under_replicated = [], [], []
             for task in self.tasks:
                 own = [entry for entry in entries if entry["role"] == "candidate" and entry["task"] == task.id
                        and entry["candidate"] == candidate["name"] and usable(entry)]
                 theirs = pool.get(task.id, [])
-                if min(len(own), len(theirs)) < self.config.repeats:
+                have = min(len(own), len(theirs))
+                needed = 1 if pruned else required_replicates
+                if have < 1:
                     missing.append(task.id)
                     continue
+                if have < needed:
+                    under_replicated.append(task.id)
                 pairs.append(TaskPair(task.id, tuple(self._evaluation(entry) for entry in own),
                                       tuple(self._evaluation(entry) for entry in theirs), group=task.dataset))
+            too_few_replicates = not pruned and len(under_replicated) > max_under_replicated
+            blocking_missing = [*missing, *(under_replicated if too_few_replicates else [])]
             body: dict[str, Any] = {"generation": generation, "name": candidate["name"], "digest": candidate["digest"],
-                                    "missing": missing}
+                                    "missing": blocking_missing}
+            if under_replicated and not too_few_replicated:
+                body["under_replicated"] = under_replicated
+            if fast_tracked:
+                body["fast_track"] = True
             if pairs:
                 decision = compare_suite(pairs, self.suite.gates, {"run": run_id, "generation": generation,
                                                                    "candidate": candidate["name"]},
                                          confidence=confidence).to_dict()
-                if missing:
-                    decision["adopted"], decision["reason"] = False, "missing_tasks:" + ",".join(missing)
+                if under_replicated and not too_few_replicated:
+                    decision["under_replicated"] = under_replicated
+                if pruned:
+                    decision["adopted"], decision["reason"] = False, "pruned_after_replicate_0"
+                    decision["scope"] = "replicate_0_pruned"
+                elif blocking_missing:
+                    decision["adopted"], decision["reason"] = False, "missing_tasks:" + ",".join(blocking_missing)
                     decision["scope"] = "partial_task_suite"
             else:
-                decision = {"adopted": False, "reason": "missing_tasks:" + ",".join(missing), "delta": None,
+                reason = "pruned_after_replicate_0" if pruned else "missing_tasks:" + ",".join(blocking_missing)
+                decision = {"adopted": False, "reason": reason, "delta": None,
                             "interval": [None, None], "confidence": confidence, "tasks": [], "cells": {}}
             body["decision"] = decision
             self._log(run_id, "candidate_compared", body)
@@ -1110,40 +954,84 @@ class Evolution:
             for body in bodies:
                 self._notify("adoption_checked", body)
 
-    def _propose(self, run_id: str, generation: int, incumbent: Harness, view: dict[str, Any],
-                 state: State, snapshot: Snapshot) -> list[dict[str, Any]]:
+    def _incumbent_baseline(self, view: dict[str, Any], incumbent: Harness, snapshot: Snapshot) -> dict[str, float]:
+        """Per-task mean score of ``incumbent`` from the most recent finished round under the same expert guidance.
+
+        Used strictly for cheap intra-generation relay screening (reducing screening variance while avoiding
+        redundant incumbent episodes); the final adoption gate always runs fresh contemporary paired episodes.
+        """
+
+        found: dict[str, float] = {}
+        for round_ in reversed(view.get("rounds") or ()):
+            if not round_.get("finished"):
+                continue
+            by_task: dict[str, list[float]] = {}
+            for entry in round_.get("episodes") or ():
+                if (entry.get("harness") == incumbent.digest and usable(entry)
+                        and isinstance(entry.get("score"), (int, float))
+                        and math.isfinite(float(entry["score"]))
+                        and (entry.get("guidance") or None) == snapshot.guidance.get(entry["task"])):
+                    by_task.setdefault(entry["task"], []).append(float(entry["score"]))
+            for task_id, scores in by_task.items():
+                if task_id not in found and scores:
+                    found[task_id] = sum(scores) / len(scores)
+            if len(found) >= len(self.tasks):
+                break
+        return found
+
+    def _run_evolver_session(
+        self,
+        run_id: str,
+        generation: int,
+        incumbent: Harness,
+        view: dict[str, Any],
+        snapshot: Snapshot,
+        *,
+        settings: EvolverSettings,
+        relay_stage: int | None = None,
+        starting: Harness | None = None,
+        starting_label: str | None = None,
+        extra_archived: dict[str, Harness] | None = None,
+        extra_known: dict[str, str] | None = None,
+        relay_note: str = "",
+        allow_discovery: bool = True,
+        stage_tag: str = "",
+    ) -> dict[str, Any]:
         config = self.config
-        settings = EvolverSettings(minutes=config.evolver_minutes, tokens=config.evolver_tokens,
-                                   model=config.evolver_model, candidates=config.candidates)
         with Ledger(self.ledger_path) as ledger:  # the training tasks' guidance only: never a holdout task's
             advice = expert.guidance(ledger, self.tasks, until=snapshot.until)
         gate, reruns = self._gate(config.evolver_model), 0
+        stage_extra = {"relay_stage": relay_stage} if relay_stage is not None else {}
         while True:
             try:
-                outcome = run_evolver(run_id=run_id, generation=generation, incumbent=incumbent, suite=self.suite,
-                                      tasks=self.tasks, benches=self.benches, view=view, ledger_path=self.ledger_path,
-                                      settings=settings, repeats=config.repeats, episode_minutes=config.minutes,
-                                      episode_tokens=config.tokens, model=config.model, limits=config.limits,
-                                      expert_text=expert.render(advice) if advice else "", cancel=self.cancel,
-                                      workers=config.concurrency,
-                                      method_research=config.method_research, method_registry=self.method_registry,
-                                      local_selection=config.local_selection)
+                outcome = run_evolver(
+                    run_id=run_id, generation=generation, incumbent=incumbent, suite=self.suite,
+                    tasks=self.tasks, benches=self.benches, view=view, ledger_path=self.ledger_path,
+                    settings=settings, repeats=config.repeats, episode_minutes=config.minutes,
+                    episode_tokens=config.tokens, model=config.model, limits=config.limits,
+                    expert_text=expert.render(advice) if advice else "", cancel=self.cancel,
+                    workers=config.concurrency, method_research=config.method_research,
+                    method_registry=self.method_registry, local_selection=config.local_selection,
+                    starting=starting, starting_label=starting_label, extra_archived=extra_archived,
+                    extra_known=extra_known, relay_note=relay_note, allow_discovery=allow_discovery,
+                    stage_tag=stage_tag,
+                )
             except (Cancelled, KeyboardInterrupt) as error:
                 stopped = getattr(error, "session", None)
                 if stopped is not None:  # what the stopped session spent stays on the record (fold.spending)
                     body = stopped.to_dict()
                     self._log(run_id, "evolver_finished", {
-                        "generation": generation, "status": "interrupted", "candidates": [],
+                        "generation": generation, **stage_extra, "status": "interrupted", "candidates": [],
                         **{key: body.get(key) for key in ("seconds", "tokens", "metered_tokens", "llm_calls",
                                                           "answered_calls", "failed_calls", "trajectory",
                                                           "upstream_error", "unsettled")}})
                 raise
             except Exception as error:
-                self._log(run_id, "evolver_finished", {"generation": generation, "status": "error",
+                self._log(run_id, "evolver_finished", {"generation": generation, **stage_extra, "status": "error",
                                                        "error": f"{type(error).__name__}: {error}"[:2000]})
                 raise
             session = outcome["session"]
-            budget = config.evolver_minutes * 60
+            budget = settings.minutes * 60
             stalled = _builder_stalled(outcome)
             # failed calls kept the evolver from working for most of its time and it left nothing to compare: the
             # provider decided this generation, not the evidence (evo:0f0d4068b8b1 generation 5: 871 of 900 s, two
@@ -1151,8 +1039,8 @@ class Evolution:
             crippled = stalled > STALL_SHARE * budget and not any(item["status"] == "proposed"
                                                                   for item in outcome["candidates"])
             if session["status"] != "infra_failed" and not crippled:
-                break
-            body = {"generation": generation, **{key: session.get(key) for key in (
+                return outcome
+            body = {"generation": generation, **stage_extra, **{key: session.get(key) for key in (
                 "status", "seconds", "tokens", "metered_tokens", "llm_calls", "answered_calls", "failed_calls",
                 "trajectory", "upstream_error", "stalled_seconds")}, "candidates": []}
             if crippled and session["status"] != "infra_failed":
@@ -1170,37 +1058,47 @@ class Evolution:
             raise ServiceDown(f"the evolver got no model reply: {session.get('upstream_error') or 'service failure'}"
                               if not body.get("stalled") else f"the evolver could not work: {body['stalled']} "
                               f"({session.get('upstream_error') or 'service failure'})")
-        found = []
-        seen = state.tried | {behavior_digest(incumbent)}
-        for candidate in outcome["candidates"]:
-            behavior = behavior_digest(candidate["harness"]) if candidate["status"] == "proposed" else None
-            if behavior is not None and behavior in seen:
-                candidate["status"], candidate["ok"] = "duplicate", False
-                candidate["problems"] = [*candidate["problems"],
-                                         "与在任版本或以往比较过的候选内容相同（harness.toml 的名称、摘要不算）"]
-            elif behavior is not None:
-                seen.add(behavior)
-            patches, budget = [], PATCH_LIMIT
-            for change in candidate.get("changes", []):
-                patch = change["patch"][: max(budget, 0)]
-                budget -= len(patch)
-                patches.append({**change, "patch": patch})
-            body = {"generation": generation, "name": candidate["name"], "status": candidate["status"],
-                    "digest": candidate.get("digest"), "behavior": behavior, "parent": incumbent.digest,
-                    "base": candidate.get("base"),  # the archived version it was reset to; None: the incumbent
-                    "summary": candidate.get("summary", ""), "proposal": candidate.get("proposal", ""),
-                    "agent": candidate.get("agent"), "changes": patches, "smoke": candidate.get("smoke"),
-                    "problems": candidate.get("problems", []), "warnings": candidate.get("warnings", [])}
-            if candidate.get("method_research"):
-                body["method_research"] = candidate["method_research"]
-            if candidate["status"] == "proposed":
-                self._log(run_id, "candidate_proposed", body)
-                found.append({"name": candidate["name"], "digest": candidate["digest"],
-                              "harness": candidate["harness"]})
-            else:
-                self._log(run_id, "candidate_rejected", body)
+
+    def _candidate_record(self, generation: int, incumbent: Harness, candidate: dict[str, Any],
+                          seen: set[str], *, duplicate_msg: str | None = None) -> tuple[dict[str, Any], bool]:
+        behavior = behavior_digest(candidate["harness"]) if candidate["status"] == "proposed" else None
+        if behavior is not None and behavior in seen:
+            candidate["status"], candidate["ok"] = "duplicate", False
+            candidate["problems"] = [
+                *candidate["problems"],
+                duplicate_msg or "与在任版本或以往比较过的候选内容相同（harness.toml 的名称、摘要不算）",
+            ]
+        elif behavior is not None:
+            seen.add(behavior)
+        patches, budget = [], PATCH_LIMIT
+        for change in candidate.get("changes", []):
+            patch = change["patch"][: max(budget, 0)]
+            budget -= len(patch)
+            patches.append({**change, "patch": patch})
+        body = {"generation": generation, "name": candidate["name"], "status": candidate["status"],
+                "digest": candidate.get("digest"), "behavior": behavior, "parent": incumbent.digest,
+                "base": candidate.get("base"),  # the archived version it was reset to; None: the incumbent
+                "summary": candidate.get("summary", ""), "proposal": candidate.get("proposal", ""),
+                "agent": candidate.get("agent"), "changes": patches, "smoke": candidate.get("smoke"),
+                "problems": candidate.get("problems", []), "warnings": candidate.get("warnings", [])}
+        if candidate.get("method_research"):
+            body["method_research"] = candidate["method_research"]
+        changes = candidate.get("changes", [])
+        agent_changed = candidate.get("agent") != asdict(incumbent.agent)
+        template_only = (
+            candidate["status"] == "proposed"
+            and not agent_changed
+            and any(item["path"].startswith("template/") for item in changes)
+            and all(item["path"].startswith("template/") or item["path"] == "harness.toml" for item in changes)
+        )
+        return body, template_only
+
+    def _log_evolver_finished(self, run_id: str, generation: int, outcome: dict[str, Any],
+                              *, relay_stage: int | None = None) -> None:
+        session = outcome["session"]
         self._log(run_id, "evolver_finished", {
             "generation": generation,
+            **({"relay_stage": relay_stage} if relay_stage is not None else {}),
             **{key: session.get(key) for key in ("status", "seconds", "tokens", "metered_tokens", "llm_calls",
                                                  "answered_calls", "failed_calls", "trajectory", "activity",
                                                  "upstream_error", "continuations")},
@@ -1208,7 +1106,340 @@ class Evolution:
             "candidates": [{"name": item["name"], "status": item["status"]} for item in outcome["candidates"]],
             **({"method_research": outcome["method_research"]} if "method_research" in outcome else {}),
         })
+
+    def _propose(self, run_id: str, generation: int, incumbent: Harness, view: dict[str, Any],
+                 state: State, snapshot: Snapshot) -> list[dict[str, Any]]:
+        config = self.config
+        settings = EvolverSettings(minutes=config.evolver_minutes, tokens=config.evolver_tokens,
+                                   model=config.evolver_model, candidates=config.candidates)
+        outcome = self._run_evolver_session(run_id, generation, incumbent, view, snapshot, settings=settings)
+        found = []
+        seen = state.tried | {behavior_digest(incumbent)}
+        for candidate in outcome["candidates"]:
+            body, template_only = self._candidate_record(generation, incumbent, candidate, seen)
+            if candidate["status"] == "proposed":
+                self._log(run_id, "candidate_proposed", body)
+                found.append({"name": candidate["name"], "digest": candidate["digest"],
+                              "harness": candidate["harness"], "template_only": template_only})
+            else:
+                self._log(run_id, "candidate_rejected", body)
+        self._log_evolver_finished(run_id, generation, outcome)
         return found
+
+    def _plan_relay_stage(
+        self,
+        run_id: str,
+        generation: int,
+        stage: int,
+        total_stages: int,
+        incumbent: Harness,
+        starting: Harness,
+        starting_label: str,
+        state: State,
+        snapshot: Snapshot,
+        measurement: str,
+        completed_stages: Sequence[dict[str, Any]],
+        extra_archived: dict[str, Harness],
+        stage_seen: set[str],
+        *,
+        stage_cands: int,
+        stage_minutes: float,
+        stage_tokens: int,
+    ) -> tuple[str, list[TaskSpec], list[dict[str, Any]]]:
+        """Run one relay stage's evolver session, carry prior leader for cross-batch checks, and log its plan."""
+
+        config = self.config
+        stage_tasks = select_stage_tasks(
+            self.tasks, generation=generation, stage=stage,
+            total_stages=total_stages, batch_size=config.relay_batch,
+        )
+        live_view = self.view(run_id)
+        relay_note = render_relay_brief(
+            generation=generation, stage=stage, total_stages=total_stages,
+            stage_tasks=stage_tasks, prior_stages=completed_stages,
+            starting_label=starting_label, starting_digest=starting.digest,
+            incumbent_digest=incumbent.digest, final_limit=config.candidates,
+        )
+        extra_known: dict[str, str] = {}
+        if starting.digest != incumbent.digest:
+            extra_known[behavior_digest(starting)] = (
+                f"本阶段出发的优胜版本 {starting_label}（已自动纳入本阶段互补对照与终审池，请在此基础上进一步改进）"
+            )
+        for prev in completed_stages:
+            for cand in prev.get("candidates") or ():
+                beh = cand.get("behavior")
+                if beh and beh not in extra_known:
+                    extra_known[beh] = f"本代前序接力阶段候选 {cand.get('label') or cand.get('name')}"
+        settings = EvolverSettings(minutes=stage_minutes, tokens=stage_tokens,
+                                   model=config.evolver_model, candidates=stage_cands)
+        outcome = self._run_evolver_session(
+            run_id, generation, incumbent, live_view, snapshot,
+            settings=settings, relay_stage=stage, starting=starting,
+            starting_label=starting_label if starting.digest != incumbent.digest else None,
+            extra_archived=extra_archived, extra_known=extra_known,
+            relay_note=relay_note, allow_discovery=(stage == 1), stage_tag=f"-r{stage}",
+        )
+        stage_found: list[dict[str, Any]] = []
+        stage_rejected: list[dict[str, Any]] = []
+        seen = state.tried | {behavior_digest(incumbent)} | stage_seen
+        if starting.digest != incumbent.digest:
+            seen.add(behavior_digest(starting))
+        dup_msg = (
+            f"与在任版本、出发版本 {starting_label} 或已比较过的候选内容相同"
+            if starting.digest != incumbent.digest
+            else None
+        )
+        for candidate in outcome["candidates"]:
+            body, template_only = self._candidate_record(
+                generation, incumbent, candidate, seen, duplicate_msg=dup_msg
+            )
+            if candidate["status"] == "proposed":
+                r_name = f"r{stage}{candidate['name']}"
+                record = {
+                    **body, "name": r_name, "local_name": candidate["name"],
+                    "label": f"g{generation}{r_name}", "template_only": template_only,
+                }
+                stage_found.append({**record, "harness": candidate["harness"]})
+                if body.get("behavior"):
+                    stage_seen.add(body["behavior"])
+            else:
+                stage_rejected.append({
+                    "name": f"r{stage}{candidate['name']}", "status": candidate["status"],
+                    "problems": candidate.get("problems", []),
+                })
+        # Cross-batch verification: carry the prior stage's advancing leader onto stage s's complementary batch
+        # so multi-stage finalist selection scores its genuine cross-batch generalization.
+        if stage > 1 and stage_found and starting.digest != incumbent.digest:
+            lead_beh = behavior_digest(starting)
+            if all(item.get("behavior") != lead_beh for item in stage_found):
+                prior_cand = next(
+                    (c for st in reversed(completed_stages) for c in st.get("candidates") or ()
+                     if c.get("digest") == starting.digest),
+                    {},
+                )
+                stage_found.append({
+                    **prior_cand,
+                    "name": f"r{stage}_lead",
+                    "label": starting_label,
+                    "digest": starting.digest,
+                    "behavior": lead_beh,
+                    "carried_leader": True,
+                    "harness": starting,
+                })
+        self._log_evolver_finished(run_id, generation, outcome, relay_stage=stage)
+        stage_plan_id = digest({
+            "schema": "ecogym.relay-stage-plan/1",
+            "run": run_id, "generation": generation, "stage": stage, "measurement": measurement,
+            "tasks": [task.id for task in stage_tasks],
+            "candidates": [item["digest"] for item in stage_found],
+        })
+        plan_cands = [{key: val for key, val in item.items() if key != "harness"} for item in stage_found]
+        self._log(run_id, "relay_stage_planned", {
+            "generation": generation, "stage": stage, "total_stages": total_stages,
+            "plan_id": stage_plan_id, "measurement": measurement,
+            "tasks": [task.id for task in stage_tasks],
+            "starting": {"digest": starting.digest, "label": starting_label},
+            "candidates": plan_cands, "rejected": stage_rejected,
+        })
+        return stage_plan_id, stage_tasks, stage_found
+
+    def _promote_relay_finalists(
+        self,
+        run_id: str,
+        generation: int,
+        incumbent: Harness,
+        completed_stages: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Promote top cross-stage relay finalists as official round candidates (or early-exit if all worse)."""
+
+        finalists = select_finalists(
+            completed_stages,
+            limit=self.config.candidates,
+            min_delta=float(getattr(self.suite.gates, "min_delta", 0.005)),
+            skip_if_all_worse=self.config.early_prune,
+        )
+        promoted: list[dict[str, Any]] = []
+        for idx, item in enumerate(finalists):
+            final_name = NAMES[idx]
+            origin = item["relay_origin"]
+            harness_obj = resolve(item["digest"])
+            body = {
+                "generation": generation, "name": final_name, "status": "proposed",
+                "digest": item["digest"], "behavior": item.get("behavior") or behavior_digest(harness_obj),
+                "parent": incumbent.digest, "base": item.get("base"),
+                "summary": item.get("summary", ""), "proposal": item.get("proposal", ""),
+                "agent": item.get("agent"), "changes": item.get("changes", []), "smoke": item.get("smoke"),
+                "problems": [], "warnings": item.get("warnings", []),
+                "relay_origin": origin,
+            }
+            if item.get("method_research"):
+                body["method_research"] = item["method_research"]
+            self._log(run_id, "candidate_proposed", body)
+            promoted.append({
+                "name": final_name, "digest": item["digest"], "harness": harness_obj,
+                "template_only": bool(item.get("template_only")), "relay_origin": origin,
+            })
+        return promoted
+
+    def _relay_propose(self, run_id: str, generation: int, incumbent: Harness, view: dict[str, Any],
+                       state: State, snapshot: Snapshot, measurement: str) -> list[dict[str, Any]]:
+        """Run ``config.relay_stages`` mini-batch screening stages and promote the best finalist(s)."""
+
+        config = self.config
+        total_stages = config.relay_stages
+        stage_cands = effective_relay_candidates(config.candidates, config.relay_candidates)
+        stage_minutes = max(min(config.evolver_minutes, 8.0), round(config.evolver_minutes / total_stages, 1))
+        stage_tokens = max(min(config.evolver_tokens, 1_500_000), int(config.evolver_tokens / total_stages))
+        task_by_id = {task.id: task for task in self.tasks}
+        baseline = self._incumbent_baseline(view, incumbent, snapshot)
+        current_round = (self.view(run_id).get("rounds") or [{}])[-1]
+        saved_stages = {
+            int(item["stage"]): item
+            for item in current_round.get("relay_stages") or ()
+            if item.get("measurement") == measurement
+        }
+        starting, starting_label = incumbent, "incumbent"
+        extra_archived: dict[str, Harness] = {}
+        stage_seen: set[str] = set()
+        completed_stages: list[dict[str, Any]] = []
+
+        for stage in range(1, total_stages + 1):
+            saved = saved_stages.get(stage)
+            if saved and saved.get("finished"):
+                completed_stages.append(saved)
+                for cand in saved.get("candidates") or ():
+                    if cand.get("digest"):
+                        with contextlib.suppress(HarnessError):
+                            h_obj = resolve(cand["digest"])
+                            extra_archived[str(cand.get("label") or cand["name"])] = h_obj
+                            stage_seen.add(str(cand.get("behavior") or behavior_digest(h_obj)))
+                leader = saved.get("leader") or {}
+                if leader.get("advanced") and leader.get("digest"):
+                    with contextlib.suppress(HarnessError):
+                        starting = resolve(leader["digest"])
+                        starting_label = str(leader.get("label") or leader.get("name") or starting.name)
+                continue
+
+            if saved and saved.get("plan_id"):
+                stage_plan_id = str(saved["plan_id"])
+                stage_tasks = [task_by_id[tid] for tid in saved.get("tasks") or () if tid in task_by_id]
+                stage_found = [{**cand, "harness": resolve(cand["digest"])} for cand in saved.get("candidates") or ()
+                               if cand.get("digest")]
+            else:
+                stage_plan_id, stage_tasks, stage_found = self._plan_relay_stage(
+                    run_id, generation, stage, total_stages, incumbent, starting, starting_label,
+                    state, snapshot, measurement, completed_stages, extra_archived, stage_seen,
+                    stage_cands=stage_cands, stage_minutes=stage_minutes, stage_tokens=stage_tokens,
+                )
+
+            stage_fast = (
+                bool(stage_found) and config.template_fast_track
+                and all(item.get("template_only") for item in stage_found)
+            )
+            if not stage_found:
+                stage_entries: list[dict[str, Any]] = []
+                ranked: list[dict[str, Any]] = []
+            elif stage_fast:
+                stage_jobs = [(incumbent, "incumbent", None)] + [
+                    (item["harness"], "candidate", item["name"]) for item in stage_found
+                ]
+                stage_entries = self._fast_track_templates(
+                    run_id, generation, stage_jobs, snapshot, stage_plan_id,
+                    tasks=stage_tasks, relay_stage=stage,
+                )
+                _require_replies(stage_entries)
+                ranked = rank_stage_candidates(stage_found, stage_entries, stage_tasks, incumbent_baseline=baseline)
+            else:
+                need_inc_tasks = [task for task in stage_tasks if task.id not in baseline]
+                stage_entries = self._relay_episodes(
+                    run_id, generation, stage, stage_found, incumbent,
+                    stage_tasks, need_inc_tasks, snapshot, stage_plan_id,
+                )
+                _require_replies(stage_entries)
+                ranked = rank_stage_candidates(stage_found, stage_entries, stage_tasks, incumbent_baseline=baseline)
+
+            leader = pick_stage_leader(ranked, fallback_digest=starting.digest, fallback_label=starting_label)
+            stage_body = {
+                "generation": generation, "stage": stage, "total_stages": total_stages,
+                "plan_id": stage_plan_id, "tasks": [task.id for task in stage_tasks],
+                "episodes": stage_entries, "ranking": ranked, "leader": leader,
+                **({"fast_track": True} if stage_fast else {}),
+            }
+            self._log(run_id, "relay_stage_finished", stage_body)
+            completed_stages.append({
+                **stage_body,
+                "candidates": [{key: val for key, val in item.items() if key != "harness"} for item in stage_found],
+                "finished": True,
+            })
+            for item in stage_found:
+                if not item.get("carried_leader"):
+                    extra_archived[str(item.get("label") or item["name"])] = item["harness"]
+            if leader.get("advanced") and leader.get("digest"):
+                starting = resolve(leader["digest"])
+                starting_label = str(leader.get("label") or leader.get("name") or starting.name)
+
+        return self._promote_relay_finalists(run_id, generation, incumbent, completed_stages)
+
+    def _run_episode_pool(
+        self,
+        batch: Sequence[tuple[Harness, str, str | None, TaskSpec, int]],
+        recovered: dict[tuple[str, str, str | None, str, int], dict[str, Any]],
+        attempts: dict[tuple[str, str, str | None, str, int], int],
+        run_id: str,
+        generation: int,
+        snapshot: Snapshot,
+        plan_id: str,
+        *,
+        relay_stage: int | None = None,
+        prefix: str = "episode",
+    ) -> list[dict[str, Any]]:
+        """Run a batch of episode specs concurrently, reusing verified recovered slots and cancelling on error."""
+
+        with ThreadPoolExecutor(max_workers=self.config.concurrency, thread_name_prefix=prefix) as pool:
+            pending = []
+            for spec in batch:
+                harness, role, name, task, replicate = spec
+                slot = (harness.digest, role, name, task.id, replicate)
+                future = None if slot in recovered else pool.submit(
+                    self._episode, run_id, generation, *spec, snapshot, plan_id, attempts.get(slot, 0),
+                    **({"relay_stage": relay_stage} if relay_stage is not None else {}),
+                )
+                pending.append((slot, future))
+            try:
+                return [recovered[slot] if future is None else future.result() for slot, future in pending]
+            except BaseException:
+                self.cancel.set()
+                for _, future in pending:
+                    if future is not None:
+                        future.cancel()
+                raise
+
+    def _relay_episodes(
+        self,
+        run_id: str,
+        generation: int,
+        stage: int,
+        stage_candidates: Sequence[dict[str, Any]],
+        incumbent: Harness,
+        stage_tasks: Sequence[TaskSpec],
+        need_inc_tasks: Sequence[TaskSpec],
+        snapshot: Snapshot,
+        plan_id: str,
+    ) -> list[dict[str, Any]]:
+        """Run 1 replicate per task for a relay stage's candidates (plus incumbent on tasks lacking a baseline)."""
+
+        need_inc_ids = {task.id for task in need_inc_tasks}
+        specs: list[tuple[Harness, str, str | None, TaskSpec, int]] = []
+        for task in stage_tasks:
+            if task.id in need_inc_ids:
+                specs.append((incumbent, "incumbent", None, task, 0))
+            for item in stage_candidates:
+                specs.append((item["harness"], "candidate", str(item["name"]), task, 0))
+        recovered, attempts = self._recover_episodes(run_id, generation, plan_id, snapshot)
+        return self._run_episode_pool(
+            specs, recovered, attempts, run_id, generation, snapshot, plan_id,
+            relay_stage=stage, prefix=f"relay-s{stage}",
+        )
 
     def _recover_episodes(self, run_id: str, generation: int, plan_id: str, snapshot: Snapshot
                           ) -> tuple[dict, dict]:
@@ -1253,34 +1484,142 @@ class Evolution:
             recovered[slot] = entry
         return recovered, attempts
 
+    def _prunable_candidates(self, wave1: Sequence[dict[str, Any]], jobs: Sequence[tuple[Harness, str, str | None]]
+                             ) -> set[str]:
+        """Candidates clearly dominated after replicate 0 (worse on >50% of tasks and mean delta < -min_delta)."""
+
+        if len(self.tasks) < 3:
+            return set()
+        incumbent_scores = {
+            entry["task"]: float(entry["score"])
+            for entry in wave1
+            if entry.get("role") == "incumbent" and usable(entry) and isinstance(entry.get("score"), (int, float))
+            and math.isfinite(float(entry["score"]))
+        }
+        if len(incumbent_scores) < len(self.tasks):
+            return set()
+        pruned: set[str] = set()
+        min_delta = float(getattr(self.suite.gates, "min_delta", 0.005))
+        for _, role, name in jobs:
+            if role != "candidate" or not name:
+                continue
+            deltas: list[float] = []
+            for entry in wave1:
+                if (entry.get("role") == "candidate" and entry.get("candidate") == name and usable(entry)
+                        and entry["task"] in incumbent_scores and isinstance(entry.get("score"), (int, float))
+                        and math.isfinite(float(entry["score"]))):
+                    deltas.append(float(entry["score"]) - incumbent_scores[entry["task"]])
+            if len(deltas) == len(self.tasks):
+                worse = sum(1 for d in deltas if d < 0.0)
+                if worse > len(deltas) / 2.0 and (sum(deltas) / len(deltas)) < -min_delta:
+                    pruned.add(name)
+        return pruned
+
+    def _fast_track_templates(
+        self,
+        run_id: str,
+        generation: int,
+        jobs: list[tuple[Harness, str, str | None]],
+        snapshot: Snapshot,
+        plan_id: str,
+        *,
+        tasks: Sequence[TaskSpec] | None = None,
+        relay_stage: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Deterministically evaluate pure template-only rounds on SCORED_STAGE without running LLM agent episodes."""
+
+        runtime = discover_runtime()
+        tag = run_id.partition(":")[2] or run_id
+        stage_part = f"-r{relay_stage}" if relay_stage is not None else ""
+        out_dir = ecogym_home() / "trajectories" / f"fast-{tag}-g{generation}{stage_part}-{plan_id[:8]}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        chosen_tasks = list(tasks) if tasks is not None else self.tasks
+        work_items = [(harness, role, name, task) for task in chosen_tasks for harness, role, name in jobs]
+
+        def run_one(item: tuple[Harness, str, str | None, TaskSpec]) -> dict[str, Any]:
+            harness, role, name, task = item
+            label = "incumbent" if role == "incumbent" else str(name)
+            ep_id = f"fast:{tag}-g{generation}{stage_part}-{label}-{digest([task.id, harness.digest])[:8]}"
+            entry: dict[str, Any] = {
+                "episode": ep_id, "task": task.id, "harness": harness.digest, "role": role,
+                "candidate": name, "replicate": 0, "guidance": snapshot.guidance[task.id],
+                "attempt": 0, "tokens": 0, "metered_tokens": 0, "fast_track": True,
+                **({"relay_stage": relay_stage} if relay_stage is not None else {}),
+            }
+            bench = self.benches[task.id]
+            with tempfile.TemporaryDirectory(prefix="fast-template-", dir=scratch_root()) as tmp:
+                program_dir = Path(tmp) / "template"
+                program_dir.mkdir()
+                try:
+                    prog_digest = snapshot_program(harness.root / "template", program_dir)
+                    report, evaluation = judge_program(
+                        bench, program_dir, SCORED_STAGE, runtime, limits=self.config.limits, cancel=self.cancel
+                    )
+                except Cancelled:
+                    raise
+                except (OSError, ToolError, ValueError, RuntimeError) as error:
+                    entry.update({"status": "error", "error": f"{type(error).__name__}: {error}"[:1000],
+                                  "seconds": 0.0})
+                    return entry
+            pred_path = out_dir / f"{label}-{task.id.replace(':', '_').replace('/', '_')}.npz"
+            save_predictions(pred_path, bench, evaluation)
+            pred_digest = file_digest(pred_path)
+            entry.update({
+                "status": "finished" if report["status"] == "ok" else "error",
+                "score": report["score"],
+                "predictions": str(pred_path),
+                "predictions_digest": pred_digest,
+                "program_digest": prog_digest,
+                "scored_start": True,
+                "score_stage": SCORED_STAGE,
+                "judge_protocol": JUDGE_PROTOCOL,
+                "score_status": report["status"],
+                "score_limits_match": True,
+                "seconds": report["seconds"],
+            })
+            self._evaluations[ep_id] = evaluation
+            self._notify("episode", entry)
+            return entry
+
+        with ThreadPoolExecutor(max_workers=min(self.config.concurrency, max(1, len(work_items))),
+                                thread_name_prefix="fast-track") as pool:
+            return list(pool.map(run_one, work_items))
+
     def _episodes(self, run_id: str, generation: int, jobs: list[tuple[Harness, str, str | None]],
                   snapshot: Snapshot, plan_id: str) -> list[dict[str, Any]]:
         # replicate by replicate, task by task, every version in turn: no version waits behind another's queue
         specs = [(harness, role, name, task, replicate) for replicate in range(self.config.repeats)
                  for task in self.tasks for harness, role, name in jobs]
         recovered, attempts = self._recover_episodes(run_id, generation, plan_id, snapshot)
-        with ThreadPoolExecutor(max_workers=self.config.concurrency, thread_name_prefix="episode") as pool:
-            pending = []
-            for spec in specs:
-                harness, role, name, task, replicate = spec
-                slot = (harness.digest, role, name, task.id, replicate)
-                future = None if slot in recovered else pool.submit(
-                    self._episode, run_id, generation, *spec, snapshot, plan_id, attempts.get(slot, 0))
-                pending.append((slot, future))
-            try:
-                return [recovered[slot] if future is None else future.result() for slot, future in pending]
-            except BaseException:
-                self.cancel.set()
-                for _, future in pending:
-                    if future is not None:
-                        future.cancel()
-                raise
+
+        def run_batch(batch: Sequence[tuple[Harness, str, str | None, TaskSpec, int]]) -> list[dict[str, Any]]:
+            return self._run_episode_pool(batch, recovered, attempts, run_id, generation, snapshot, plan_id)
+
+        if not (self.config.early_prune and generation > 0 and self.config.repeats >= 2):
+            return run_batch(specs)
+
+        wave1_specs = [spec for spec in specs if spec[4] == 0]
+        wave2_specs = [spec for spec in specs if spec[4] > 0]
+        wave1_results = run_batch(wave1_specs)
+        pruned = self._prunable_candidates(wave1_results, jobs)
+        if not pruned:
+            return [*wave1_results, *run_batch(wave2_specs)]
+        kept_specs = [spec for spec in wave2_specs if spec[2] not in pruned]
+        pruned_entries = [
+            {"episode": None, "task": task.id, "harness": harness.digest, "role": role, "candidate": name,
+             "replicate": replicate, "guidance": snapshot.guidance[task.id], "status": "pruned",
+             "tokens": 0, "metered_tokens": 0, "seconds": 0.0}
+            for harness, role, name, task, replicate in wave2_specs
+            if name in pruned
+        ]
+        return [*wave1_results, *run_batch(kept_specs), *pruned_entries]
 
     def _episode(self, run_id: str, generation: int, harness: Harness, role: str, name: str | None,
                  task: TaskSpec, replicate: int, snapshot: Snapshot, plan_id: str,
-                 first_attempt: int) -> dict[str, Any]:
+                 first_attempt: int, *, relay_stage: int | None = None) -> dict[str, Any]:
         entry: dict[str, Any] = {"task": task.id, "harness": harness.digest, "role": role, "candidate": name,
-                                 "replicate": replicate, "guidance": snapshot.guidance[task.id]}
+                                 "replicate": replicate, "guidance": snapshot.guidance[task.id],
+                                 **({"relay_stage": relay_stage} if relay_stage is not None else {})}
         gate = self._gate(self.config.model or harness.agent.model)
         # attempts that count against ``retries``; reruns after a confirmed outage; reruns after a service failure
         # that no outage explains
@@ -1291,16 +1630,19 @@ class Evolution:
             if gate is not None:
                 gate.wait(self.cancel)  # no episode starts while the service is down
             attempt = first_attempt + failures + outages + unstable
-            label = f"{run_id} 第{generation}代 {'在任' if role == 'incumbent' else f'候选{name}'} {task.id}"
+            stage_text = f"接力{relay_stage}" if relay_stage is not None else ""
+            label = f"{run_id} 第{generation}代{stage_text} {'在任' if role == 'incumbent' else f'候选{name}'} {task.id}"
             config = EpisodeConfig(
                 task=task.id, harness=harness.digest, minutes=self.config.minutes, tokens=self.config.tokens,
                 model=self.config.model, label=label, limits=self.config.limits, expert_until=snapshot.until,
                 local_selection=self.config.local_selection,
                 context={"evolution": run_id, "generation": generation, "role": role, "candidate": name,
-                         "replicate": replicate, "attempt": attempt, "round_plan": plan_id},
+                         "replicate": replicate, "attempt": attempt, "round_plan": plan_id,
+                         **({"relay_stage": relay_stage} if relay_stage is not None else {})},
             )
             try:
-                result = run_episode(config, self.ledger_path, bench=self.benches[task.id], cancel=self.cancel)
+                result = run_episode(config, self.ledger_path, bench=self.benches[task.id], cancel=self.cancel,
+                                     start_cache=self._start_cache)
             except (Cancelled, KeyboardInterrupt):
                 raise
             except Exception as error:  # a broken episode is recorded and retried, never fatal to the run

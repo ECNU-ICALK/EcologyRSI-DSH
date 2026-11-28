@@ -25,6 +25,7 @@ outage of the model service that is over, or a process that died.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hmac
 import json
 import re
@@ -64,6 +65,9 @@ from .task.spec import TaskSpec, task_specs
 
 MAX_BODY = 1_000_000
 MODEL_CHECK_SECONDS = 600
+MAX_TRACKED_ERRORS = 200
+SSE_POLL_SECONDS = 1.0
+SSE_KEEPALIVE_SECONDS = 15.0
 HTML = "text/html; charset=utf-8"
 SEALED_ORDER = tuple(stage for stage in STAGES if stage in SEALED_STAGES)
 EXPORT_ID = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
@@ -83,7 +87,9 @@ def _flag(value: Any) -> bool:
 EVOLVE_FIELDS = {"harness": str, "generations": int, "candidates": int, "repeats": int, "minutes": float,
                  "tokens": int, "model": str, "evolver_minutes": float, "evolver_tokens": int, "evolver_model": str,
                  "concurrency": int, "retries": int, "outage_minutes": float, "auto_resume": _flag,
-                 "check_adoptions": _flag, "method_research": str, "local_selection": str}
+                 "check_adoptions": _flag, "method_research": str, "local_selection": str,
+                 "template_fast_track": _flag, "early_prune": _flag,
+                 "relay_stages": int, "relay_batch": int, "relay_candidates": int}
 HARNESS_TEXT = ("instructions.md", "memory/lessons.md", "harness.toml")
 ARENA = "方法竞技"
 
@@ -106,6 +112,7 @@ class Route:
     body: bool = False
     query: tuple[str, ...] = ()
     html: bool = False
+    sse: bool = False
 
     def match(self, method: str, parts: list[str]) -> list[str] | None:
         """The path arguments when ``method`` and ``parts`` (the path's segments) are this route's, else None."""
@@ -125,6 +132,9 @@ class Route:
 ROUTES = (
     Route("GET", "catalog", "catalog", "目录", "任务、任务组、模型路由和进化的默认设置（面板打开时读一次）"),
     Route("GET", "routes", "routes", "目录", "这张接口表"),
+    Route("GET", "events", "events_stream", "目录",
+          "账本变更事件流（Server-Sent Events），可配合 ?since=seq 替代高频轮询",
+          query=("since",), sse=True),
     Route("GET", "tasks/{task}/stages", "task_stages", "目录",
           "一个任务的时间分段：拟合、本地检验、隐藏期、封存时期"),
     Route("GET", "evolutions", "evolutions", "进化", "进化运行列表"),
@@ -133,8 +143,8 @@ ROUTES = (
     Route("GET", "evolutions/{run}", "evolution", "进化",
           "一次进化运行：各代、候选与比较、验证、训练任务的参考成绩、起点是哪些运行进化出来的、后端会不会自动继续它"),
     Route("GET", "evolutions/{run}/evolver/{generation}", "evolver_session", "进化",
-          "一代的评审会话：看了哪些证据和版本、调了哪些工具、改了哪些文件，以及每一步（?steps=0 不带每一步）",
-          query=("steps",)),
+          "一代的评审会话：看了哪些证据和版本、调了哪些工具、改了哪些文件，以及每一步（?steps=0 不带每一步，?stage=N 选接力阶段）",
+          query=("steps", "stage")),
     Route("POST", "evolutions/{run}/stop", "stop", "进化", "这一代结束后停止"),
     Route("POST", "evolutions/{run}/abort", "abort", "进化", "立即中止：正在运行的智能体停下，继续时这一代重跑"),
     Route("POST", "evolutions/{run}/resume", "resume_evolution", "进化",
@@ -145,8 +155,8 @@ ROUTES = (
           "在后台验证：{kind: holdout}、{kind: sealed, stage}，或 {kind: adoptions}"
           "（还没复核的采纳，在训练任务的封存时期 validation 上复核）", status=202, body=True),
     Route("GET", "episodes", "episodes", "回合",
-          "回合列表（?evolution=运行 只看一个运行，&generation=代 只看其中一代，&status=running 只看运行中的）",
-          query=("evolution", "status", "generation")),
+          "回合列表（支持 ?evolution=运行&generation=代&status=状态&limit=条数&offset=偏移&since_seq=游标）",
+          query=("evolution", "status", "generation", "limit", "offset", "since_seq")),
     Route("GET", "episodes/{episode}", "episode", "回合",
           "一个回合：隐藏期成绩、本地检验与提交、笔记、最终回复、工具使用"),
     Route("GET", "episodes/{episode}/transcript", "episode_transcript", "回合",
@@ -209,6 +219,77 @@ def _task_entry(task: TaskSpec) -> dict[str, Any]:
     }
 
 
+class _LedgerBroadcaster:
+    """Single shared ledger watcher fanning out updates to all open SSE subscribers via one Condition."""
+
+    def __init__(self, ledger_path: Path, closing: threading.Event) -> None:
+        self._path = ledger_path
+        self._closing = closing
+        self._cond = threading.Condition()
+        self._subscribers = 0
+        self._thread: threading.Thread | None = None
+        self._seq = -1
+        self._last_batch: tuple[int, int, dict[str, Any]] | None = None  # (prev_seq, new_seq, payload)
+
+    def subscribe(self) -> int:
+        with self._cond:
+            self._subscribers += 1
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._watch, name="ledger-sse-watch", daemon=True)
+                self._thread.start()
+            return self._seq
+
+    def unsubscribe(self) -> None:
+        with self._cond:
+            self._subscribers = max(0, self._subscribers - 1)
+            self._cond.notify_all()
+
+    def wake(self) -> None:
+        with self._cond:
+            self._cond.notify_all()
+
+    def wait_after(self, cursor: int, timeout: float) -> tuple[int, dict[str, Any] | None]:
+        """Block until the ledger advances past ``cursor``, ``timeout`` elapses, or closing is set."""
+
+        with self._cond:
+            if self._seq <= cursor and not self._closing.is_set():
+                self._cond.wait(timeout=timeout)
+            if self._seq <= cursor:
+                return cursor, None
+            batch = self._last_batch
+            if batch is not None and batch[0] == cursor and batch[1] == self._seq:
+                return self._seq, batch[2]
+            return self._seq, None
+
+    def _watch(self) -> None:
+        try:
+            with Ledger(self._path) as ledger:
+                current = ledger.last_seq()
+                with self._cond:
+                    self._seq = max(self._seq, current)
+                    self._cond.notify_all()
+                while not self._closing.is_set():
+                    with self._cond:
+                        if self._subscribers <= 0:
+                            return
+                    latest = ledger.last_seq()
+                    if latest > current:
+                        delta = ledger.events_since(current)
+                        runs = list(dict.fromkeys(ev.run_id for ev in delta))
+                        kinds = list(dict.fromkeys(ev.kind for ev in delta))
+                        payload = {"seq": latest, "count": len(delta), "runs": runs[:50], "kinds": kinds[:20]}
+                        with self._cond:
+                            self._last_batch = (current, latest, payload)
+                            self._seq = latest
+                            self._cond.notify_all()
+                        current = latest
+                        continue
+                    self._closing.wait(SSE_POLL_SECONDS)
+        except Exception:
+            with self._cond:
+                self._cond.notify_all()
+
+
 class ApiError(Exception):
     def __init__(self, status: HTTPStatus, message: str) -> None:
         super().__init__(message)
@@ -232,9 +313,130 @@ class Service:
         self._model_checks: dict[str, tuple[float, dict[str, Any]]] = {}
         self._closing = threading.Event()  # set by close: background loops end
         self._resume_notes: dict[str, dict[str, Any]] = {}  # run id -> what the last automatic-resume look found
+        # Incremental last_seq-keyed read model cache: eliminates O(N) full-ledger refolding on repeated polls.
+        self._cache_lock = threading.Lock()
+        self._cache_seq: int = -1
+        self._evo_order: list[str] = []
+        self._evo_views: dict[str, dict[str, Any]] = {}
+        self._evo_spent: dict[str, dict[str, Any]] = {}
+        self._evo_ancestry: dict[str, list[dict[str, Any]]] = {}
+        self._ep_order: list[str] = []
+        self._ep_summaries: dict[str, dict[str, Any]] = {}
+        self._ep_refs: dict[str, dict[str, Any]] = {}
+        self._ep_last_seq: dict[str, int] = {}
+        self._ep_by_evo: dict[str, list[str]] = {}
+        self._broadcaster = _LedgerBroadcaster(self.ledger_path, self._closing)
         self.auto_resuming = False  # whether auto_resume runs in this service
         self.started = datetime.now(UTC)
         Ledger(self.ledger_path).close()  # create the file and schema up front
+
+    def _prune_runtime_state(self) -> None:
+        """Trim finished thread references and expired diagnostic maps so long-lived daemons stay bounded."""
+
+        now = time.monotonic()
+        with self._jobs:
+            for key in [k for k, thread in self._verifying.items() if not thread.is_alive()]:
+                self._verifying.pop(key, None)
+                self._cancels.pop(key, None)
+            for key in [k for k, thread in self._exporting.items() if not thread.is_alive()]:
+                self._exporting.pop(key, None)
+        with self._lock:
+            for key in [k for k, (stamp, _) in list(self._model_checks.items()) if now - stamp >= MODEL_CHECK_SECONDS]:
+                self._model_checks.pop(key, None)
+        for store in (self._errors, self._resume_notes):
+            while len(store) > MAX_TRACKED_ERRORS:
+                store.pop(next(iter(store)), None)
+
+    def _sync_read_model(self, ledger: Ledger) -> int:
+        """Keep evolution views, spending, and episode summaries synchronized with ``ledger.last_seq()``."""
+
+        from .episodes.history import START as EP_START
+        from .episodes.history import fold_episode
+        from .episodes.history import summary as episode_summary
+        from .evolution import fold as fold_evo
+        from .evolution.fold import START as EVO_START
+        from .evolution.fold import spending
+
+        with self._cache_lock:
+            current = ledger.last_seq()
+            if current == self._cache_seq:
+                return current
+            if self._cache_seq < 0 or current < self._cache_seq:
+                evo_ids = ledger.runs(first=EVO_START)
+                evo_grouped = ledger.events_by_runs(evo_ids)
+                self._evo_order = list(evo_ids)
+                self._evo_views = {rid: fold_evo(evo_grouped[rid]) for rid in evo_ids if evo_grouped.get(rid)}
+                self._evo_spent = spending(ledger, self._evo_views) if self._evo_views else {}
+                self._evo_ancestry = {}
+
+                ep_ids = ledger.runs(first=EP_START)
+                ep_grouped = ledger.events_by_runs(ep_ids)
+                self._ep_order = []
+                self._ep_summaries = {}
+                self._ep_refs = {}
+                self._ep_last_seq = {}
+                self._ep_by_evo = {}
+                for rid in ep_ids:
+                    evs = ep_grouped.get(rid)
+                    if not evs:
+                        continue
+                    record = fold_episode(evs)
+                    self._ep_order.append(rid)
+                    self._ep_summaries[rid] = episode_summary(record)
+                    refs = (record.get("scored") or {}).get("references")
+                    if refs:
+                        self._ep_refs[rid] = refs
+                    self._ep_last_seq[rid] = evs[-1].seq
+                    evo_id = (record.get("context") or {}).get("evolution")
+                    if evo_id:
+                        self._ep_by_evo.setdefault(str(evo_id), []).append(rid)
+                self._cache_seq = current
+                return current
+
+            delta = ledger.events_since(self._cache_seq)
+            if not delta:
+                self._cache_seq = current
+                return current
+            touched = list(dict.fromkeys(event.run_id for event in delta))
+            grouped = ledger.events_by_runs(touched)
+            touched_evos: set[str] = set()
+            evo_changed = False
+            for rid in touched:
+                evs = grouped.get(rid)
+                if not evs:
+                    continue
+                first_kind = evs[0].kind
+                if first_kind == EVO_START:
+                    if rid not in self._evo_views:
+                        self._evo_order.append(rid)
+                    self._evo_views[rid] = fold_evo(evs)
+                    touched_evos.add(rid)
+                    evo_changed = True
+                elif first_kind == EP_START:
+                    is_new = rid not in self._ep_summaries
+                    record = fold_episode(evs)
+                    if is_new:
+                        self._ep_order.append(rid)
+                    self._ep_summaries[rid] = episode_summary(record)
+                    refs = (record.get("scored") or {}).get("references")
+                    if refs:
+                        self._ep_refs[rid] = refs
+                    self._ep_last_seq[rid] = evs[-1].seq
+                    evo_id = (record.get("context") or {}).get("evolution")
+                    if evo_id:
+                        evo_key = str(evo_id)
+                        if is_new:
+                            self._ep_by_evo.setdefault(evo_key, []).append(rid)
+                        if evo_key in self._evo_views:
+                            touched_evos.add(evo_key)
+            if evo_changed:
+                self._evo_ancestry.clear()  # adoption/verification in any run can update ancestry chains
+            if touched_evos:
+                subset = {rid: self._evo_views[rid] for rid in touched_evos if rid in self._evo_views}
+                if subset:
+                    self._evo_spent.update(spending(ledger, subset))
+            self._cache_seq = current
+            return current
 
     def warm(self) -> None:
         """Import the evolution and episode code ahead of the first request (it takes seconds when cold)."""
@@ -310,15 +512,20 @@ class Service:
     # ---- harness evolution, episodes, experts ---------------------------------------------------------------
 
     def evolutions(self) -> list[dict[str, Any]]:
-        from .evolution import fold, summary
-        from .evolution.fold import spending
+        from .evolution import summary
 
         with Ledger(self.ledger_path) as ledger:
-            views = [fold(ledger.events(run_id)) for run_id in ledger.runs(first="evolve_started")]
-            spent = spending(ledger, {view["run_id"]: view for view in views})  # every attempt, not only the compared
+            self._sync_read_model(ledger)
+        with self._cache_lock:
+            order = list(self._evo_order)
+            views = {rid: self._evo_views[rid] for rid in order if rid in self._evo_views}
+            spent = {rid: self._evo_spent.get(rid) for rid in order}
         runs = []
-        for view in views:
-            item = summary(view, spent.get(view["run_id"]))
+        for rid in order:
+            view = views.get(rid)
+            if view is None:
+                continue
+            item = summary(view, spent.get(rid))
             item["active"] = self._alive(item["run_id"])
             item["verifying"] = self._alive(item["run_id"], verifying=True)
             item["stale"] = not item["active"] and self._stale(view)
@@ -342,25 +549,31 @@ class Service:
         return stale(view)
 
     def evolution(self, run_id: str) -> dict[str, Any]:
-        from .episodes.history import fold_episode
-        from .evolution import fold
         from .evolution.ancestry import ancestry
         from .evolution.loop import spent_by
 
         with Ledger(self.ledger_path) as ledger:
-            events = ledger.events(run_id)
-            if not events:
-                raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
-            view = fold(events)
+            self._sync_read_model(ledger)
+            with self._cache_lock:
+                cached = self._evo_views.get(run_id)
+                if cached is None:
+                    raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
+                view = copy.deepcopy(cached)
+                spent = copy.deepcopy(self._evo_spent.get(run_id))
+                ep_refs = self._ep_refs
+                cached_ancestry = self._evo_ancestry.get(run_id)
             references: dict[str, Any] = {}
             for round_ in view["rounds"]:
                 for entry in round_["episodes"]:
-                    if entry.get("episode") and entry["task"] not in references:
-                        scored = fold_episode(ledger.events(entry["episode"])).get("scored") or {}
-                        if scored.get("references"):
-                            references[entry["task"]] = scored["references"]
-            view["ancestry"] = ancestry(ledger, view["seed"]["digest"], exclude=run_id)
-            view["spent"] = spent_by(ledger, view)  # every attempt and session, not only the episodes compared
+                    ep_id = entry.get("episode")
+                    if ep_id and entry["task"] not in references and ep_id in ep_refs:
+                        references[entry["task"]] = ep_refs[ep_id]
+            if cached_ancestry is None:
+                cached_ancestry = ancestry(ledger, view["seed"]["digest"], exclude=run_id)
+                with self._cache_lock:
+                    self._evo_ancestry[run_id] = cached_ancestry
+            view["ancestry"] = copy.deepcopy(cached_ancestry)
+            view["spent"] = spent if spent is not None else spent_by(ledger, view)
         view["active"] = self._alive(run_id)
         view["verifying"] = self._alive(run_id, verifying=True)
         view["stale"] = not view["active"] and self._stale(view)
@@ -369,17 +582,25 @@ class Service:
         view["resume_plan"] = self.resume_plan(view)
         return view
 
-    def evolver_session(self, run_id: str, generation: str, *, steps: str | None = None) -> dict[str, Any]:
-        from .evolution import fold
+    def evolver_session(self, run_id: str, generation: str, *, steps: str | None = None,
+                        stage: str | None = None) -> dict[str, Any]:
         from .evolution.process import evolver_session
 
         if not generation.isdigit():
             raise ApiError(HTTPStatus.BAD_REQUEST, "generation must be a whole number")
+        stage_num: int | None = None
+        if stage is not None and stage != "":
+            if not (stage.isascii() and stage.isdigit()):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "stage must be a whole number")
+            stage_num = int(stage)
         with Ledger(self.ledger_path) as ledger:
-            events = ledger.events(run_id)
-        if not events or events[0].kind != "evolve_started":
+            self._sync_read_model(ledger)
+        with self._cache_lock:
+            view = self._evo_views.get(run_id)
+        if view is None:
             raise ApiError(HTTPStatus.NOT_FOUND, f"no evolution run {run_id}")
-        found = evolver_session(fold(events), int(generation), steps=steps not in ("0", "false", "no"))
+        found = evolver_session(view, int(generation), steps=steps not in ("0", "false", "no"),
+                                stage=stage_num)
         if found is None:
             raise ApiError(HTTPStatus.NOT_FOUND, f"{run_id} has no finished evolver session in generation {generation}")
         return found
@@ -493,11 +714,13 @@ class Service:
         outage only once its models answer again."""
 
         from .episodes import providers
-        from .evolution import EvolveConfig, fold
+        from .evolution import EvolveConfig
         from .evolution.loop import run_models
 
         with Ledger(self.ledger_path) as ledger:
-            views = [fold(ledger.events(run_id)) for run_id in ledger.runs(first="evolve_started")]
+            self._sync_read_model(ledger)
+        with self._cache_lock:
+            views = [copy.deepcopy(self._evo_views[rid]) for rid in self._evo_order if rid in self._evo_views]
         found = []
         for view in views:
             why = self.resumable(view)
@@ -545,6 +768,7 @@ class Service:
             return
         while True:
             try:
+                self._prune_runtime_state()
                 for item in self.resume_stopped():
                     if item.get("resumed"):
                         print(f"ecogym: resumed {item['run_id']} by itself ({item['why']})", flush=True)
@@ -630,28 +854,114 @@ class Service:
             return False
         return datetime.fromisoformat(item["started_at"]) < self.started
 
-    def episodes(self, *, evolution: str | None = None, status: str | None = None,
-                 generation: str | None = None) -> list[dict[str, Any]]:
-        """Episode summaries, newest first; ``evolution`` keeps one run's episodes, ``generation`` one of its
-        generations (only those are folded: a live run's panel asks for its current generation every few seconds)."""
+    def episodes(
+        self,
+        *,
+        evolution: str | None = None,
+        status: str | None = None,
+        generation: str | None = None,
+        limit: str | None = None,
+        offset: str | None = None,
+        since_seq: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Episode summaries, newest first, served from the incremental ``last_seq`` read model.
 
-        from .episodes.history import episode_records, summary
+        Supports filtering by ``evolution``, ``generation``, ``status``, cursor ``since_seq``,
+        and pagination via ``offset`` + ``limit`` (omitted: full list, preserving existing contract).
+        """
 
         if generation is not None and not (generation.isascii() and generation.isdigit()):
             raise ApiError(HTTPStatus.BAD_REQUEST, "generation must be a whole number")
         if generation is not None and not evolution:
             raise ApiError(HTTPStatus.BAD_REQUEST, "generation needs evolution: a generation belongs to one run")
+        parsed_limit = parsed_offset = parsed_since = None
+        for label, raw in (("limit", limit), ("offset", offset), ("since_seq", since_seq)):
+            if raw is None or raw == "":
+                continue
+            if not (raw.isascii() and raw.isdigit()):
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"{label} must be a non-negative whole number")
+            val = int(raw)
+            if label == "limit":
+                parsed_limit = val
+            elif label == "offset":
+                parsed_offset = val
+            else:
+                parsed_since = val
+        gen_int = None if generation is None else int(generation)
         with Ledger(self.ledger_path) as ledger:
-            ids = None if not evolution else [
-                event.run_id for event in ledger.evolution_episode_events(
-                    (evolution,), kinds=("episode_started",),
-                    generation=None if generation is None else int(generation))]
-            items = list(reversed([summary(record) for record in episode_records(ledger, ids)]))
-        if status:
-            items = [item for item in items if item["status"] == status]
-        for item in items:
-            item["orphaned"] = self._orphaned(item)
-        return items
+            self._sync_read_model(ledger)
+        with self._cache_lock:
+            if evolution:
+                ids = list(self._ep_by_evo.get(evolution, ()))
+            else:
+                ids = list(self._ep_order)
+            raw_items: list[dict[str, Any]] = []
+            for rid in reversed(ids):
+                if parsed_since is not None and self._ep_last_seq.get(rid, 0) <= parsed_since:
+                    continue
+                item = self._ep_summaries.get(rid)
+                if item is None:
+                    continue
+                if gen_int is not None and (item.get("context") or {}).get("generation") != gen_int:
+                    continue
+                if status and item.get("status") != status:
+                    continue
+                raw_items.append(item)
+        if parsed_offset:
+            raw_items = raw_items[parsed_offset:]
+        if parsed_limit is not None:
+            raw_items = raw_items[:parsed_limit]
+        return [{**item, "orphaned": self._orphaned(item)} for item in raw_items]
+
+    def events_stream(self, *, since: str | None = None):
+        """Yield SSE frames whenever the ledger advances past ``since`` (or current ``last_seq``).
+
+        Uses the shared ``_LedgerBroadcaster`` so N open browser tabs share a single lightweight watcher
+        instead of opening N independent SQLite connections every second.
+        """
+
+        cursor: int | None = None
+        if since is not None and since != "":
+            if not (since.isascii() and since.isdigit()):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "since must be a non-negative whole number")
+            cursor = int(since)
+        with Ledger(self.ledger_path) as ledger:
+            latest = ledger.last_seq()
+            if cursor is None:
+                cursor = latest
+        yield "sync", {"seq": latest}
+        if latest > cursor:
+            with Ledger(self.ledger_path) as ledger:
+                delta = ledger.events_since(cursor)
+                latest = ledger.last_seq()
+            cursor = latest
+            runs = list(dict.fromkeys(ev.run_id for ev in delta))
+            kinds = list(dict.fromkeys(ev.kind for ev in delta))
+            yield "update", {"seq": latest, "count": len(delta), "runs": runs[:50], "kinds": kinds[:20]}
+
+        self._broadcaster.subscribe()
+        try:
+            last_ping = time.monotonic()
+            while not self._closing.is_set():
+                wait_for = max(0.2, SSE_KEEPALIVE_SECONDS - (time.monotonic() - last_ping))
+                new_seq, payload = self._broadcaster.wait_after(cursor, wait_for)
+                if new_seq > cursor:
+                    if payload is None:
+                        with Ledger(self.ledger_path) as ledger:
+                            delta = ledger.events_since(cursor)
+                            new_seq = ledger.last_seq()
+                        runs = list(dict.fromkeys(ev.run_id for ev in delta))
+                        kinds = list(dict.fromkeys(ev.kind for ev in delta))
+                        payload = {"seq": new_seq, "count": len(delta), "runs": runs[:50], "kinds": kinds[:20]}
+                    cursor = new_seq
+                    yield "update", payload
+                    last_ping = time.monotonic()
+                    continue
+                if time.monotonic() - last_ping >= SSE_KEEPALIVE_SECONDS:
+                    yield None, None  # keepalive comment
+                    last_ping = time.monotonic()
+        finally:
+            self._broadcaster.unsubscribe()
 
     def episode(self, episode_id: str) -> dict[str, Any]:
         from .episodes.history import fold_episode
@@ -924,6 +1234,7 @@ class Service:
         """
 
         self._closing.set()
+        self._broadcaster.wake()
         with self._jobs:
             stops, cancels = list(self._stops.values()), list(self._cancels.values())
             evolutions = dict(self._evolutions)
@@ -1121,6 +1432,31 @@ def _handler(service: Service) -> type[BaseHTTPRequestHandler]:
             self._send(status, json.dumps(jsonable(value), ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
 
+        def _send_sse(self, stream: Any) -> None:
+            first_event = next(stream, None)  # raises ApiError before headers if query params are invalid
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                items = [] if first_event is None else [first_event]
+                for event_name, payload in items:
+                    self._write_sse(event_name, payload)
+                for event_name, payload in stream:
+                    self._write_sse(event_name, payload)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
+        def _write_sse(self, event_name: str | None, payload: Any) -> None:
+            if event_name is None:
+                self.wfile.write(b": keepalive\n\n")
+            else:
+                text = json.dumps(jsonable(payload), ensure_ascii=False)
+                self.wfile.write(f"event: {event_name}\ndata: {text}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
         def _authorized(self) -> bool:
             given = (self.headers.get("Authorization") or "").encode("utf-8", "replace")
             return service.token is None or hmac.compare_digest(given, f"Bearer {service.token}".encode())
@@ -1160,6 +1496,8 @@ def _handler(service: Service) -> type[BaseHTTPRequestHandler]:
                     answer = getattr(service, route.handler)(
                         *args, *([body] if route.body else []),
                         **{name: (query.get(name) or [None])[0] for name in route.query})
+                    if route.sse:
+                        return self._send_sse(answer)
                     if route.html:
                         return self._send(route.status, answer.encode("utf-8"), HTML)
                     return self._json(route.status, answer)

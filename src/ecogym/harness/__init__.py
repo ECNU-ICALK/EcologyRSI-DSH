@@ -39,7 +39,9 @@ from ..kernel.config import ConfigError, Fields, load_toml
 SUFFIXES = {".md", ".py", ".toml", ".txt", ".json", ".yaml", ".yml", ".csv"}
 MAX_FILES = 300
 MAX_BYTES = 4_000_000
-MODEL = re.compile(r"^deepseek-[a-z0-9.-]{1,40}$")
+MODEL = re.compile(
+    r"^(?:deepseek-[a-z0-9.-]{1,40}|[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127})$"
+)
 EFFORTS = ("off", "low", "high", "max")
 SUMMARY_LIMIT = 2000
 
@@ -68,7 +70,7 @@ class AgentOptions:
         )
         agent.done()
         if not MODEL.match(options.model):
-            raise HarnessError(f"model {options.model!r} is not a DeepSeek model id")
+            raise HarnessError(f"model {options.model!r} must be a DeepSeek id or <provider>/<model>")
         return options
 
 
